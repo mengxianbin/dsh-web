@@ -78,8 +78,11 @@ function formatCost(cost: number): string {
 }
 
 function toneClass(percent: number): string {
-  if (percent >= 90) return styles.barLow
-  if (percent >= 70) return styles.barWarn
+  // barWarn/barLow only override `background`; the fill geometry (height:100%,
+  // radius, transition) lives on barFill, so the >= 70% rows must keep it or
+  // the empty span collapses to 0 height and the bar renders as track only.
+  if (percent >= 90) return `${styles.barFill} ${styles.barLow}`
+  if (percent >= 70) return `${styles.barFill} ${styles.barWarn}`
   return styles.barFill
 }
 

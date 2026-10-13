@@ -13,6 +13,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ComponentProps } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { UsageSectionCard, type UsageSettings } from '../src/client/UsageSectionCard.tsx'
+import styles from '../src/client/usage.module.css'
 import { type UsageStoreInstance, type UsageUiState } from '../src/client/usage-store.ts'
 import { emptyTotals, type ProviderSnapshotView, type UsageOverviewView } from '../src/core/types.ts'
 
@@ -92,4 +93,33 @@ describe('UsageSectionCard configured-provider filter', () => {
     fireEvent.click(screen.getByRole('tab', { name: '个人套餐' }))
     expect(screen.getByText('没有已配置的套餐类 provider（如 Kimi、GLM、OpenCode Go、MiniMax、Codex 订阅）')).toBeTruthy()
   })
+})
+
+describe('UsageSectionCard plan window bar fill', () => {
+  /** One configured plan provider carrying the three tone bands of window usage. */
+  const toned = [
+    provider({
+      provider: 'opencode-go', displayName: 'OpenCode Go', credential: 'api-key', planSupported: true,
+      plan: { windows: [{ key: '5h', percent: 12.5 }, { key: 'week', percent: 75 }, { key: 'month', percent: 95 }], updatedAt: 1 },
+    }),
+  ]
+
+  /** The inner fill span of one plan-window row (the span carrying the width style). */
+  function fillOf(row: Element): HTMLElement {
+    const fill = [...row.querySelectorAll('span')].find(span => (span as HTMLElement).style.width !== '')
+    if (fill === undefined) throw new Error('plan window renders no fill span')
+    return fill as HTMLElement
+  }
+
+  it.each([[12.5, ['barFill']], [75, ['barFill', 'barWarn']], [95, ['barFill', 'barLow']]] as const)(
+    'keeps the barFill geometry class at %s%% with tone classes',
+    (percent, expected) => {
+      const { container } = render(<UsageSectionCard {...cardProps(overview(toned))} />)
+      fireEvent.click(screen.getByRole('tab', { name: '个人套餐' }))
+      const rows = [...container.querySelectorAll('[data-dsh-part="plan-window"]')]
+      const row = rows.find(element => fillOf(element).style.width.startsWith(`${Math.min(100, Math.max(0, percent))}%`))
+      if (row === undefined) throw new Error(`no plan window row for ${String(percent)}%`)
+      expect(fillOf(row).className.split(' ')).toEqual(expected.map(key => styles[key]))
+    },
+  )
 })

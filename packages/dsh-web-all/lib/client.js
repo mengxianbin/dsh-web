@@ -44025,6 +44025,7 @@ window.__ModuleLoader__.load({
 			"usage.balance": "余额",
 			"usage.balance.unsupported": "暂不支持余额查询",
 			"usage.balance.noCredential": "未配置凭据",
+			"usage.balance.noneConfigured": "没有已配置的提供方",
 			"usage.oauth": "OAuth 凭据，不做余额查询",
 			"usage.plan.reset": "{date} 重置",
 			"usage.plan.noPlan": "未检测到套餐数据",
@@ -44068,6 +44069,7 @@ window.__ModuleLoader__.load({
 			"usage.balance": "Balance",
 			"usage.balance.unsupported": "Balance query not supported",
 			"usage.balance.noCredential": "No credential configured",
+			"usage.balance.noneConfigured": "No providers configured",
 			"usage.oauth": "OAuth credential, no balance query",
 			"usage.plan.reset": "resets {date}",
 			"usage.plan.noPlan": "No plan data detected",
@@ -44659,9 +44661,13 @@ window.__ModuleLoader__.load({
 			return "¥" + cost.toFixed(2);
 		}
 		function toneClass(percent) {
-			if (percent >= 90) return usage_module_css_default.barLow;
-			if (percent >= 70) return usage_module_css_default.barWarn;
+			if (percent >= 90) return `${usage_module_css_default.barFill} ${usage_module_css_default.barLow}`;
+			if (percent >= 70) return `${usage_module_css_default.barFill} ${usage_module_css_default.barWarn}`;
 			return usage_module_css_default.barFill;
+		}
+		/** A provider row backed by a configured credential (api key, env key, or OAuth grant). */
+		function isConfigured(provider) {
+			return provider.credential !== "none";
 		}
 		function TotalsRow(props) {
 			const { totals } = props;
@@ -44824,7 +44830,7 @@ window.__ModuleLoader__.load({
 			const currentProvider = snapshot.providers.find((provider) => provider.provider === current.provider);
 			const deepseekPeriod = deepseekPeriodAt(Date.now());
 			const deepseekVisible = current.provider !== void 0 && isDeepSeekProviderRoute(current.provider) || snapshot.usage.today.providers.some((row) => isDeepSeekProviderRoute(row.provider));
-			const planProviders = snapshot.providers.filter((provider) => provider.planSupported === true || provider.planSupported === void 0 && provider.plan !== void 0);
+			const planProviders = snapshot.providers.filter((provider) => isConfigured(provider) && (provider.planSupported === true || provider.planSupported === void 0 && provider.plan !== void 0));
 			return /* @__PURE__ */ (0, react_jsx_runtime.jsxs)("div", {
 				className: usage_module_css_default.section,
 				"data-dsh-plugin": "usage",
@@ -44934,19 +44940,20 @@ window.__ModuleLoader__.load({
 									children: t$2("usage.balance")
 								}),
 								(() => {
-									const rows = snapshot.providers.filter((provider) => provider.balanceSupported === true || provider.balanceSupported === void 0 && provider.supported);
+									const configured = snapshot.providers.filter(isConfigured);
+									const rows = configured.filter((provider) => provider.balanceSupported === true || provider.balanceSupported === void 0 && provider.supported);
 									if (rows.length === 0) return /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 										className: usage_module_css_default.muted,
-										children: t$2("usage.balance.unsupported")
+										children: configured.length === 0 ? t$2("usage.balance.noneConfigured") : t$2("usage.balance.unsupported")
 									});
 									return rows.map((provider) => /* @__PURE__ */ (0, react_jsx_runtime.jsx)(ProviderRow, {
 										provider,
 										current: current.provider
 									}, provider.provider));
 								})(),
-								snapshot.providers.some((provider) => provider.error !== void 0) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
+								snapshot.providers.some((provider) => isConfigured(provider) && provider.error !== void 0) && /* @__PURE__ */ (0, react_jsx_runtime.jsx)("span", {
 									className: usage_module_css_default.errorLine,
-									children: snapshot.providers.filter((provider) => provider.error !== void 0).map((provider) => `${provider.displayName}: ${t$2("usage.provider.error", { error: provider.error ?? "" })}`).join(t$2("usage.errorListSeparator"))
+									children: snapshot.providers.filter((provider) => isConfigured(provider) && provider.error !== void 0).map((provider) => `${provider.displayName}: ${t$2("usage.provider.error", { error: provider.error ?? "" })}`).join(t$2("usage.errorListSeparator"))
 								})
 							]
 						}),
