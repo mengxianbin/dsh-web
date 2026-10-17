@@ -44371,7 +44371,7 @@ window.__ModuleLoader__.load({
 						windows.push({
 							key,
 							percent: percent === void 0 ? void 0 : Math.max(0, Math.min(100, percent)),
-							resetsAt: percent === 0 ? void 0 : toIso(row.resetsAt)
+							resetsAt: toIso(row.resetsAt)
 						});
 					}
 					if (windows.length === 0) return void 0;

@@ -247,8 +247,13 @@ const OPENCODE_GO: ProviderAdapter = {
         windows.push({
           key,
           percent: percent === undefined ? undefined : Math.max(0, Math.min(100, percent)),
-          // percent 0 resetsAt is a placeholder (now + window); drop it.
-          resetsAt: percent === 0 ? undefined : toIso(row.resetsAt),
+          // resetsAt is the genuine next-reset instant even at percent 0 (the
+          // window just reset, so it reads now + window length). Consumers
+          // derive the cycle's elapsed/total days from it; dropping it blanked
+          // the day progress bar for the whole fresh cycle (verified against
+          // the live endpoint 2026-10-17: percent 0 carried a valid one-month
+          // reset instant).
+          resetsAt: toIso(row.resetsAt),
         })
       }
       if (windows.length === 0) return undefined

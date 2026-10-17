@@ -111,7 +111,7 @@ describe('glm coding plan parse', () => {
 
 describe('opencode-go plan parse', () => {
   const adapter = adapterFor('opencode-go')!
-  it('parses rolling/weekly/monthly percents and drops placeholder resets', () => {
+  it('parses rolling/weekly/monthly percents and keeps resetsAt at percent 0', () => {
     const parsed = adapter.plan?.parse(200, {
       usage: {
         rolling: { status: 'ok', percent: 19.5, resetsAt: '2026-08-29T10:00:00.000Z' },
@@ -121,7 +121,9 @@ describe('opencode-go plan parse', () => {
     })
     expect(parsed?.windows).toEqual([
       { key: '5h', percent: 19.5, resetsAt: '2026-08-29T10:00:00.000Z' },
-      { key: 'week', percent: 0, resetsAt: undefined },
+      // A fresh (0%) window still reports its genuine next reset; the day
+      // progress bar derives elapsed/total days from it, so it must survive.
+      { key: 'week', percent: 0, resetsAt: '2026-08-29T11:00:00.000Z' },
       { key: 'month', percent: 100, resetsAt: '2026-09-01T00:00:00.000Z' },
     ])
   })
