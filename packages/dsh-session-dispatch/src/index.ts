@@ -1,0 +1,53 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-api-session-controller'
+import type {} from '@deepseek-ai/dsh-commands'
+import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/dsh-workspace'
+import z from 'schemastery'
+import { mountOnce } from './mount-once.ts'
+import { makeDispatchRoutes, type DispatchSessionApi } from './host/routes.ts'
+
+export const name = 'dsh-session-dispatch'
+export const inject = ['webServer', 'sessionController', 'workspaceRegistry']
+
+/** Plugin config, validated by the same-named schemastery schema. */
+export interface Config {
+  /** Master switch for the dispatch routes (default true). */
+  enabled?: boolean
+}
+
+export const Config: z<Config> = z.object({
+  enabled: z.boolean().default(true),
+})
+
+/**
+ * Pure-REST session dispatch: `POST /api/session-dispatch` creates a Session
+ * pinned to a named Workspace through the Host's own session service and
+ * queues its first prompt, answering `{ ok: true, sessionId }`. Routes are
+ * loopback-fenced; the browser roster is untouched (host-only package).
+ */
+export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: Config): void => {
+  if (Config(config).enabled === false) return
+  ctx.effect(() => {
+    const disposers = makeDispatchRoutes({
+      // Structural view of the Host session service: the real controller
+      // brands requestId/sessionId, which the route mints as plain strings.
+      sessions: ctx.sessionController as unknown as DispatchSessionApi,
+      workspaces: ctx.workspaceRegistry,
+      // The permission pin is optional: composed only when the profile mounts
+      // the agent registry and the slash-command registry.
+      agents: ctx.get('agents'),
+      commands: ctx.get('commands'),
+    }).map((route) => ctx.webServer.register(route))
+    return () => {
+      for (const dispose of disposers) {
+        try {
+          dispose()
+        } catch {
+          // Route fiber already gone during shutdown.
+        }
+      }
+    }
+  }, 'dsh-session-dispatch: routes')
+})
