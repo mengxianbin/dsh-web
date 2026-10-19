@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
-import { makeDispatchRoutes, makeHealthRoute, parseDispatchBody, type DispatchServices } from '../src/host/routes.ts'
+import {
+  makeDispatchRoutes,
+  makeHealthRoute,
+  makeBindingsRoute,
+  parseDispatchBody,
+  type DispatchBinding,
+  type DispatchBindingStore,
+  type DispatchServices,
+} from '../src/host/routes.ts'
 
 /** Minimal req/res doubles: the routes only read method/url/headers/socket and write one JSON response. */
 function fakeReq(method: string, body: unknown, opts: { loopback?: boolean; url?: string } = {}): IncomingMessage {
@@ -80,6 +88,16 @@ describe('parseDispatchBody', () => {
   it('rejects a blank title or mode', () => {
     expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', title: ' ' })).toMatchObject({ ok: false })
     expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', mode: '' })).toMatchObject({ ok: false })
+  })
+
+  it('carries an optional taskRef through and trims it', () => {
+    const parsed = parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', taskRef: ' content/tasks/todo-series.md#L144 ' })
+    expect(parsed).toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', taskRef: 'content/tasks/todo-series.md#L144' } })
+  })
+
+  it('rejects a blank or oversized taskRef', () => {
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', taskRef: ' ' })).toMatchObject({ ok: false, error: expect.stringContaining('taskRef') })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', taskRef: 'r'.repeat(2001) })).toMatchObject({ ok: false, error: expect.stringContaining('taskRef') })
   })
 })
 
@@ -230,5 +248,155 @@ describe('health route', () => {
     const handler = makeHealthRoute().handler!
     const captured = await run(handler, fakeReq('POST', undefined, { url: '/api/session-dispatch/health' }))
     expect(captured.status).toBe(405)
+  })
+})
+
+/** In-memory binding store double: records every record() call for assertions. */
+function fakeBindings(overrides: Partial<DispatchBindingStore> = {}): DispatchBindingStore & { recorded: DispatchBinding[] } {
+  const recorded: DispatchBinding[] = []
+  return {
+    recorded,
+    async findAlive() { return undefined },
+    async record(binding) { recorded.push(binding) },
+    async list() { return recorded.map((binding) => ({ ...binding, alive: true })) },
+    ...overrides,
+  }
+}
+
+describe('dispatch route taskRef bindings', () => {
+  it('records a binding with taskRef, sessionId, workspaceId, title, and createdAt', async () => {
+    const bindings = fakeBindings()
+    const services = happyServices({ bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', {
+      workspaceId: 'ws-1',
+      prompt: 'do it',
+      title: 'Batch item',
+      taskRef: 'content/tasks/todo-series.md#L144',
+    }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+    expect(bindings.recorded).toHaveLength(1)
+    const binding = bindings.recorded[0]!
+    expect(binding.taskRef).toBe('content/tasks/todo-series.md#L144')
+    expect(binding.sessionId).toBe('session-abc')
+    expect(binding.workspaceId).toBe('ws-1')
+    expect(binding.title).toBe('Batch item')
+    expect(Number.isFinite(Date.parse(binding.createdAt))).toBe(true)
+  })
+
+  it('answers 409 with the existing sessionId when the taskRef still has a live session', async () => {
+    const existing: DispatchBinding = {
+      taskRef: 'board.md#item-1',
+      sessionId: 'session-live',
+      workspaceId: 'ws-1',
+      createdAt: '2026-10-19T00:00:00.000Z',
+    }
+    let created = false
+    const bindings = fakeBindings({ async findAlive() { return existing } })
+    const services = happyServices({
+      bindings,
+      sessions: {
+        async create() { created = true; return { sessionId: 's' } },
+        async rename() { return {} },
+        async prompt() { return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(captured.status).toBe(409)
+    expect(captured.body).toMatchObject({ ok: false, taskRef: 'board.md#item-1', sessionId: 'session-live' })
+    expect(created).toBe(false)
+    expect(bindings.recorded).toHaveLength(0)
+  })
+
+  it('re-dispatches when the previous binding is dead (findAlive answers undefined)', async () => {
+    const bindings = fakeBindings()
+    const services = happyServices({ bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const first = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(first.status).toBe(200)
+    const second = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(second.status).toBe(200)
+    expect(bindings.recorded).toHaveLength(2)
+  })
+
+  it('dispatches without taskRef exactly as before, recording nothing', async () => {
+    const bindings = fakeBindings()
+    const services = happyServices({ bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', title: 'Dispatch test' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+    expect(bindings.recorded).toHaveLength(0)
+  })
+
+  it('fails the 409 gate open when the binding store throws, still dispatching', async () => {
+    const bindings = fakeBindings({
+      async findAlive() { throw new Error('store on fire') },
+    })
+    const services = happyServices({ bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(captured.status).toBe(200)
+  })
+
+  it('still dispatches a taskRef when no binding store is composed', async () => {
+    const services = happyServices()
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+  })
+
+  it('reports a binding write failure without failing the dispatch', async () => {
+    const bindings = fakeBindings({
+      async record() { throw new Error('disk full') },
+    })
+    const services = happyServices({ bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toMatchObject({ ok: true, sessionId: 'session-abc', bindingRecorded: false })
+  })
+})
+
+describe('bindings route', () => {
+  it('serves the ledger with live aliveness, loopback-fenced and GET-only', async () => {
+    const bindings = fakeBindings({
+      async list() {
+        return [
+          { taskRef: 'a#1', sessionId: 'session-alive', workspaceId: 'ws-1', createdAt: '2026-10-19T01:00:00.000Z', alive: true },
+          { taskRef: 'a#2', sessionId: 'session-dead', workspaceId: 'ws-1', createdAt: '2026-10-19T02:00:00.000Z', alive: false },
+        ]
+      },
+    })
+    const handler = makeBindingsRoute(bindings).handler!
+    const captured = await run(handler, fakeReq('GET', undefined, { url: '/api/session-dispatch/bindings' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({
+      ok: true,
+      bindings: [
+        { taskRef: 'a#1', sessionId: 'session-alive', workspaceId: 'ws-1', createdAt: '2026-10-19T01:00:00.000Z', alive: true },
+        { taskRef: 'a#2', sessionId: 'session-dead', workspaceId: 'ws-1', createdAt: '2026-10-19T02:00:00.000Z', alive: false },
+      ],
+    })
+    const denied = await run(handler, fakeReq('GET', undefined, { url: '/api/session-dispatch/bindings', loopback: false }))
+    expect(denied.status).toBe(403)
+    const wrongMethod = await run(handler, fakeReq('POST', undefined, { url: '/api/session-dispatch/bindings' }))
+    expect(wrongMethod.status).toBe(405)
+  })
+
+  it('answers 500 when the store list fails', async () => {
+    const bindings = fakeBindings({ async list() { throw new Error('corrupt ledger') } })
+    const handler = makeBindingsRoute(bindings).handler!
+    const captured = await run(handler, fakeReq('GET', undefined, { url: '/api/session-dispatch/bindings' }))
+    expect(captured.status).toBe(500)
+    expect(captured.body).toMatchObject({ ok: false })
+  })
+
+  it('is registered by makeDispatchRoutes only when a store is composed', () => {
+    expect(makeDispatchRoutes(happyServices())).toHaveLength(2)
+    expect(makeDispatchRoutes(happyServices({ bindings: fakeBindings() }))).toHaveLength(3)
   })
 })

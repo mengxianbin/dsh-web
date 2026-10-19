@@ -6,6 +6,8 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-workspace'
 import z from 'schemastery'
 import { mountOnce } from './mount-once.ts'
+import { resolveDshHome } from './dsh-home.ts'
+import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { makeDispatchRoutes, type DispatchSessionApi } from './host/routes.ts'
 
 export const name = 'dsh-session-dispatch'
@@ -24,12 +26,18 @@ export const Config: z<Config> = z.object({
 /**
  * Pure-REST session dispatch: `POST /api/session-dispatch` creates a Session
  * pinned to a named Workspace through the Host's own session service and
- * queues its first prompt, answering `{ ok: true, sessionId }`. Routes are
- * loopback-fenced; the browser roster is untouched (host-only package).
+ * queues its first prompt, answering `{ ok: true, sessionId }`. A dispatch
+ * that carries an opaque `taskRef` additionally records a task-to-session
+ * binding in the quick ledger (`$DSH_HOME/dispatch-bindings.json`) and is
+ * refused with 409 while that taskRef still has a live session;
+ * `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
+ * Routes are loopback-fenced; the browser roster is untouched (host-only
+ * package).
  */
 export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: Config): void => {
   if (Config(config).enabled === false) return
   ctx.effect(() => {
+    const store = new FileBindingStore(defaultStorePaths(resolveDshHome()))
     const disposers = makeDispatchRoutes({
       // Structural view of the Host session service: the real controller
       // brands requestId/sessionId, which the route mints as plain strings.
@@ -39,6 +47,8 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
       // the agent registry and the slash-command registry.
       agents: ctx.get('agents'),
       commands: ctx.get('commands'),
+      // The quick ledger: taskRef bindings + the 409 dedupe gate.
+      bindings: store,
     }).map((route) => ctx.webServer.register(route))
     return () => {
       for (const dispose of disposers) {

@@ -27,6 +27,35 @@ export interface DispatchRequest {
   readonly title?: string
   readonly mode?: string
   readonly permission?: string
+  readonly taskRef?: string
+}
+
+/**
+ * One task-to-session binding in the quick ledger. `taskRef` is an opaque
+ * caller-chosen reference (recommended shape `<board path>#<item anchor>`),
+ * `createdAt` an ISO-8601 timestamp minted at record time.
+ */
+export interface DispatchBinding {
+  readonly taskRef: string
+  readonly sessionId: string
+  readonly workspaceId: string
+  readonly title?: string
+  readonly createdAt: string
+}
+
+/** One binding as served by GET /api/session-dispatch/bindings, with live aliveness. */
+export interface DispatchBindingView extends DispatchBinding {
+  readonly alive: boolean
+}
+
+/** Quick-ledger surface consumed by the dispatch and bindings routes. */
+export interface DispatchBindingStore {
+  /** The newest still-alive binding for a taskRef, or undefined (dead bindings do not gate). */
+  findAlive(taskRef: string): Promise<DispatchBinding | undefined>
+  /** Durably append one binding (atomic temp-file + rename). */
+  record(binding: DispatchBinding): Promise<void>
+  /** All bindings ever recorded, each annotated with live aliveness. */
+  list(): Promise<DispatchBindingView[]>
 }
 
 /**
@@ -63,6 +92,8 @@ export interface DispatchServices {
   readonly workspaces: DispatchWorkspaceRegistry
   readonly agents?: DispatchAgentRegistry
   readonly commands?: DispatchCommandExecutor
+  /** Quick-ledger binding store; when absent, taskRef dispatches record nothing and never 409. */
+  readonly bindings?: DispatchBindingStore
 }
 
 /** Body-parse verdict. */
@@ -79,7 +110,7 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
     return { ok: false, error: 'body must be a JSON object' }
   }
   const record = body as Record<string, unknown>
-  const { workspaceId, prompt, title, mode, permission } = record
+  const { workspaceId, prompt, title, mode, permission, taskRef } = record
   if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
     return { ok: false, error: 'workspaceId must be a non-empty string' }
   }
@@ -100,6 +131,11 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       return { ok: false, error: `permission must be one of ${DISPATCH_PERMISSIONS.join(' | ')}` }
     }
   }
+  if (taskRef !== undefined) {
+    if (typeof taskRef !== 'string' || taskRef.trim() === '' || taskRef.length > 2000) {
+      return { ok: false, error: 'taskRef must be a non-empty string of at most 2000 characters' }
+    }
+  }
   return {
     ok: true,
     value: {
@@ -108,6 +144,7 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       ...(title === undefined ? {} : { title: title.trim() }),
       ...(mode === undefined ? {} : { mode: mode.trim() }),
       ...(permission === undefined ? {} : { permission }),
+      ...(taskRef === undefined ? {} : { taskRef: taskRef.trim() }),
     },
   }
 }
@@ -156,10 +193,30 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, 400, { ok: false, error: parsed.error })
         return
       }
-      const { workspaceId, prompt, title, mode, permission } = parsed.value
+      const { workspaceId, prompt, title, mode, permission, taskRef } = parsed.value
       if (services.workspaces.get(workspaceId) === undefined) {
         writeJson(res, 404, { ok: false, error: `workspace not found: ${workspaceId}` })
         return
+      }
+      if (taskRef !== undefined && services.bindings !== undefined) {
+        let existing: Awaited<ReturnType<DispatchBindingStore['findAlive']>>
+        try {
+          existing = await services.bindings.findAlive(taskRef)
+        } catch (error) {
+          // The ledger is an occupancy sensor, not an authority: a store
+          // failure must not wedge dispatch, so the gate fails open.
+          existing = undefined
+          void error
+        }
+        if (existing !== undefined) {
+          writeJson(res, 409, {
+            ok: false,
+            error: `taskRef already has a live session: ${existing.sessionId}`,
+            taskRef,
+            sessionId: existing.sessionId,
+          })
+          return
+        }
       }
       const signal = new AbortController().signal
       let sessionId: string
@@ -197,6 +254,22 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
         return
       }
+      if (taskRef !== undefined && services.bindings !== undefined) {
+        try {
+          await services.bindings.record({
+            taskRef,
+            sessionId,
+            workspaceId,
+            ...(title === undefined ? {} : { title }),
+            createdAt: new Date().toISOString(),
+          })
+        } catch (error) {
+          // The session is live and prompting; a ledger write failure is
+          // reported but does not turn a successful dispatch into a 5xx.
+          writeJson(res, 200, { ok: true, sessionId, bindingRecorded: false, bindingError: errorDetail(error) }, { 'cache-control': 'no-store' })
+          return
+        }
+      }
       writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
     },
   }
@@ -218,7 +291,30 @@ export function makeHealthRoute(): WebRoute {
   }
 }
 
-/** All dispatch routes: the POST endpoint plus its liveness probe. */
+/** GET /api/session-dispatch/bindings — the quick ledger: every binding with live aliveness. */
+export function makeBindingsRoute(bindings: DispatchBindingStore): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${DISPATCH_API_PREFIX}/bindings`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed: use GET' })
+        return
+      }
+      try {
+        const list = await bindings.list()
+        writeJson(res, 200, { ok: true, bindings: list }, { 'cache-control': 'no-store' })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: errorDetail(error) })
+      }
+    },
+  }
+}
+
+/** All dispatch routes: the POST endpoint, its liveness probe, and the bindings ledger. */
 export function makeDispatchRoutes(services: DispatchServices): WebRoute[] {
-  return [makeDispatchRoute(services), makeHealthRoute()]
+  const routes = [makeDispatchRoute(services), makeHealthRoute()]
+  if (services.bindings !== undefined) routes.push(makeBindingsRoute(services.bindings))
+  return routes
 }
