@@ -24,6 +24,67 @@ describe('ledger serialization', () => {
   })
 })
 
+
+describe('ledger source whitelist', () => {
+  it('operator keeps a backfilled observed entry through a reload', () => {
+    // Given a ledger document holding an entry backfilled at observation time
+    const doc = { version: 1, entries: { 'session-obs': { archivedAt: 4242, source: 'observed' } } }
+
+    // When that document is deserialized
+    const restored = deserializeLedger(JSON.stringify(doc))
+
+    // Then the observed source survives instead of being dropped to a fresh document
+    expect(restored.entries).toEqual({ 'session-obs': { archivedAt: 4242, source: 'observed' } })
+  })
+
+  it('operator keeps pre-existing manual and auto documents reading unchanged', () => {
+    // Given a ledger written before the observed source existed
+    const legacy = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-m': { archivedAt: 100, source: 'manual' },
+        'session-a': { archivedAt: 200, source: 'auto' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(legacy)
+
+    // Then both legacy sources pass the widened whitelist untouched
+    expect(restored.entries).toEqual({
+      'session-m': { archivedAt: 100, source: 'manual' },
+      'session-a': { archivedAt: 200, source: 'auto' },
+    })
+  })
+
+  it('operator gets an unknown source dropped instead of trusted', () => {
+    // Given a document whose entry carries a source this plugin never writes
+    const raw = JSON.stringify({ version: 1, entries: { 'session-x': { archivedAt: 7, source: 'imported' } } })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the foreign entry is discarded, exactly as before the widening
+    expect(restored.entries).toEqual({})
+  })
+
+  it('operator gets every valid entry when one foreign entry shares the document', () => {
+    // Given a document mixing an observed entry with an unsupported source
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-obs': { archivedAt: 11, source: 'observed' },
+        'session-bad': { archivedAt: 12, source: 'imported' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then only the whitelisted entry is kept
+    expect(Object.keys(restored.entries)).toEqual(['session-obs'])
+  })
+})
 describe('capEntries', () => {
   it('caps the failure list', () => {
     const entries = Array.from({ length: 80 }, (_, index) => ({ id: `session-${index}`, status: 'failed' as const, reason: 'error' as const }))

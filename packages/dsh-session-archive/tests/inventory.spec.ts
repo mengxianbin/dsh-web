@@ -278,3 +278,53 @@ describe('buildInventory', () => {
     expect((ctx.get('workspaceRegistry') as FakeHost['registry']).archivedSessionIds).toEqual([])
   })
 })
+
+describe('archivedAtSource', () => {
+  it('operator sees the ledger source of every archived row that has an archive time', async () => {
+    // Given three archived sessions, one per ledger source, and one archived with no entry at all
+    const host = createFakeHost({ archivedSessionIds: ['session-manual', 'session-auto', 'session-observed', 'session-unknown'] })
+    host.ledger.entries['session-manual'] = { archivedAt: 100, source: 'manual' }
+    host.ledger.entries['session-auto'] = { archivedAt: 200, source: 'auto' }
+    host.ledger.entries['session-observed'] = { archivedAt: 300, source: 'observed' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const byId = new Map(built.rows.map((row) => [row.id, row]))
+
+    // Then each row carries the source its own ledger entry recorded
+    expect(byId.get('session-manual')?.archivedAtSource).toBe('manual')
+    expect(byId.get('session-auto')?.archivedAtSource).toBe('auto')
+    expect(byId.get('session-observed')?.archivedAtSource).toBe('observed')
+    // And the backfilled rows still surface their time, so the marker has a time to qualify
+    expect(byId.get('session-observed')?.archivedAt).toBe(300)
+  })
+
+  it('operator sees no source on a row whose archive time is unknown', async () => {
+    // Given an archived session with no ledger entry (archived from the official sidebar)
+    const host = createFakeHost({ archivedSessionIds: ['session-unknown'] })
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-unknown')
+
+    // Then the row reports no archive time and no source to attribute it to
+    expect(row?.archivedAt).toBeUndefined()
+    expect(row && 'archivedAtSource' in row).toBe(false)
+    expect(row?.issues).toContain('no-archive-time')
+  })
+
+  it('operator sees no source on an unarchived row even when a ledger entry lingers', async () => {
+    // Given a stale ledger entry for a session that is no longer archived
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-live', updatedAt: 5 }] })
+    host.ledger.entries['session-live'] = { archivedAt: 400, source: 'observed' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-live')
+
+    // Then the unarchived row exposes neither an archive time nor a source
+    expect(row?.archived).toBe(false)
+    expect(row?.archivedAt).toBeUndefined()
+    expect(row && 'archivedAtSource' in row).toBe(false)
+  })
+})

@@ -14,7 +14,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { Config, apply } from '../src/index.ts'
-import { readArchiveConfig, type SessionArchiveConfigFields } from '../src/core/config.ts'
+import { DEFAULT_AUTO_CONFIG, readArchiveConfig, resolveAutoConfig, type SessionArchiveConfigFields } from '../src/core/config.ts'
 
 /** The auto-maintenance defaults the shipped settings page documents. */
 const DOCUMENTED_DEFAULTS = {
@@ -23,6 +23,7 @@ const DOCUMENTED_DEFAULTS = {
   autoArchiveDays: 7,
   autoDeleteEnabled: false,
   autoDeleteDays: 7,
+  recordManualArchive: false,
   checkIntervalMin: 60,
 }
 
@@ -169,5 +170,37 @@ describe('host activation settings', () => {
     expect(routePaths(mount)).toEqual([])
 
     mount.dispose()
+  })
+})
+
+describe('recordManualArchive setting', () => {
+  it('admin sees the backfill switch served off by default', () => {
+    // Given the plugin Config schema the Host serves as this entry's settings page
+    const dict = formFields()
+
+    // When the raw activation values are read and resolved
+    const effective = readArchiveConfig(Config({}) as SessionArchiveConfigFields)
+    const resolved = resolveAutoConfig(effective)
+
+    // Then the switch exists, is live-editable, and defaults to off
+    expect(dict['recordManualArchive']?.meta?.volatile).toBe(true)
+    expect(resolved.recordManualArchive).toBe(false)
+    expect(DEFAULT_AUTO_CONFIG.recordManualArchive).toBe(false)
+  })
+
+  it('admin switching the backfill on reaches the resolved policy unchanged', () => {
+    // Given an activation whose committed settings turn the backfill on
+    const field = volatileField(false)
+    const before = resolveAutoConfig(readArchiveConfig({ recordManualArchive: field } as SessionArchiveConfigFields))
+
+    // When the Host commits the user's write to `recordManualArchive: true`
+    field.set(true)
+    const after = resolveAutoConfig(readArchiveConfig({ recordManualArchive: field } as SessionArchiveConfigFields))
+
+    // Then the switch is off while unwritten and follows the committed value
+    expect(before.recordManualArchive).toBe(false)
+    expect(after.recordManualArchive).toBe(true)
+    // And the write leaves every other automation field at its default
+    expect(after).toEqual({ ...DEFAULT_AUTO_CONFIG, recordManualArchive: true })
   })
 })

@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ArchiveIssueCode, ArchiveSessionRow, WorkspaceView } from '../core/types.ts'
-import type { LedgerDocument } from './ledger.ts'
+import type { LedgerDocument, LedgerSource } from './ledger.ts'
 import { canonicalSessionId, indexSessionDirs, type SessionDirIndex } from './session-files.ts'
 
 /** Minimal duck-typed face of the host SessionController feed. */
@@ -176,7 +176,7 @@ export interface BuiltInventory {
 }
 
 /** Ledger entry for a session under either id spelling; canonical wins. */
-export function ledgerEntryFor(ledger: LedgerDocument, canonicalId: string, nativeId?: string): { archivedAt: number; source: 'manual' | 'auto' } | undefined {
+export function ledgerEntryFor(ledger: LedgerDocument, canonicalId: string, nativeId?: string): { archivedAt: number; source: LedgerSource } | undefined {
   return ledger.entries[canonicalId] ?? (nativeId !== undefined && nativeId !== canonicalId ? ledger.entries[nativeId] : undefined)
 }
 
@@ -327,6 +327,9 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
     const archived = archivedSet.has(draft.id)
     const ledgerEntry = archived ? ledgerEntryFor(sources.ledger, draft.id, nativeIds[draft.id]) : undefined
     const archivedAt = ledgerEntry?.archivedAt
+    // The source only travels with a real archive time: a row without one has
+    // nothing to attribute, and the UI keys the "backfilled" marker off it.
+    const archivedAtSource = ledgerEntry?.source
     if (archived && archivedAt === undefined) issues.push('no-archive-time')
     if (draft.fromFeed === false) issues.push('unreadable')
     if (draft.fromFeed === false && draft.hasDir === false) issues.push('no-data')
@@ -340,6 +343,7 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
       workspaceIds: workspaceOf.get(draft.id) ?? [],
       archived,
       ...(archivedAt !== undefined ? { archivedAt } : {}),
+      ...(archivedAt !== undefined && archivedAtSource !== undefined ? { archivedAtSource } : {}),
       ...(draft.lastActivityAt !== undefined ? { lastActivityAt: draft.lastActivityAt } : {}),
       lastActivityReliable: draft.lastActivityReliable,
       ...(sizeBytes !== undefined ? { sizeBytes } : {}),

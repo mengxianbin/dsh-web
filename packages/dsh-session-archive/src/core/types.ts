@@ -59,6 +59,13 @@ export interface ArchiveSessionRow {
   readonly archived: boolean
   /** Present only when a reliable archive time exists (this plugin recorded it). */
   readonly archivedAt?: number
+  /**
+   * Where {@link archivedAt} came from; present only together with it.
+   * `observed` marks a backfilled entry: the session was already archived when
+   * this plugin first saw it, so the time is the observation moment, not the
+   * real archive moment.
+   */
+  readonly archivedAtSource?: 'manual' | 'auto' | 'observed'
   /** Last activity from the authoritative session feed; absent when unknown. */
   readonly lastActivityAt?: number
   /** False when last activity could not be determined reliably. */
