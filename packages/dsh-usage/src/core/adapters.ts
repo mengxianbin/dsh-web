@@ -98,6 +98,12 @@ function usedPercent(used: unknown, limit: unknown): number | undefined {
   return Math.max(0, Math.min(100, (usedNum / limitNum) * 100))
 }
 
+/** Console meter micro-cents (1e8 = one currency unit) to major units, else undefined. */
+function microCents(value: unknown): number | undefined {
+  const num = toNum(value)
+  return num === undefined ? undefined : num / 1e8
+}
+
 function bearer(apiKey: string): Record<string, string> {
   return { authorization: `Bearer ${apiKey}` }
 }
@@ -227,33 +233,49 @@ function glmPlan(host: string, ids: readonly string[]): ProviderAdapter {
   }
 }
 
-/** OpenCode Go quota: percent-only rolling/weekly/monthly windows. */
+/**
+ * OpenCode Go quota: absolute water-line meters from the console status
+ * endpoint (2026-10-24 switch; the old percent-only `/zen/go/v1/usage` read
+ * carried no absolute amounts, so a consumed/limit pair could never render
+ * or feed a threshold trigger). `limitMicroCents`/`usedMicroCents` become
+ * dollars once divided by 1e8; percent derives from that same pair, so the
+ * percentage and the absolute reading can never disagree. Each meter keeps
+ * its genuine `resetsAt`, so consumers deriving elapsed/total days from it
+ * continue to work; the keep-at-0 semantics recorded in agent note
+ * `2026-10-17-usage-opencode-zero-percent-keeps-resets-at` carries over —
+ * a used-0 meter still reports its real next reset. Verified live against
+ * `https://opencode.ai/console/api/go/status` with the resolved bearer key
+ * on 2026-10-24 (HTTP 200, no session cookie or org header required).
+ */
 const OPENCODE_GO: ProviderAdapter = {
   ids: ['opencode-go'],
   displayName: 'OpenCode Go',
   plan: {
-    build: ({ apiKey }) => ({ url: 'https://opencode.ai/zen/go/v1/usage', headers: bearer(apiKey) }),
+    build: ({ apiKey }) => ({ url: 'https://opencode.ai/console/api/go/status', headers: bearer(apiKey) }),
     parse: (status, body) => {
       if (status !== 200 || typeof body !== 'object' || body === null) return undefined
-      const usage = (body as Record<string, unknown>).usage
-      if (typeof usage !== 'object' || usage === null) return undefined
+      const access = (body as Record<string, unknown>).access
+      if (typeof access !== 'object' || access === null) return undefined
+      const meters = (access as Record<string, unknown>).meters
+      if (typeof meters !== 'object' || meters === null) return undefined
       const windows: PlanWindowView[] = []
-      const keys: Array<[string, string]> = [['rolling', '5h'], ['weekly', 'week'], ['monthly', 'month']]
+      const keys: Array<[string, string]> = [['fiveHour', '5h'], ['week', 'week'], ['month', 'month']]
       for (const [field, key] of keys) {
-        const entry = (usage as Record<string, unknown>)[field]
+        const entry = (meters as Record<string, unknown>)[field]
         if (typeof entry !== 'object' || entry === null) continue
         const row = entry as Record<string, unknown>
-        const percent = toNum(row.percent)
+        const limit = microCents(row.limitMicroCents)
+        const used = microCents(row.usedMicroCents)
         windows.push({
           key,
-          percent: percent === undefined ? undefined : Math.max(0, Math.min(100, percent)),
-          // resetsAt is the genuine next-reset instant even at percent 0 (the
-          // window just reset, so it reads now + window length). Consumers
-          // derive the cycle's elapsed/total days from it; dropping it blanked
-          // the day progress bar for the whole fresh cycle (verified against
-          // the live endpoint 2026-10-17: percent 0 carried a valid one-month
-          // reset instant).
+          percent: usedPercent(used, limit),
+          // resetsAt is the meter's genuine next-reset instant even at used 0
+          // (the window just reset); consumers derive the cycle's
+          // elapsed/total days from it, so it must survive unconditionally.
           resetsAt: toIso(row.resetsAt),
+          ...(used === undefined ? {} : { used }),
+          ...(limit === undefined ? {} : { limit }),
+          currency: 'USD',
         })
       }
       if (windows.length === 0) return undefined

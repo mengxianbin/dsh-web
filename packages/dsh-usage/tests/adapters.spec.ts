@@ -111,21 +111,71 @@ describe('glm coding plan parse', () => {
 
 describe('opencode-go plan parse', () => {
   const adapter = adapterFor('opencode-go')!
-  it('parses rolling/weekly/monthly percents and keeps resetsAt at percent 0', () => {
+
+  it('probes the console go/status endpoint with the resolved bearer', () => {
+    expect(adapter.plan?.build({ apiKey: 'tok' })).toEqual({
+      url: 'https://opencode.ai/console/api/go/status',
+      headers: { authorization: 'Bearer tok' },
+    })
+  })
+
+  it('parses the three meters into percent plus absolute water-line pairs', () => {
     const parsed = adapter.plan?.parse(200, {
-      usage: {
-        rolling: { status: 'ok', percent: 19.5, resetsAt: '2026-08-29T10:00:00.000Z' },
-        weekly: { status: 'ok', percent: 0, resetsAt: '2026-08-29T11:00:00.000Z' },
-        monthly: { status: 'rate-limited', percent: 100, resetsAt: '2026-09-01T00:00:00.000Z' },
+      access: {
+        meters: {
+          fiveHour: {
+            resetsAt: '2026-10-24T09:19:36.000Z',
+            limitMicroCents: '1200000000',
+            usedMicroCents: '105692364',
+          },
+          week: {
+            resetsAt: '2026-10-26T00:00:00.000Z',
+            limitMicroCents: '3000000000',
+            usedMicroCents: '2629702489',
+          },
+          month: {
+            resetsAt: '2026-11-17T10:29:32.000Z',
+            limitMicroCents: '6000000000',
+            usedMicroCents: '0',
+          },
+        },
       },
     })
-    expect(parsed?.windows).toEqual([
-      { key: '5h', percent: 19.5, resetsAt: '2026-08-29T10:00:00.000Z' },
-      // A fresh (0%) window still reports its genuine next reset; the day
-      // progress bar derives elapsed/total days from it, so it must survive.
-      { key: 'week', percent: 0, resetsAt: '2026-08-29T11:00:00.000Z' },
-      { key: 'month', percent: 100, resetsAt: '2026-09-01T00:00:00.000Z' },
-    ])
+    expect(parsed?.windows).toHaveLength(3)
+    const [fiveHour, week, month] = parsed!.windows
+    // microCents / 1e8 = dollars; percent derives from the same pair.
+    expect(fiveHour).toMatchObject({
+      key: '5h',
+      resetsAt: '2026-10-24T09:19:36.000Z',
+      used: 1.05692364,
+      limit: 12,
+      currency: 'USD',
+    })
+    expect(fiveHour.percent).toBeCloseTo(8.807697, 5)
+    expect(week).toMatchObject({
+      key: 'week',
+      resetsAt: '2026-10-26T00:00:00.000Z',
+      used: 26.29702489,
+      limit: 30,
+      currency: 'USD',
+    })
+    expect(week.percent).toBeCloseTo(87.6567496, 4)
+    // A freshly reset meter (used 0) still reports its genuine next reset
+    // with percent 0 — the keep-at-0 semantics must survive the source swap.
+    expect(month).toMatchObject({
+      key: 'month',
+      percent: 0,
+      used: 0,
+      limit: 60,
+      resetsAt: '2026-11-17T10:29:32.000Z',
+      currency: 'USD',
+    })
+  })
+
+  it('returns nothing without a meters document or on probe failure', () => {
+    expect(adapter.plan?.parse(200, { access: {} })).toBeUndefined()
+    expect(adapter.plan?.parse(200, { access: { meters: {} } })).toBeUndefined()
+    expect(adapter.plan?.parse(503, {})).toBeUndefined()
   })
 })
 
