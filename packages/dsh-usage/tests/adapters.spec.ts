@@ -3,7 +3,7 @@ import { adapterFor, isDeepSeekProviderRoute, providerErrorMessage, PROVIDER_ADA
 
 describe('adapterFor', () => {
   it('serves every documented route id', () => {
-    for (const id of ['deepseek', 'deepseek-official', 'moonshotai-cn', 'moonshotai', 'kimi-coding', 'zai-coding-cn', 'zai-coding', 'opencode-go', 'minimax-cn', 'minimax', 'openai-codex', 'openrouter', 'siliconflow', 'siliconflow-intl', 'zenmux']) {
+    for (const id of ['deepseek', 'deepseek-official', 'moonshotai-cn', 'moonshotai', 'kimi-coding', 'zai-coding-cn', 'zai-coding', 'opencode-go', 'minimax-cn', 'minimax', 'openai-codex', 'openrouter', 'siliconflow', 'siliconflow-intl', 'zenmux', 'mimo']) {
       expect(adapterFor(id), id).toBeDefined()
     }
     expect(adapterFor('unknown-provider')).toBeUndefined()
@@ -49,6 +49,33 @@ describe('deepseek balance parse', () => {
     expect(adapter.balance?.parse(401, {})).toBeUndefined()
     expect(adapter.balance?.parse(200, { balance_infos: [] })).toBeUndefined()
     expect(adapter.balance?.parse(200, null)).toBeUndefined()
+  })
+})
+
+describe('mimo balance parse', () => {
+  const adapter = adapterFor('mimo')!
+  it('builds a cookie probe against the platform endpoint and unwraps the live envelope', () => {
+    // The credential handed to build is the platform SSO session cookie
+    // (MIMO_PLATFORM_COOKIE), not the sk- chat key — mimo exposes no
+    // api-key balance route (30 conventional paths 404, 2026-10-25).
+    expect(adapter.balance?.build({ apiKey: 'sid=abc; token=xyz' })).toEqual({
+      url: 'https://platform.xiaomimimo.com/api/v1/balance',
+      headers: { cookie: 'sid=abc; token=xyz' },
+    })
+    // Envelope straight off the 2026-10-25 live capture.
+    expect(adapter.balance?.parse(200, {
+      code: 0,
+      message: '',
+      data: { balance: '6.16', frozenBalance: '0.00', currency: 'CNY', giftBalance: '0.00', cashBalance: '6.16' },
+    })).toEqual({ currency: 'CNY', totalBalance: '6.16' })
+  })
+
+  it('rejects error statuses, failed envelopes and malformed bodies', () => {
+    expect(adapter.balance?.parse(401, {})).toBeUndefined()
+    expect(adapter.balance?.parse(200, null)).toBeUndefined()
+    expect(adapter.balance?.parse(200, { code: 1, message: 'boom', data: { balance: '1.00', currency: 'CNY' } })).toBeUndefined()
+    expect(adapter.balance?.parse(200, { code: 0, data: null })).toBeUndefined()
+    expect(adapter.balance?.parse(200, { code: 0, data: { currency: 'CNY' } })).toBeUndefined()
   })
 })
 

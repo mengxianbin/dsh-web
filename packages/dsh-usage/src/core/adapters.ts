@@ -426,6 +426,41 @@ function codexWindowKey(seconds: number | undefined): string {
 }
 
 /**
+ * MiMo official pay-as-you-go balance — the one provider whose balance rides
+ * a platform SSO session cookie rather than an API key (2026-10-25 live
+ * capture: `GET platform.xiaomimimo.com/api/v1/balance` →
+ * `{code:0, data:{balance:"6.16", currency:"CNY", …}}`). The api-key host
+ * has no balance routes: 30 conventional paths (DeepSeek `/user/balance`,
+ * Moonshot, OpenRouter, Zenmux, …) all 404 at the edge while `/v1/models`
+ * answers 200 on the same key — the key itself is fine, the routes simply do
+ * not exist. The probe credential is therefore the platform session cookie,
+ * delivered by the host's resolveCredential override (`MIMO_PLATFORM_COOKIE`)
+ * and never the sk- chat key; an expired cookie reads as a 401 and the fact
+ * degrades to absent.
+ */
+const MIMO: ProviderAdapter = {
+  ids: ['mimo'],
+  displayName: 'MiMo',
+  balance: {
+    build: ({ apiKey }) => ({
+      url: 'https://platform.xiaomimimo.com/api/v1/balance',
+      headers: { cookie: apiKey },
+    }),
+    parse: (status, body) => {
+      if (status !== 200 || typeof body !== 'object' || body === null) return undefined
+      const root = body as Record<string, unknown>
+      if (root.code !== 0) return undefined
+      const data = root.data
+      if (typeof data !== 'object' || data === null) return undefined
+      const currency = str((data as Record<string, unknown>).currency)
+      const total = str((data as Record<string, unknown>).balance)
+      if (currency === undefined || total === undefined) return undefined
+      return { currency, totalBalance: total }
+    },
+  },
+}
+
+/**
  * The adapter registry, in no particular order. Route keys come from the
  * pi-ai provider catalog plus the routes this deployment observed in user
  * configuration (`zenmux`).
@@ -445,6 +480,7 @@ export const PROVIDER_ADAPTERS: readonly ProviderAdapter[] = [
   siliconFlow('api.siliconflow.cn', ['siliconflow', 'siliconflow-cn'], 'CNY'),
   siliconFlow('api.siliconflow.com', ['siliconflow-intl'], 'USD'),
   ZENMUX,
+  MIMO,
 ]
 
 /** Find the adapter serving a provider route key, if any. */
