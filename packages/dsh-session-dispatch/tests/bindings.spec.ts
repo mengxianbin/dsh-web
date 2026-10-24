@@ -149,6 +149,18 @@ describe('FileBindingStore', () => {
     expect(await store.list()).toEqual([])
     expect(await store.findAlive('any')).toBeUndefined()
   })
+
+  it('keeps every row when appends race: concurrent record calls serialize in-process', async () => {
+    const dir = await tempDir()
+    const paths = defaultStorePaths(dir)
+    const store = new FileBindingStore(paths)
+    await Promise.all(['session-1', 'session-2', 'session-3'].map((sessionId, index) =>
+      store.record({ taskRef: `board.md#item-${index + 1}`, sessionId, workspaceId: 'ws-1', createdAt: '2026-10-24T00:00:00.000Z' }),
+    ))
+    const onDisk = JSON.parse(await readFile(paths.bindingsPath, 'utf8'))
+    expect(onDisk.bindings).toHaveLength(3)
+    expect(onDisk.bindings.map((binding: { sessionId: string }) => binding.sessionId)).toEqual(['session-1', 'session-2', 'session-3'])
+  })
 })
 
 describe('writeJsonAtomic', () => {

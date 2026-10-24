@@ -133,6 +133,16 @@ export interface FileBindingStoreOptions {
 export class FileBindingStore implements DispatchBindingStore {
   private readonly bindingsPath: string
   private readonly workspaceStorePath: string
+  /**
+   * In-process append FIFO. `record` is a read-modify-write cycle (read the
+   * document, push one row, rewrite the file): two appends racing from this
+   * process would both read the old document and the later rename would drop
+   * the earlier row. Queueing appends keeps every row. Scope is process-local
+   * by design — a single Host process owns this store, so no file lock or
+   * cross-process protocol is involved; a rejected append does not poison
+   * the chain.
+   */
+  private appendTail: Promise<void> = Promise.resolve()
 
   constructor(options: FileBindingStoreOptions) {
     this.bindingsPath = options.bindingsPath
@@ -177,7 +187,13 @@ export class FileBindingStore implements DispatchBindingStore {
     return undefined
   }
 
-  async record(binding: DispatchBinding): Promise<void> {
+  record(binding: DispatchBinding): Promise<void> {
+    const appended = this.appendTail.then(() => this.append(binding))
+    this.appendTail = appended.then(() => undefined, () => undefined)
+    return appended
+  }
+
+  private async append(binding: DispatchBinding): Promise<void> {
     const doc = await this.readDocument()
     doc.bindings.push(binding)
     await writeJsonAtomic(this.bindingsPath, doc)

@@ -52,10 +52,13 @@ Body (JSON, at most 1 MiB):
 Responses: `200 { ok, sessionId }`, `400` invalid body or rejected Host
 command, `403` non-loopback, `404` unknown workspace, `405` wrong method,
 `409 { ok, taskRef, sessionId }` when the taskRef still has a live session
-(dead bindings — archived or removed sessions — do not gate). Dispatch
-without `taskRef` behaves exactly as before. A failed binding write answers
-`200` with `bindingRecorded: false`: the session is live, so the dispatch
-itself did not fail.
+(dead bindings — archived or removed sessions — do not gate). The
+gate-to-append section runs one request at a time per taskRef in-process, so
+of two concurrent dispatches of one taskRef exactly one answers `200` and the
+other answers `409`; racing ledger appends queue behind each other without
+dropping a row. Dispatch without `taskRef` behaves exactly as before. A
+failed binding write answers `200` with `bindingRecorded: false`: the session
+is live, so the dispatch itself did not fail.
 
 ### `GET /api/session-dispatch/health`
 

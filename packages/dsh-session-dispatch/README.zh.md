@@ -47,9 +47,11 @@ socket 一律 `403`。
 
 响应：`200 { ok, sessionId }`、`400` 请求体非法或 Host 命令被拒、`403` 非回
 环、`404` 工作区不存在、`405` 方法错误、`409 { ok, taskRef, sessionId }`
-（该 taskRef 仍有活会话；死绑定——会话已归档或已删除——不拦截）。不带
-`taskRef` 的派发行为与此前完全一致。绑定写入失败时响应 `200` 但附
-`bindingRecorded: false`：会话已活，派发本身并未失败。
+（该 taskRef 仍有活会话；死绑定——会话已归档或已删除——不拦截）。门到落账
+整段按 taskRef 在进程内逐个执行：同一 taskRef 并发双派恰一 `200` 一 `409`；
+快账并发追加相互排队、不丢行。不带 `taskRef` 的派发行为与此前完全一致。
+绑定写入失败时响应 `200` 但附 `bindingRecorded: false`：会话已活，派发本身
+并未失败。
 
 ### `GET /api/session-dispatch/health`
 

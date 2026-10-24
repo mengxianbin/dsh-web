@@ -170,8 +170,32 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300)
 }
 
+/**
+ * In-process FIFO keyed by taskRef. The 409 gate is check-then-act: its window
+ * spans findAlive through session create and the ledger append, so without a
+ * queue two concurrent dispatches of one taskRef can both pass the check and
+ * fork the work. Running that whole section one request at a time per taskRef
+ * makes the loser's findAlive observe the winner's binding and answer 409.
+ * Scope is deliberately process-local: a single Host process owns these
+ * routes, so no file lock or cross-process protocol is involved. Rejected
+ * sections do not poison the chain; an idle taskRef key is dropped again.
+ */
+function createGateQueue(): <T>(taskRef: string, run: () => Promise<T>) => Promise<T> {
+  const tails = new Map<string, Promise<void>>()
+  return <T>(taskRef: string, run: () => Promise<T>): Promise<T> => {
+    const result = (tails.get(taskRef) ?? Promise.resolve()).then(run)
+    const settled: Promise<void> = result.then(() => undefined, () => undefined)
+    tails.set(taskRef, settled)
+    void settled.then(() => {
+      if (tails.get(taskRef) === settled) tails.delete(taskRef)
+    })
+    return result
+  }
+}
+
 /** POST /api/session-dispatch — create a workspace-pinned session and queue its first prompt. */
 export function makeDispatchRoute(services: DispatchServices): WebRoute {
+  const runQueued = createGateQueue()
   return {
     kind: 'exact',
     path: `${DISPATCH_API_PREFIX}`,
@@ -198,79 +222,87 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, 404, { ok: false, error: `workspace not found: ${workspaceId}` })
         return
       }
-      if (taskRef !== undefined && services.bindings !== undefined) {
-        let existing: Awaited<ReturnType<DispatchBindingStore['findAlive']>>
-        try {
-          existing = await services.bindings.findAlive(taskRef)
-        } catch (error) {
-          // The ledger is an occupancy sensor, not an authority: a store
-          // failure must not wedge dispatch, so the gate fails open.
-          existing = undefined
-          void error
-        }
-        if (existing !== undefined) {
-          writeJson(res, 409, {
-            ok: false,
-            error: `taskRef already has a live session: ${existing.sessionId}`,
-            taskRef,
-            sessionId: existing.sessionId,
-          })
-          return
-        }
-      }
-      const signal = new AbortController().signal
-      let sessionId: string
-      try {
-        const created = await services.sessions.create({
-          workspaceId,
-          ...(mode === undefined ? {} : { agentPreset: mode }),
-        })
-        sessionId = created.sessionId
-        if (title !== undefined) {
-          await services.sessions.rename({ sessionId, title })
-        }
-        if (permission !== undefined) {
-          if (services.agents === undefined || services.commands === undefined) {
-            throw new Error('permission pinning is unavailable: commands registry is not composed')
+      // One critical section per taskRef: 409 gate -> session create -> ledger append.
+      const proceed = async (): Promise<void> => {
+        if (taskRef !== undefined && services.bindings !== undefined) {
+          let existing: Awaited<ReturnType<DispatchBindingStore['findAlive']>>
+          try {
+            existing = await services.bindings.findAlive(taskRef)
+          } catch (error) {
+            // The ledger is an occupancy sensor, not an authority: a store
+            // failure must not wedge dispatch, so the gate fails open.
+            existing = undefined
+            void error
           }
-          const agent = services.agents.get(sessionId)
-          if (agent === undefined) throw new Error(`session ${sessionId} has no agent for the permission pin`)
-          const execution = await services.commands.execute(agent, `/permission ${permission}`, [], signal)
-          const result = execution?.result
-          if (result === undefined || (result.kind !== undefined && result.kind !== 'success')) {
-            // A rejected pin is a caller-fixable request error, not a Host fault.
-            const failure = new Error(`permission pin failed: ${result?.text ?? 'command produced no result'}`) as Error & { code: string }
-            failure.code = 'gateway/bad-request'
-            throw failure
+          if (existing !== undefined) {
+            writeJson(res, 409, {
+              ok: false,
+              error: `taskRef already has a live session: ${existing.sessionId}`,
+              taskRef,
+              sessionId: existing.sessionId,
+            })
+            return
           }
         }
-        await services.sessions.prompt({
-          requestId: `session-dispatch-${randomUUID()}`,
-          sessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text: prompt }],
-        }, signal)
-      } catch (error) {
-        writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
-        return
-      }
-      if (taskRef !== undefined && services.bindings !== undefined) {
+        const signal = new AbortController().signal
+        let sessionId: string
         try {
-          await services.bindings.record({
-            taskRef,
-            sessionId,
+          const created = await services.sessions.create({
             workspaceId,
-            ...(title === undefined ? {} : { title }),
-            createdAt: new Date().toISOString(),
+            ...(mode === undefined ? {} : { agentPreset: mode }),
           })
+          sessionId = created.sessionId
+          if (title !== undefined) {
+            await services.sessions.rename({ sessionId, title })
+          }
+          if (permission !== undefined) {
+            if (services.agents === undefined || services.commands === undefined) {
+              throw new Error('permission pinning is unavailable: commands registry is not composed')
+            }
+            const agent = services.agents.get(sessionId)
+            if (agent === undefined) throw new Error(`session ${sessionId} has no agent for the permission pin`)
+            const execution = await services.commands.execute(agent, `/permission ${permission}`, [], signal)
+            const result = execution?.result
+            if (result === undefined || (result.kind !== undefined && result.kind !== 'success')) {
+              // A rejected pin is a caller-fixable request error, not a Host fault.
+              const failure = new Error(`permission pin failed: ${result?.text ?? 'command produced no result'}`) as Error & { code: string }
+              failure.code = 'gateway/bad-request'
+              throw failure
+            }
+          }
+          await services.sessions.prompt({
+            requestId: `session-dispatch-${randomUUID()}`,
+            sessionId,
+            mode: 'queue',
+            content: [{ type: 'text', text: prompt }],
+          }, signal)
         } catch (error) {
-          // The session is live and prompting; a ledger write failure is
-          // reported but does not turn a successful dispatch into a 5xx.
-          writeJson(res, 200, { ok: true, sessionId, bindingRecorded: false, bindingError: errorDetail(error) }, { 'cache-control': 'no-store' })
+          writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
           return
         }
+        if (taskRef !== undefined && services.bindings !== undefined) {
+          try {
+            await services.bindings.record({
+              taskRef,
+              sessionId,
+              workspaceId,
+              ...(title === undefined ? {} : { title }),
+              createdAt: new Date().toISOString(),
+            })
+          } catch (error) {
+            // The session is live and prompting; a ledger write failure is
+            // reported but does not turn a successful dispatch into a 5xx.
+            writeJson(res, 200, { ok: true, sessionId, bindingRecorded: false, bindingError: errorDetail(error) }, { 'cache-control': 'no-store' })
+            return
+          }
+        }
+        writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
       }
-      writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
+      if (taskRef !== undefined && services.bindings !== undefined) {
+        await runQueued(taskRef, proceed)
+      } else {
+        await proceed()
+      }
     },
   }
 }

@@ -361,6 +361,54 @@ describe('dispatch route taskRef bindings', () => {
   })
 })
 
+describe('dispatch gate serialization', () => {
+  it('lets exactly one of two concurrent same-taskRef dispatches pass; the loser answers 409 with the winner sessionId', async () => {
+    const recorded: DispatchBinding[] = []
+    const alive = new Set<string>()
+    const bindings: DispatchBindingStore = {
+      async findAlive(taskRef) {
+        for (let i = recorded.length - 1; i >= 0; i -= 1) {
+          const binding = recorded[i]!
+          if (binding.taskRef === taskRef && alive.has(binding.sessionId)) return binding
+        }
+        return undefined
+      },
+      async record(binding) { recorded.push(binding) },
+      async list() { return recorded.map((binding) => ({ ...binding, alive: alive.has(binding.sessionId) })) },
+    }
+    let created = 0
+    const services = happyServices({
+      bindings,
+      sessions: {
+        async create() {
+          // Widen the check-then-act window: without in-process serialization
+          // both requests clear findAlive before either one records.
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          created += 1
+          const sessionId = `session-${created}`
+          alive.add(sessionId)
+          return { sessionId }
+        },
+        async rename() { return {} },
+        async prompt() { return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const body = { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }
+    const [first, second] = await Promise.all([
+      run(handler, fakeReq('POST', body)),
+      run(handler, fakeReq('POST', body)),
+    ])
+    expect([first.status, second.status].sort((a, b) => a - b)).toEqual([200, 409])
+    const winner = first.status === 200 ? first : second
+    const loser = first.status === 200 ? second : first
+    expect(winner.body).toMatchObject({ ok: true, sessionId: expect.stringMatching(/^session-/) })
+    expect(loser.body).toMatchObject({ ok: false, taskRef: 'board.md#item-1', sessionId: (winner.body as { sessionId: string }).sessionId })
+    expect(created).toBe(1)
+    expect(recorded).toHaveLength(1)
+  })
+})
+
 describe('bindings route', () => {
   it('serves the ledger with live aliveness, loopback-fenced and GET-only', async () => {
     const bindings = fakeBindings({
