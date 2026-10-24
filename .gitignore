@@ -41,5 +41,8 @@ test-results/
 # 构建产物（tsdown 输出）
 packages/dsh-usage/lib/
 
+# 重启信号构建戳（scripts/build-stamp.mjs 写入，harness host 启动读取）
+.dsh-build/
+
 # local wrangler dev secrets (market worker)
 .dev.vars

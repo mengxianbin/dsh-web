@@ -16,7 +16,7 @@
     "@linxin666/dsh-web-all": "^0.3.6"
   },
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "node scripts/build-stamp.mjs run -- \"pnpm -r build\"",
     "dev:watch": "node scripts/dev-watch.mjs",
     "test": "pnpm -r test",
     "test:desktop": "node --test desktop/tests/*.test.mjs",
