@@ -1,0 +1,10 @@
+# dsh-auto-route bundle patch: inserts the host-only auto-routing policy
+# controller into the web plugin roster. The bundle is the official dsh plugin
+# shape — install it into a dsh profile
+# (`dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route`).
+# The single row mounts the host side only (GET /api/auto-route/status); the
+# package declares no `dsh.client` face, so nothing appears in the browser
+# roster — the sidebar badge reads the loopback status endpoint instead.
+- insert:
+    - id: auto-route
+      name: 'dsh-auto-route'
