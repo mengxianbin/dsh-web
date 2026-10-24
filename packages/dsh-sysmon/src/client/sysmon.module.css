@@ -1,0 +1,71 @@
+/*
+ * Sysmon header chip: one compact row of CPU / memory / disk read-outs in the
+ * conversation session header's actions slot. The chip inherits the header's
+ * 12px scale; values are tabular-nums so digits never jitter while polling.
+ * Warn coloring rides the semantic error token so light/dark both hold.
+ *
+ * The chip lives inside .titleRow (container-type: inline-size), so @container
+ * queries degrade it the same way the agent-preset label does: first the unit
+ * labels drop, then the whole chip, before the title row overflows.
+ */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-fill-tsp-secondary);
+  font-size: 12px;
+  line-height: 22px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.metric {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.k {
+  color: var(--dsw-alias-label-caption);
+  font-size: 11px;
+}
+
+.v {
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.vWarn {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.sep {
+  width: 1px;
+  height: 10px;
+  background: var(--dsw-alias-border-l3);
+}
+
+/* First sacrifice when the title row narrows: the unit labels go, bare
+   percentages stay (the tooltip keeps the full nouns). */
+@container (max-width: 620px) {
+  .k {
+    display: none;
+  }
+
+  .chip {
+    gap: 5px;
+    padding: 0 6px;
+  }
+}
+
+/* Last sacrifice: the whole chip yields before the row overflows. */
+@container (max-width: 440px) {
+  .chip {
+    display: none;
+  }
+}
