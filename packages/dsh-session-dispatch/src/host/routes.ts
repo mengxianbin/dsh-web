@@ -14,8 +14,14 @@ import { isLoopbackRequest } from './loopback.ts'
 
 export const DISPATCH_API_PREFIX = '/api/session-dispatch'
 
+/** Top-level send endpoint: delivery to an existing Session (not under the dispatch prefix). */
+export const SESSION_SEND_API_PREFIX = '/api/session-send'
+
 /** Dispatch prompts are prose task books; 1 MiB covers very long ones with margin. */
 const BODY_MAX_BYTES = 1_000_000
+
+/** Prompt prose cap shared by the dispatch and send routes (900,000 characters). */
+const PROMPT_MAX_CHARS = 900_000
 
 /** Permission presets composed by the web profile's permission row. */
 export const DISPATCH_PERMISSIONS = ['read-only', 'workspace-write', 'danger-full-access'] as const
@@ -117,7 +123,7 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
   if (typeof prompt !== 'string' || prompt.trim() === '') {
     return { ok: false, error: 'prompt must be a non-empty string' }
   }
-  if (prompt.length > 900_000) {
+  if (prompt.length > PROMPT_MAX_CHARS) {
     return { ok: false, error: 'prompt exceeds the 900000-character dispatch limit' }
   }
   if (title !== undefined && (typeof title !== 'string' || title.trim() === '' || title.length > 500)) {
@@ -308,6 +314,93 @@ export function makeBindingsRoute(bindings: DispatchBindingStore): WebRoute {
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })
       }
+    },
+  }
+}
+
+/** One validated session-send request. Deliberately mode-free: delivery is queue-only. */
+export interface SessionSendRequest {
+  readonly sessionId: string
+  readonly prompt: string
+}
+
+/** Body-parse verdict for the send route. */
+export type SessionSendBodyResult = { readonly ok: true; readonly value: SessionSendRequest } | { readonly ok: false; readonly error: string }
+
+/**
+ * Validate one raw session-send body. Pure, and queue-only by construction:
+ * the wire shape has no delivery-mode field, so no caller input can ever
+ * select a different delivery semantic. Every rejection names the offending
+ * field.
+ * @param body - parsed JSON body (unknown from the wire).
+ * @returns the validated request, or the first field error.
+ */
+export function parseSessionSendBody(body: unknown): SessionSendBodyResult {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return { ok: false, error: 'body must be a JSON object' }
+  }
+  const record = body as Record<string, unknown>
+  const { sessionId, prompt } = record
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+    return { ok: false, error: 'sessionId must be a non-empty string' }
+  }
+  if (typeof prompt !== 'string' || prompt.trim() === '') {
+    return { ok: false, error: 'prompt must be a non-empty string' }
+  }
+  if (prompt.length > PROMPT_MAX_CHARS) {
+    return { ok: false, error: 'prompt exceeds the 900000-character send limit' }
+  }
+  return { ok: true, value: { sessionId: sessionId.trim(), prompt } }
+}
+
+/** Session service surface the send route consumes (the prompt half of the dispatch surface). */
+export interface SessionSendServices {
+  readonly sessions: Pick<DispatchSessionApi, 'prompt'>
+}
+
+/**
+ * POST /api/session-send — queue one prompt onto an existing Session, the
+ * REST mirror of typing into a live session's composer. The prompt is
+ * delivered with the fixed queue semantic: a busy Session consumes it as a
+ * fresh turn after the current one, an idle Session starts a turn at once.
+ * No mode field exists on the wire and no code path can steer.
+ */
+export function makeSessionSendRoute(services: SessionSendServices): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${SESSION_SEND_API_PREFIX}`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readBoundedJson(req, BODY_MAX_BYTES)
+      } catch {
+        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+        return
+      }
+      const parsed = parseSessionSendBody(body)
+      if (!parsed.ok) {
+        writeJson(res, 400, { ok: false, error: parsed.error })
+        return
+      }
+      const { sessionId, prompt } = parsed.value
+      const signal = new AbortController().signal
+      try {
+        await services.sessions.prompt({
+          requestId: `session-send-${randomUUID()}`,
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: prompt }],
+        }, signal)
+      } catch (error) {
+        writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
+        return
+      }
+      writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
     },
   }
 }

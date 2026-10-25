@@ -9,7 +9,9 @@ carry an opaque `taskRef` to record a durable task-to-session binding in the
 quick ledger (`$DSH_HOME/dispatch-bindings.json`); while that taskRef still
 has a live session the same dispatch is refused with `409`, and
 `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
-Host-only — the package declares no `dsh.client` face, so nothing appears in
+`POST /api/session-send` queues one prompt onto an existing Session
+(queue-only delivery; the wire shape has no delivery-mode field). Host-only —
+the package declares no `dsh.client` face, so nothing appears in
 the browser roster.
 
 ## Why
@@ -57,6 +59,26 @@ without `taskRef` behaves exactly as before. A failed binding write answers
 `200` with `bindingRecorded: false`: the session is live, so the dispatch
 itself did not fail.
 
+### `POST /api/session-send`
+
+Queue one prompt onto an existing Session — the REST mirror of typing into a
+live session's composer (cross-session delivery: one session's output becomes
+another session's input). Body (JSON, at most 1 MiB):
+
+| field | type | required | meaning |
+|-------|------|----------|---------|
+| `sessionId` | string | yes | Target existing Session (created earlier, still alive) |
+| `prompt` | string | yes | Message queued behind the current turn, exactly like a composer send |
+
+Delivery is queue-only by construction: the wire shape has no delivery-mode
+field, so no caller input can steer; a busy Session consumes the message as a
+fresh turn after the current one, an idle Session starts a turn at once.
+Responses: `200 { ok, sessionId }`, `400` invalid body or `session/*` Host
+rejection (missing, archived, or disposed session), `403` non-loopback, `405`
+wrong method. Pointer discipline for long bodies: commit the text to git
+first and send only the path plus a one-line instruction — the 900,000
+character cap is a ceiling, not the intended shape.
+
 ### `GET /api/session-dispatch/health`
 
 Liveness probe for restart verification: `200 { ok: true, service:
@@ -73,9 +95,10 @@ not a task account of record — the git board stays the only authority.
 ## Layout
 
 - `src/index.ts` — plugin entry: injects `webServer`, `sessionController`,
-  `workspaceRegistry`; registers the dispatch, health, and bindings routes.
+  `workspaceRegistry`; registers the dispatch, health, bindings, and
+  session-send routes.
 - `src/host/routes.ts` — body validation, the `taskRef`/binding contracts,
-  and the route factories.
+  and the route factories (dispatch, health, bindings, session-send).
 - `src/host/bindings.ts` — the quick ledger: atomic binding persistence under
   `$DSH_HOME`, live-aliveness lookup, fail-open corrupt-ledger rebuild.
 - `src/host/loopback.ts`, `src/host/http.ts`, `src/dsh-home.ts`,

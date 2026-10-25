@@ -5,10 +5,14 @@ import {
   makeDispatchRoutes,
   makeHealthRoute,
   makeBindingsRoute,
+  makeSessionSendRoute,
   parseDispatchBody,
+  parseSessionSendBody,
+  SESSION_SEND_API_PREFIX,
   type DispatchBinding,
   type DispatchBindingStore,
   type DispatchServices,
+  type SessionSendServices,
 } from '../src/host/routes.ts'
 
 /** Minimal req/res doubles: the routes only read method/url/headers/socket and write one JSON response. */
@@ -398,5 +402,172 @@ describe('bindings route', () => {
   it('is registered by makeDispatchRoutes only when a store is composed', () => {
     expect(makeDispatchRoutes(happyServices())).toHaveLength(2)
     expect(makeDispatchRoutes(happyServices({ bindings: fakeBindings() }))).toHaveLength(3)
+  })
+})
+
+/** Send-services double: captures every prompt request for queue-semantics assertions. */
+function fakeSendServices(): SessionSendServices & { requests: Record<string, unknown>[] } {
+  const requests: Record<string, unknown>[] = []
+  return {
+    requests,
+    sessions: {
+      async prompt(request) {
+        requests.push(request as unknown as Record<string, unknown>)
+        return { accepted: true }
+      },
+    },
+  }
+}
+
+function sendReq(body: unknown, opts: { loopback?: boolean; url?: string } = {}): IncomingMessage {
+  return fakeReq('POST', body, { url: SESSION_SEND_API_PREFIX, ...opts })
+}
+
+describe('parseSessionSendBody', () => {
+  it('accepts a minimal request and trims sessionId', () => {
+    expect(parseSessionSendBody({ sessionId: ' session-1 ', prompt: 'hello' }))
+      .toEqual({ ok: true, value: { sessionId: 'session-1', prompt: 'hello' } })
+  })
+
+  it('rejects a non-object body', () => {
+    expect(parseSessionSendBody('nope').ok).toBe(false)
+    expect(parseSessionSendBody(null).ok).toBe(false)
+    expect(parseSessionSendBody([]).ok).toBe(false)
+  })
+
+  it('rejects a missing or blank sessionId', () => {
+    expect(parseSessionSendBody({ prompt: 'x' })).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(parseSessionSendBody({ sessionId: '  ', prompt: 'x' })).toMatchObject({ ok: false })
+  })
+
+  it('rejects a missing or blank prompt', () => {
+    expect(parseSessionSendBody({ sessionId: 's' })).toMatchObject({ ok: false, error: expect.stringContaining('prompt') })
+    expect(parseSessionSendBody({ sessionId: 's', prompt: '   ' })).toMatchObject({ ok: false })
+  })
+
+  it('rejects an oversized prompt', () => {
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x'.repeat(900_001) }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('900000') })
+  })
+
+  it('drops a caller-supplied mode field instead of carrying it into the request', () => {
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 'whatever' }))
+      .toEqual({ ok: true, value: { sessionId: 's', prompt: 'x' } })
+  })
+})
+
+describe('session-send route', () => {
+  it('queues the prompt onto the existing session, answering the sessionId', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 'session-1', prompt: 'look at this' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-1' })
+    expect(captures.requests).toHaveLength(1)
+    const request = captures.requests[0]!
+    expect(request.requestId).toMatch(/^session-send-/)
+    expect(request.sessionId).toBe('session-1')
+    expect(request.mode).toBe('queue')
+    expect(request.content).toEqual([{ type: 'text', text: 'look at this' }])
+  })
+
+  it('is queue-only: a caller-supplied mode field never reaches the prompt call', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x', mode: 'steer' }))
+    expect(captured.status).toBe(200)
+    expect(captures.requests.map(request => request.mode)).toEqual(['queue'])
+  })
+
+  it('never creates a session: the services surface exposes no create path', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    await run(handler, sendReq({ sessionId: 'session-1', prompt: 'x' }))
+    expect(Object.keys(captures.sessions)).toEqual(['prompt'])
+  })
+
+  it('rejects a non-object body with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq('nope'))
+    expect(captured.status).toBe(400)
+  })
+
+  it('rejects a missing sessionId with 400 before touching the session service', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ prompt: 'x' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('rejects a blank prompt with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: '  ' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('prompt') })
+  })
+
+  it('rejects an oversized prompt with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x'.repeat(900_001) }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('900000') })
+  })
+
+  it('rejects invalid JSON with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const stream = Readable.from([Buffer.from('{not json')]) as IncomingMessage
+    stream.method = 'POST'
+    stream.url = SESSION_SEND_API_PREFIX
+    stream.headers = { host: '127.0.0.1:3080' }
+    stream.socket = { remoteAddress: '127.0.0.1' } as IncomingMessage['socket']
+    const captured = await run(handler, stream)
+    expect(captured.status).toBe(400)
+  })
+
+  it('rejects non-POST methods with 405', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const stream = fakeReq('GET', undefined, { url: SESSION_SEND_API_PREFIX })
+    const captured = await run(handler, stream)
+    expect(captured.status).toBe(405)
+  })
+
+  it('rejects non-loopback callers with 403', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x' }, { loopback: false }))
+    expect(captured.status).toBe(403)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('loopback') })
+  })
+
+  it('maps a session/not-found rejection to 400 with the Host error text', async () => {
+    const services: SessionSendServices = {
+      sessions: {
+        async prompt() {
+          const error = new Error('session "gone" is not available') as Error & { code: string }
+          error.code = 'session/not-found'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionSendRoute(services).handler!
+    const captured = await run(handler, sendReq({ sessionId: 'gone', prompt: 'x' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('session "gone" is not available') })
+  })
+
+  it('maps an unmapped Host rejection to 500', async () => {
+    const services: SessionSendServices = {
+      sessions: {
+        async prompt() {
+          const error = new Error('disk exploded') as Error & { code: string }
+          error.code = 'gateway/internal'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionSendRoute(services).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x' }))
+    expect(captured.status).toBe(500)
   })
 })
