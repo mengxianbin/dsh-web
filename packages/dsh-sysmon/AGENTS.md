@@ -1,8 +1,9 @@
 # AGENTS.md — dsh-sysmon
 
 会话头部系统指标 chip：宿主每秒采 CPU/内存/磁盘，浏览器半区在会话头部动作槽
-渲染三读数并按连续样本告警变红。包级规则：只写本包特有约定，不重复根
-AGENTS.md 与 packages/AGENTS.md 的全局/包级规则。
+（preset 标签右侧，主位）与头部 leading 单元格（无会话/空会话兜底位）渲染三读数
+并按连续样本告警变红，两位经 `src/client/presence.ts` 挂载信号互斥、恒只画一份。
+包级规则：只写本包特有约定，不重复根 AGENTS.md 与 packages/AGENTS.md 的全局/包级规则。
 
 ## 本包要点
 

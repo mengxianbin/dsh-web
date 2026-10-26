@@ -1,10 +1,13 @@
 /**
- * The sysmon session-header chip: one compact row of CPU / memory / disk
- * read-outs registered into the conversation session header's actions slot,
- * immediately right of the agent-preset label. It polls the host route
- * `api/sysmon/samples` once per second while the tab is visible, reddens any
- * metric the host marks as warned (sustained-streak at threshold), and shows
- * disk throughput plus memory absolutes in its tooltip.
+ * The sysmon chip, rendered into two mutually exclusive header seats: the
+ * session-header actions row (primary, immediately right of the agent-preset
+ * label) and the always-rendered conversation-header leading cell (fallback,
+ * covering the no-session and blank-session states the actions row never
+ * mounts for). The shared body polls the host route `api/sysmon/samples` once
+ * per second while the tab is visible, reddens any metric the host marks as
+ * warned (sustained-streak at threshold), and shows disk throughput plus
+ * memory absolutes in its tooltip. The seats coordinate through
+ * {@link ./presence.ts} so exactly one copy paints at a time.
  *
  * Degradation contract (mirrors UsageGlance): a 404 means the host half is
  * off or disabled and the chip hides itself entirely; a transport failure
@@ -13,12 +16,13 @@
  * @module dsh-sysmon/client/SysmonChip
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useState } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the ui-conversation SlotMap merge (the header actions hole).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { clampBusy, formatMBps } from '../core/sample.ts'
 import type { SysmonPayload } from '../core/types.ts'
+import { beginPrimary, primaryMounted, subscribePrimary } from './presence.ts'
 import type { SysmonKey } from './locales.ts'
 import css from './sysmon.module.css'
 
@@ -68,11 +72,12 @@ export function chipTitle(payload: SysmonPayload | null, t: (key: SysmonKey) => 
 }
 
 /**
- * Render the sysmon chip (or nothing while the host half is off).
+ * The shared chip body: polls the host route and renders the three read-outs.
+ * Both seats render this component; seat coordination happens in the wrappers.
  * @param props - the shell's locale translator.
  * @returns the chip span, or null when the host route 404s.
  */
-export function SysmonChip({ t }: SysmonChipProps) {
+function SysmonBody({ t }: SysmonChipProps) {
   const [payload, setPayload] = useState<SysmonPayload | null>(null)
   const [hostOff, setHostOff] = useState(false)
 
@@ -153,4 +158,33 @@ export function SysmonChip({ t }: SysmonChipProps) {
       </span>
     </span>
   )
+}
+
+/**
+ * Primary seat occupant: the session-header actions row. Reports its mount
+ * from a layout effect so the fallback seat yields before paint, never after.
+ * @param props - the shell's locale translator.
+ * @returns the chip body.
+ */
+export function SysmonChip(props: SysmonChipProps) {
+  useLayoutEffect(() => beginPrimary(), [])
+  return <SysmonBody {...props} />
+}
+
+/**
+ * Fallback seat occupant: the conversation-header leading cell, the only
+ * header position that exists without a Session and stays rendered while a
+ * blank Session hides the actions row. Renders nothing while a primary copy
+ * is mounted, so exactly one chip paints at a time.
+ * @param props - the shell's locale translator.
+ * @returns the chip body, or null while the primary seat is occupied.
+ */
+export function SysmonFallbackChip({ t }: SysmonChipProps) {
+  const [primary, setPrimary] = useState(primaryMounted)
+  useLayoutEffect(() => {
+    setPrimary(primaryMounted())
+    return subscribePrimary(() => { setPrimary(primaryMounted()) })
+  }, [])
+  if (primary) return null
+  return <SysmonBody t={t} />
 }

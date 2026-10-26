@@ -13,6 +13,11 @@ streak, so a saturated machine is visible without leaving the chat.
   the agent-preset label: three tabular-numeral read-outs (CPU busy %, memory
   used %, disk busy %) plus a hover tooltip with disk throughput and memory
   absolutes.
+- Mirrors the same chip into `conversation.header.leading`, the one header
+  cell that renders with no Session and stays visible while a blank Session
+  hides the actions row. A module-level mount signal keeps the two seats
+  exclusive, so exactly one copy paints: the actions copy wins whenever both
+  would be mounted.
 - Samples on the Host every second: CPU from an `os.cpus()` diff, memory from
   `os.totalmem()`/`os.freemem()`, and disk from one resident `typeperf` child
   that streams the three `PhysicalDisk(_Total)` counters over stdout.
@@ -67,8 +72,9 @@ per-second counters.
 - `% Disk Time` on `_Total` can exceed 100 on multi-queue disks; the display
   clamps it to 100 while history keeps the raw value.
 - The ring buffer is in-memory and lost on restart; there is no history UI yet.
-- The chip lives in the session header, so it is not visible on the blank
-  new-session screen or when no session is open.
+- The fallback copy sits in the header's leading cell, so between states the
+  chip moves from the left edge (no Session / blank Session) to beside the
+  preset label (active Session).
 - Per-process attribution is out of scope; run
   `scripts/common/io-attribution.ps1` from m-note when you need the culprit.
 

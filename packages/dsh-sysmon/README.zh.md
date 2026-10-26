@@ -11,6 +11,9 @@ CPU、内存与磁盘活动，并把连续多秒处于阈值上方的指标染�
 - 在 `conversation.session.header.actions` 槽、agent-preset 标签右侧挂一枚紧凑
   chip：三个等宽数字读数（CPU 忙碌 %、内存占用 %、磁盘忙碌 %）+ 悬停 tooltip
   展示磁盘吞吐与内存绝对值。
+- 同一枚 chip 同时镜像到 `conversation.header.leading`——无会话时唯一仍渲染的
+  头部单元格，空会话隐藏动作行时它也保持可见。两个座位经模块级挂载信号互斥，
+  任何时刻只画一份：动作行座位在两者都会挂载时优先。
 - 宿主每秒采样：CPU 来自 `os.cpus()` 差分，内存来自 `os.totalmem()` /
   `os.freemem()`，磁盘来自一个常驻 `typeperf` 子进程经 stdout 流式输出的三个
   `PhysicalDisk(_Total)` 计数器。
@@ -62,7 +65,8 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-sysmon
 - `_Total` 的 `% Disk Time` 在多队列盘上可能超过 100；显示钳到 100，历史保留
   原值。
 - 环形缓冲在内存里，重启即失；尚无视图化历史。
-- chip 挂在会话头部，无会话或新建会话空屏时不可见。
+- 兜底副本坐在头部 leading 单元格，因此跨状态时 chip 会从左边缘（无会话 / 空会话）
+  移到 preset 标签旁（活动会话）。
 - 逐进程归因不在范围内；需要定位真凶时跑 m-note 的
   `scripts/common/io-attribution.ps1`。
 
