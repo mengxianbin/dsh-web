@@ -2,14 +2,20 @@
 
 English | [中文](README.zh.md)
 
-Auto source routing for DSH Web (ruling form 乙, 2026-10-24): a resident
-Host-side controller polls the OpenCode Go meters
-(`GET https://opencode.ai/console/api/go/status`, bearer key read into
-process memory only) and, when **any** of the three windows reads
-`used/limit >= 0.99` (unrounded), switches the **active session set** to the
-MiMo official route through `sessionController.selectModel`; when **all
-three** windows read `< 0.70` it switches back to `opencode-go`. The policy
-state is served read-only at the loopback-fenced
+Auto source routing for DSH Web (ruling form 乙, 2026-10-24; parameters
+revised 2026-10-27): a resident Host-side controller polls the OpenCode Go
+meters (`GET https://opencode.ai/console/api/go/status`, bearer key read into
+process memory only) with two up-edges and one shared down-edge:
+
+- any window `used/limit >= 0.95` (unrounded) moves **only the global default
+  model** to the MiMo official route — new/rotated sessions are born on the
+  live side while running sessions keep working;
+- any window `>= 0.99` additionally batch-switches the **active session set**
+  through `sessionController.selectModel`;
+- when **all three** windows read `< 0.95`, both legs return to
+  `opencode-go`.
+
+The policy state is served read-only at the loopback-fenced
 `GET /api/auto-route/status` — the authority for the sidebar's current-source
 badge. Host-only — the package declares no `dsh.client` face, so nothing
 appears in the browser roster.
@@ -22,7 +28,9 @@ ships no provider failover (no `failover` config anywhere), and the dispatch
 plugin only creates sessions, so a programmatic switch channel plus a policy
 controller had to be built. The 30–60 s poll leaves a small burn-through race
 between polls at the 99 % line; the line and the cadence are configurable if
-that trade needs retuning.
+that trade needs retuning. The 95 % default line (2026-10-27) exists
+precisely for that race: successors are already born on the live side, so a
+missed in-flight edge costs one failed attempt, not a dead night.
 
 ## Install
 
@@ -44,15 +52,16 @@ Every ruling parameter is configurable on the plugin row; defaults are the
 |-------|---------|---------|
 | `enabled` | `true` | Master switch |
 | `pollIntervalMs` | `45000` | Poll cadence; clamped into the ruling range 30–60 s (clamp is logged) |
-| `triggerRatio` | `0.99` | Any window `used/limit >=` this switches to `switchTo` (unrounded) |
-| `restoreRatio` | `0.70` | All three windows must read `<` this to switch back (strict) |
+| `triggerRatio` | `0.99` | In-flight edge: any window `used/limit >=` this batch-switches the active set to `switchTo` (unrounded) |
+| `defaultRatio` | `0.95` | Default edge: any window `>=` this moves only the global default model to `switchTo` (2026-10-27) |
+| `restoreRatio` | `0.95` | Shared down-edge: all three windows must read `<` this for both legs to return (strict; was 0.70) |
 | `minDwellMs` | `0` | Shortest triggered-phase stay before a restore; `0` = off |
 | `activeWindowMs` | `1800000` | Request recency that keeps a session in the active set |
 | `switchTo` | `mimo` / `mimo-v2.6-flash` | Target on trigger (no effort → the model's own default) |
 | `restoreTo` | `opencode-go` / `mimo-v2.6-flash` / effort `high` | Target on restore (restores the deployment default behavior) |
 | `meterUrl` | `https://opencode.ai/console/api/go/status` | Go meter source |
 | `meterKeyEnv` | `OC_GO_CC_API_KEY` | Env var holding the bearer key (memory only, never logged) |
-| `balanceGuardrail` | `enabled: false` | MiMo balance guardrail — disabled pending session-276c5584 |
+| `balanceGuardrail` | `enabled: false` | MiMo balance guardrail — disabled by the 2026-10-27 ruling (no cash gate, burn to balance) |
 
 A target that is missing from the live model catalog **blocks the edge**
 (nothing half-switches) and stays visible on the status endpoint; the next
@@ -67,19 +76,21 @@ same-origin markers); remote sockets answer `403`.
 
 `200 { ok: true, service: "dsh-auto-route", policy: { … } }` with:
 
-- `phase` (`baseline` | `triggered`) and `effectiveSource` (provider id the
-  policy considers in force — what the badge renders), `lastDecision`,
-  `lastDecisionAt`
-- `lines` (the configured trigger/restore/dwell/cadence/window values),
-  `targets`
+- `phase` (`baseline` | `triggered`) and `effectiveSource` (in-flight provider
+  id — what the badge renders), plus `defaultsSource` (what a brand-new
+  session inherits; diverges from `effectiveSource` in the 95–99 dead zone),
+  `lastDecision`, `lastDecisionAt`
+- `lines` (the configured trigger/default/restore/dwell/cadence/window
+  values), `targets`
 - `windows` (last reading: `used`/`limit` in USD, unrounded `ratio`,
   `resetsAt`), `readingAt`, `lastPoll`
-- `lastTrigger` / `lastRestore` (edge ratios plus `switched`/`skipped`/
-  `failed`/`defaultSaved`), `lastOutcome` (per-session results),
-  `targetProblem` (blocked-edge diagnostics)
+- `lastDefaultSwitch` / `lastTrigger` / `lastRestore` (edge ratios plus
+  `switched`/`skipped`/`failed`/`defaultSaved`), `lastOutcome` (per-session
+  results), `targetProblem` (blocked-edge diagnostics)
 - `activeSet` (tracked sessions with running flag and request recency;
   subagent sessions are marked and never switched)
-- `balanceGuardrail` (`enabled` plus a note naming the pending dependency)
+- `balanceGuardrail` (`enabled` plus a note naming the ruling that keeps it
+  off)
 
 `403` non-loopback, `405` wrong method, `500` status-producer failure.
 
@@ -88,12 +99,15 @@ same-origin markers); remote sockets answer `403`.
 - **Active set** = sessions that are running or made a request within
   `activeWindowMs`, tracked from `session/event` request headers and
   `agent/status`; cold sessions are never batch-resumed.
-- **Edges fire once**: the switch pass runs on the phase edge, not on every
-  poll; failed `selectModel` calls are classified (subagent ownership →
-  `skipped`, anything else → `failed`) and counted on the edge record.
-- **Default follows the policy**: each edge also saves the deployment default
-  (`agent-default-model`), covering the empty-active-set case so new sessions
-  land on the in-force side.
+- **Edges fire once**: each pass runs on its latch edge, not on every poll;
+  failed `selectModel` calls are classified (subagent ownership → `skipped`,
+  anything else → `failed`) and counted on the edge record.
+- **Two legs, one down-edge**: the default edge (`default-switch`) saves the
+  deployment default (`agent-default-model`) and never touches running
+  sessions; the in-flight edge batch-switches the active set (and repeats the
+  default save); the shared restore returns both — but its session pass runs
+  only when the in-flight leg had engaged, so a default-only restore never
+  stomps sessions the policy never moved.
 - **No decision on bad data**: a failed meter poll records `lastPoll.ok:
   false` and touches nothing; recovery resumes on the next good reading.
 - Policy state is in-memory: a Host restart boots back to `baseline`, and the

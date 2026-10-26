@@ -1,12 +1,13 @@
 /**
  * The controller: one poll loop that fetches Go meters, asks the pure policy
- * layer for an edge, and applies it by switching the active session set
- * through `sessionController.selectModel` (plus the default model, so new
- * sessions follow the policy side). Every switch edge is pre-flighted against
- * the live model catalog — an unavailable target blocks the edge and stays
- * visible on the status endpoint instead of half-switching anything. Host
- * wiring lives in `src/index.ts`; this class takes every dependency by
- * injection so the closed loop runs in tests without a Host.
+ * layer for an edge, and applies it — the in-flight leg batch-switches the
+ * active session set through `sessionController.selectModel`, the default leg
+ * moves only the deployment default (so new sessions follow), and the shared
+ * restore edge brings both home. Every edge is pre-flighted against the live
+ * model catalog — an unavailable target blocks the edge and stays visible on
+ * the status endpoint instead of half-switching anything. Host wiring lives
+ * in `src/index.ts`; this class takes every dependency by injection so the
+ * closed loop runs in tests without a Host.
  * @module dsh-auto-route/controller
  */
 
@@ -60,7 +61,7 @@ export interface SwitchOutcome {
 /** One edge's executed pass (status payload). */
 export interface OutcomeRecord {
   readonly at: number
-  readonly action: 'switch' | 'restore'
+  readonly action: 'switch' | 'default-switch' | 'restore'
   readonly results: readonly SwitchOutcome[]
   readonly defaultSaved: boolean
 }
@@ -68,7 +69,7 @@ export interface OutcomeRecord {
 /** Blocked-edge diagnostics (target missing from the catalog). */
 export interface TargetProblem {
   readonly at: number
-  readonly action: 'switch' | 'restore'
+  readonly action: 'switch' | 'default-switch' | 'restore'
   readonly provider: string
   readonly model: string
   readonly reason: string
@@ -80,11 +81,14 @@ export interface AutoRouteStatusView {
   readonly policy: {
     readonly phase: PolicyState['phase']
     readonly effectiveSource: string
+    /** What a brand-new session inherits — may diverge from `effectiveSource` in the dead zone. */
+    readonly defaultsSource: string
     readonly phaseSince: number
-    readonly lastDecision?: 'trigger' | 'restore'
+    readonly lastDecision?: 'default-switch' | 'trigger' | 'restore'
     readonly lastDecisionAt?: number
     readonly lines: {
       readonly triggerRatio: number
+      readonly defaultRatio: number
       readonly restoreRatio: number
       readonly minDwellMs: number
       readonly pollIntervalMs: number
@@ -94,6 +98,7 @@ export interface AutoRouteStatusView {
     readonly readingAt?: number
     readonly windows?: readonly WindowMeter[]
     readonly lastPoll?: { readonly at: number; readonly ok: boolean; readonly error?: string }
+    readonly lastDefaultSwitch?: EdgeRecord
     readonly lastTrigger?: EdgeRecord
     readonly lastRestore?: EdgeRecord
     readonly targetProblem?: TargetProblem
@@ -140,11 +145,11 @@ export class AutoRouteController {
   start(): void {
     const { config } = this.deps
     this.deps.logger.info(
-      `dsh-auto-route: mounted — poll=${config.pollIntervalMs}ms trigger>=${config.triggerRatio} restore<${config.restoreRatio}`
+      `dsh-auto-route: mounted — poll=${config.pollIntervalMs}ms trigger>=${config.triggerRatio} default>=${config.defaultRatio} restore<${config.restoreRatio}`
       + ` dwell=${config.minDwellMs}ms activeWindow=${config.activeWindowMs}ms`
       + ` switchTo=${config.switchTo.provider}/${config.switchTo.model}`
       + ` restoreTo=${config.restoreTo.provider}/${config.restoreTo.model}`
-      + ` balanceGuardrail=${config.balanceGuardrail.enabled ? 'on' : 'off (pending session-276c5584)'}`,
+      + ` balanceGuardrail=${config.balanceGuardrail.enabled ? 'on' : 'off (2026-10-27 ruling: no cash gate)'}`,
     )
     this.stopped = false
     this.schedule(500)
@@ -199,14 +204,25 @@ export class AutoRouteController {
   }
 
   /**
-   * Apply one edge: pre-flight the target, switch the active set, move the
-   * default. The phase only advances when the pre-flight passed — a blocked
-   * edge leaves the state as-is and surfaces on the status endpoint.
-   * @param decision - the switch/restore decision with its next state.
+   * Apply one edge: pre-flight the target, run the leg's effect, stamp the
+   * edge record. The phase only advances when the pre-flight passed — a
+   * blocked edge leaves the state as-is and surfaces on the status endpoint.
+   *
+   * - `default-switch` — default leg alone: move the deployment default and
+   *   stop; running sessions are never touched.
+   * - `switch` — in-flight leg: batch-select the active set; the default
+   *   follows too (decide() already engaged the default leg on this edge).
+   * - `restore` — shared down-edge: the session pass runs only when the
+   *   in-flight leg had engaged; a default-only restore must not stomp
+   *   sessions the policy never moved. The default always returns.
+   *
+   * @param decision - the edge decision with its next state.
    */
-  private async execute(decision: Extract<Decision, { action: 'switch' | 'restore' }>): Promise<void> {
+  private async execute(decision: Extract<Decision, { action: 'switch' | 'default-switch' | 'restore' }>): Promise<void> {
     const { config } = this.deps
-    const target = decision.action === 'switch' ? config.switchTo : config.restoreTo
+    // Which legs were up BEFORE this decision (read before state advances).
+    const wasTriggered = this.state.phase === 'triggered'
+    const target = decision.action === 'restore' ? config.restoreTo : config.switchTo
     const now = this.now()
     const preflight = await this.preflight(target)
     if (!preflight.ok) {
@@ -218,7 +234,8 @@ export class AutoRouteController {
     }
     this.targetProblem = undefined
 
-    const active = this.deps.tracker.snapshot(now, config.activeWindowMs)
+    const runSessionPass = decision.action === 'switch' || (decision.action === 'restore' && wasTriggered)
+    const active = runSessionPass ? this.deps.tracker.snapshot(now, config.activeWindowMs) : []
     const results: SwitchOutcome[] = []
     for (const sessionId of active) {
       try {
@@ -237,8 +254,9 @@ export class AutoRouteController {
     }
 
     // Default follows the policy. selectModel saves it as a side effect when
-    // sessions switched; the explicit save covers the empty-set edge (and
-    // makes the default's state observable either way).
+    // sessions switched; the explicit save covers the empty-set edge, the
+    // default-only edge, and the default-only restore (and makes the
+    // default's state observable either way).
     let defaultSaved = false
     if (this.deps.defaultModel !== undefined) {
       try {
@@ -257,7 +275,11 @@ export class AutoRouteController {
 
     // decide() stamps the edge shell for the matching action; the fallback
     // keeps the record complete even if that invariant is ever refactored.
-    const shell = (decision.action === 'switch' ? decision.state.lastTrigger : decision.state.lastRestore)
+    const shell = (decision.action === 'switch'
+      ? decision.state.lastTrigger
+      : decision.action === 'default-switch'
+        ? decision.state.lastDefaultSwitch
+        : decision.state.lastRestore)
       ?? { at: now, ratios: {}, switched: 0, skipped: 0, failed: 0, defaultSaved: false }
     const edge: EdgeRecord = {
       ...shell,
@@ -268,10 +290,12 @@ export class AutoRouteController {
     }
     this.state = decision.action === 'switch'
       ? { ...decision.state, lastTrigger: edge }
-      : { ...decision.state, lastRestore: edge }
+      : decision.action === 'default-switch'
+        ? { ...decision.state, lastDefaultSwitch: edge }
+        : { ...decision.state, lastRestore: edge }
     this.lastOutcome = { at: now, action: decision.action, results, defaultSaved }
     this.deps.logger.info(
-      `dsh-auto-route: ${decision.action} applied — effectiveSource=${this.state.effectiveSource}`
+      `dsh-auto-route: ${decision.action} applied — effectiveSource=${this.state.effectiveSource} defaultsSource=${this.state.defaultsSource}`
       + ` active=${active.length} switched=${edge.switched} skipped=${edge.skipped} failed=${edge.failed} defaultSaved=${String(defaultSaved)}`,
     )
   }
@@ -307,11 +331,13 @@ export class AutoRouteController {
       policy: {
         phase: this.state.phase,
         effectiveSource: this.state.effectiveSource,
+        defaultsSource: this.state.defaultsSource,
         phaseSince: this.state.phaseSince,
         ...(this.state.lastDecision === undefined ? {} : { lastDecision: this.state.lastDecision }),
         ...(this.state.lastDecisionAt === undefined ? {} : { lastDecisionAt: this.state.lastDecisionAt }),
         lines: {
           triggerRatio: config.triggerRatio,
+          defaultRatio: config.defaultRatio,
           restoreRatio: config.restoreRatio,
           minDwellMs: config.minDwellMs,
           pollIntervalMs: config.pollIntervalMs,
@@ -321,6 +347,7 @@ export class AutoRouteController {
         ...(this.state.lastReading === undefined ? {} : { readingAt: this.state.lastReading.at }),
         ...(windows === undefined ? {} : { windows }),
         ...(this.lastPoll === undefined ? {} : { lastPoll: this.lastPoll }),
+        ...(this.state.lastDefaultSwitch === undefined ? {} : { lastDefaultSwitch: this.state.lastDefaultSwitch }),
         ...(this.state.lastTrigger === undefined ? {} : { lastTrigger: this.state.lastTrigger }),
         ...(this.state.lastRestore === undefined ? {} : { lastRestore: this.state.lastRestore }),
         ...(this.targetProblem === undefined ? {} : { targetProblem: this.targetProblem }),
@@ -329,7 +356,7 @@ export class AutoRouteController {
         balanceGuardrail: {
           enabled: config.balanceGuardrail.enabled,
           ...(config.balanceGuardrail.minBalance === undefined ? {} : { minBalance: config.balanceGuardrail.minBalance }),
-          ...(config.balanceGuardrail.enabled ? {} : { note: 'disabled by ruling — MiMo balance endpoint pending session-276c5584' }),
+          ...(config.balanceGuardrail.enabled ? {} : { note: 'disabled by the 2026-10-27 ruling — no cash gate, burn to balance' }),
         },
       },
     }

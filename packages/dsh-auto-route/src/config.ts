@@ -1,6 +1,8 @@
 /**
  * Deployment policy for the auto-route controller: every ruling parameter is
- * a configurable field with the 2026-10-24 ruling value as its default. The
+ * a configurable field with the ruling value as its default (2026-10-24
+ * parameter pack; revised 2026-10-27 — default leg 0.95, restore 0.95,
+ * balance guardrail none). The
  * schema below only validates shapes and types; `resolveConfig` owns every
  * default and every range, so there is exactly one place a value can come
  * from. @module dsh-auto-route/config
@@ -23,9 +25,9 @@ export type ModelTargetInput = {
   readonly reasoningEffort?: string
 }
 
-/** MiMo balance guardrail — off until its data source is confirmed. */
+/** MiMo balance guardrail — off by ruling (no cash gate). */
 export interface BalanceGuardrailConfig {
-  /** Master switch. The 2026-10-24 ruling keeps this OFF. */
+  /** Master switch. 2026-10-27 user ruling: OFF — accept burning to balance. */
   readonly enabled: boolean
   /** Minimum remaining balance to keep switching; unset while the dependency is open. */
   readonly minBalance?: number
@@ -36,9 +38,11 @@ export interface Config {
   readonly enabled?: boolean
   /** Poll cadence; the ruling range is 30–60 s and resolveConfig clamps into it. */
   readonly pollIntervalMs?: number
-  /** Trigger line: any window `used/limit >= triggerRatio` switches (ruling: 0.99). */
+  /** In-flight trigger: any window `used/limit >= triggerRatio` switches the active set (ruling: 0.99). */
   readonly triggerRatio?: number
-  /** Restore hysteresis: every window must read `< restoreRatio` (ruling: 0.70). */
+  /** Default-leg line: any window `>= defaultRatio` flips only the global default model (ruling 2026-10-27: 0.95). */
+  readonly defaultRatio?: number
+  /** Shared restore line: all three windows must read `< restoreRatio` (ruling 2026-10-27: 0.95; was 0.70). */
   readonly restoreRatio?: number
   /** Shortest triggered-phase stay before a restore is allowed; 0 = off (ruling). */
   readonly minDwellMs?: number
@@ -52,7 +56,7 @@ export interface Config {
   readonly meterUrl?: string
   /** Env var holding the bearer key; read into process memory only, never logged. */
   readonly meterKeyEnv?: string
-  /** Balance guardrail policy; default disabled pending session-276c5584. */
+  /** Balance guardrail policy; disabled by the 2026-10-27 ruling (no cash gate). */
   readonly balanceGuardrail?: { readonly enabled?: boolean; readonly minBalance?: number }
 }
 
@@ -66,6 +70,7 @@ export const Config: z<Config> = z.object({
   enabled: z.boolean(),
   pollIntervalMs: z.number(),
   triggerRatio: z.number(),
+  defaultRatio: z.number(),
   restoreRatio: z.number(),
   minDwellMs: z.number(),
   activeWindowMs: z.number(),
@@ -92,6 +97,7 @@ export interface ResolvedConfig {
   readonly enabled: boolean
   readonly pollIntervalMs: number
   readonly triggerRatio: number
+  readonly defaultRatio: number
   readonly restoreRatio: number
   readonly minDwellMs: number
   readonly activeWindowMs: number
@@ -152,7 +158,8 @@ export function resolveConfig(config: Config, clampPoll?: (raw: number, clamped:
     enabled: config.enabled ?? true,
     pollIntervalMs: poll,
     triggerRatio: ratio(config.triggerRatio, 0.99, 'triggerRatio'),
-    restoreRatio: ratio(config.restoreRatio, 0.70, 'restoreRatio'),
+    defaultRatio: ratio(config.defaultRatio, 0.95, 'defaultRatio'),
+    restoreRatio: ratio(config.restoreRatio, 0.95, 'restoreRatio'),
     minDwellMs: duration(config.minDwellMs, 0, 'minDwellMs'),
     activeWindowMs: duration(config.activeWindowMs, 30 * 60_000, 'activeWindowMs'),
     switchTo: target(config.switchTo, { provider: 'mimo', model: 'mimo-v2.6-flash' }, 'switchTo'),

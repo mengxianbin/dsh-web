@@ -97,7 +97,7 @@ describe('auto-route closed loop — ruling thresholds over synthetic readings',
     expect(trigger).toMatchObject({ switched: 1, skipped: 0, failed: 0, defaultSaved: true, ratios: { week: 0.995 } })
     expect(env.rig.status().policy.lastOutcome?.results).toEqual([{ sessionId: 's-active', status: 'switched' }])
 
-    // 3) Simulated recovery: every window under 0.70 → switch back.
+    // 3) Simulated recovery: every window under the 0.95 restore line → both legs home.
     env.advance(30_000)
     env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
     await env.rig.tick()
@@ -124,6 +124,58 @@ describe('auto-route closed loop — ruling thresholds over synthetic readings',
     expect(env.selects).toHaveLength(1)
     expect(env.phase()).toBe('triggered')
   })
+
+  it('default leg at ≥0.95 moves only the default — sessions keep running until 0.99', async () => {
+    const env = rig()
+    env.tracker.recordRequest('s-active', 10_000_000)
+
+    // 1) 95–99 dead zone: the default flips to mimo, the running session does not.
+    env.setRatios({ week: 0.96 })
+    await env.rig.tick()
+    expect(env.selects).toEqual([]) // in-flight leg untouched
+    expect(env.saves).toEqual([MIMO]) // new sessions are born on mimo
+    expect(env.phase()).toBe('baseline') // badge still renders Go
+    expect(env.source()).toBe('opencode-go')
+    expect(env.rig.status().policy.defaultsSource).toBe('mimo') // divergence is observable
+    expect(env.rig.status().policy.lastDefaultSwitch).toMatchObject({ defaultSaved: true, switched: 0, ratios: { week: 0.96 } })
+
+    // 2) Crossing 0.99 engages the in-flight leg (the default save repeats idempotently).
+    env.advance(30_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.selects).toEqual([{ sessionId: 's-active', ...MIMO }])
+    expect(env.saves.at(-1)).toEqual(MIMO)
+    expect(env.phase()).toBe('triggered')
+    expect(env.source()).toBe('mimo')
+
+    // 3) Recovery below the shared 0.95 line returns both legs home.
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick()
+    expect(env.selects.at(-1)).toEqual({ sessionId: 's-active', ...BACK })
+    expect(env.saves.at(-1)).toEqual(BACK)
+    expect(env.phase()).toBe('baseline')
+    expect(env.rig.status().policy.defaultsSource).toBe('opencode-go')
+    expect(env.logs.error).toEqual([])
+  })
+
+  it('a default-only restore never touches running sessions', async () => {
+    const env = rig()
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.96 })
+    await env.rig.tick()
+    expect(env.saves).toEqual([MIMO])
+    // The window resets below the line before 0.99 was ever reached: the
+    // policy never moved the session, so the down-edge must not stomp it.
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick()
+    expect(env.selects).toEqual([])
+    expect(env.saves.at(-1)).toEqual(BACK) // the default still comes home
+    expect(env.phase()).toBe('baseline')
+    expect(env.rig.status().policy.defaultsSource).toBe('opencode-go')
+    expect(env.rig.status().policy.lastRestore).toMatchObject({ switched: 0, defaultSaved: true })
+  })
 })
 
 describe('auto-route guards', () => {
@@ -145,6 +197,19 @@ describe('auto-route guards', () => {
     expect(env.selects).toHaveLength(1)
     expect(env.phase()).toBe('triggered')
     expect(env.rig.status().policy.targetProblem).toBeUndefined()
+  })
+
+  it('blocks the default edge when the target model is missing from the catalog', async () => {
+    const env = rig({ groups: [{ id: 'mimo', models: [{ id: 'mimo-v2.5' }] }, { id: 'opencode-go', models: [{ id: 'mimo-v2.6-flash' }] }] })
+    env.setRatios({ week: 0.96 }) // 95–99 dead zone: only the default leg would move
+    await env.rig.tick()
+    expect(env.saves).toEqual([]) // the default never points at an unroutable model
+    expect(env.rig.status().policy.defaultsSource).toBe('opencode-go')
+    const problem = env.rig.status().policy.targetProblem
+    expect(problem).toMatchObject({ action: 'default-switch', provider: 'mimo', model: 'mimo-v2.6-flash' })
+    expect(problem?.reason).toContain('not offered by provider')
+    expect(env.logs.error).toHaveLength(1)
+    expect(env.rig.status().policy.lastDecision).toBeUndefined() // blocked edge advances nothing
   })
 
   it('never decides on a failed poll (state and source untouched)', async () => {
@@ -199,10 +264,11 @@ describe('auto-route guards', () => {
   it('serves the ruling lines, targets, and the disabled balance guardrail on the status payload', async () => {
     const env = rig()
     const { policy } = env.rig.status()
-    expect(policy.lines).toEqual({ triggerRatio: 0.99, restoreRatio: 0.70, minDwellMs: 0, pollIntervalMs: 45_000, activeWindowMs: WINDOW })
+    expect(policy.lines).toEqual({ triggerRatio: 0.99, defaultRatio: 0.95, restoreRatio: 0.95, minDwellMs: 0, pollIntervalMs: 45_000, activeWindowMs: WINDOW })
     expect(policy.targets).toEqual({ switchTo: MIMO, restoreTo: BACK })
+    expect(policy.defaultsSource).toBe('opencode-go')
     expect(policy.balanceGuardrail.enabled).toBe(false)
-    expect(policy.balanceGuardrail.note).toContain('session-276c5584')
+    expect(policy.balanceGuardrail.note).toContain('2026-10-27')
     expect(env.rig.status().service).toBe('dsh-auto-route')
     expect(policy.activeSet.tracked).toBe(0)
   })

@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { Config, POLL_MAX_MS, POLL_MIN_MS, resolveConfig } from '../src/config.ts'
 
-describe('resolveConfig — ruling defaults (2026-10-24 参数包)', () => {
+describe('resolveConfig — ruling defaults (2026-10-24 参数包 · 2026-10-27 修订)', () => {
   it('fills every parameter with its ruling value', () => {
     const config = resolveConfig({})
     expect(config.enabled).toBe(true)
     expect(config.pollIntervalMs).toBe(45_000)
     expect(config.triggerRatio).toBe(0.99)
-    expect(config.restoreRatio).toBe(0.70)
+    expect(config.defaultRatio).toBe(0.95)
+    expect(config.restoreRatio).toBe(0.95)
     expect(config.minDwellMs).toBe(0)
     expect(config.activeWindowMs).toBe(30 * 60_000)
     expect(config.switchTo).toEqual({ provider: 'mimo', model: 'mimo-v2.6-flash' })
@@ -31,6 +32,7 @@ describe('resolveConfig — ranges', () => {
   it('refuses ratios outside (0, 1] instead of silently diverging from the ruling', () => {
     expect(() => resolveConfig({ triggerRatio: 1.5 })).toThrow(RangeError)
     expect(() => resolveConfig({ triggerRatio: 0 })).toThrow(RangeError)
+    expect(() => resolveConfig({ defaultRatio: Number.NaN })).toThrow(RangeError)
     expect(() => resolveConfig({ restoreRatio: Number.NaN })).toThrow(RangeError)
   })
 

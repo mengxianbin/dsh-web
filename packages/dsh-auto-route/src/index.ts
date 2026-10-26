@@ -24,14 +24,17 @@ export const name = 'dsh-auto-route'
 export const inject = ['webServer', 'sessionController']
 
 /**
- * Auto source routing controller (2026-10-24 ruling, form 乙): polls the Go
- * meters on a30–60 s cadence, switches the active session set (running ∪
- * requested within 30 min) to the MiMo official route when any window reads
- * `>= 0.99`, and switches back to opencode-go when all three windows read
- * `< 0.70`. The policy state is served read-only at loopback-fenced
+ * Auto source routing controller (2026-10-24 ruling, form 乙; parameters
+ * revised 2026-10-27): polls the Go meters on a 30–60 s cadence with two
+ * up-edges and one shared down-edge — any window `>= 0.95` moves only the
+ * global default model (new/rotated sessions born on MiMo), any window
+ * `>= 0.99` additionally batch-switches the active session set (running ∪
+ * requested within 30 min), and all three windows `< 0.95` bring both back to
+ * opencode-go. The policy state is served read-only at loopback-fenced
  * `GET /api/auto-route/status` — the authority for the sidebar's current-
- * source badge. The balance guardrail stays disabled pending session-276c5584.
- * Host-only package: no `dsh.client` face, nothing in the browser roster.
+ * source badge. The balance guardrail stays disabled per the 2026-10-27
+ * ruling (no cash gate — burn to balance). Host-only package: no `dsh.client`
+ * face, nothing in the browser roster.
  */
 export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config): void => {
   if (Config(config).enabled === false) return
