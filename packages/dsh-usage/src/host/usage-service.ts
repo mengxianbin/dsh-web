@@ -49,6 +49,30 @@ export interface UsageServiceOptions {
 /** Probe timeout per HTTP call. */
 const PROBE_TIMEOUT_MS = 10_000
 
+/**
+ * How long a failed probe may keep serving its last fact (stale but
+ * useful) before the fact degrades to absent (FORK
+ * usage-glance-stale-fact-ttl, 2026-10-27): two hours at the default 60s
+ * poll is ~120 consecutive failures — long enough to ride out a transient
+ * outage, short enough that a dead channel (expired platform cookie,
+ * revoked key) stops presenting its frozen figure as current within the
+ * same day. The error line still explains the absence.
+ */
+const STALE_FACT_TTL_MS = 7_200_000
+
+/**
+ * Whether a retained fact's last successful probe is too old to keep
+ * serving: measured from the fact's own `updatedAt` (the probe instant),
+ * so it survives restarts via the persisted snapshot and a fact carried
+ * over from an old disk state ages out on the first failing cycle.
+ */
+function pastFactTTL(fact: { updatedAt?: number } | undefined): boolean {
+  // A fact without a probe instant (legacy persisted shape) cannot prove
+  // freshness — it degrades rather than riding forever.
+  if (fact === undefined || typeof fact.updatedAt !== 'number') return true
+  return Date.now() - fact.updatedAt > STALE_FACT_TTL_MS
+}
+
 /** Ledger flush debounce. */
 const FLUSH_DEBOUNCE_MS = 3_000
 
@@ -629,12 +653,15 @@ export class UsageService {
       }
     }
     const balance = await runProbe('balance')
-    // A failed probe keeps the previous fact visible (stale but useful).
+    // A failed probe keeps the previous fact visible (stale but useful) —
+    // only while the fact stays fresh: past STALE_FACT_TTL_MS since its own
+    // last success it degrades to absent, so a dead channel cannot present
+    // a frozen figure as current forever (FORK usage-glance-stale-fact-ttl).
     if (balance !== undefined) snapshot.balance = balance as BalanceView
-    else if (previous?.balance !== undefined) snapshot.balance = previous.balance
+    else if (previous?.balance !== undefined && !pastFactTTL(previous.balance)) snapshot.balance = previous.balance
     const plan = await runProbe('plan')
     if (plan !== undefined) snapshot.plan = plan as PlanView
-    else if (previous?.plan !== undefined) snapshot.plan = previous.plan
+    else if (previous?.plan !== undefined && !pastFactTTL(previous.plan)) snapshot.plan = previous.plan
     this.snapshots.set(route.id, snapshot)
   }
 

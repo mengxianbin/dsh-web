@@ -98,6 +98,7 @@ afterEach(() => {
   delete process.env.DSH_HOME
   rmSync(home, { recursive: true, force: true })
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 function writeLedgerFile(days: Record<string, Record<string, Record<string, unknown>>>): void {
@@ -183,6 +184,54 @@ describe('probes and per-fact errors', () => {
     await service.refresh()
     provider = service.overview().providers[0]
     expect(provider?.error).toBeUndefined()
+    service.stop()
+  })
+
+  it('degrades a balance fact to absent once failures outlive the stale TTL, keeping the error line', async () => {
+    // FORK usage-glance-stale-fact-ttl: a dead channel (expired platform
+    // cookie) must stop presenting its frozen figure as current — the fact
+    // survives transient blips (within TTL) but not a day-long outage.
+    vi.useFakeTimers({ now: new Date('2026-10-27T00:00:00Z') })
+    const fetchMock = stubFetch(() => jsonResponse(BALANCE_BODY))
+    const { ctx } = makeCtx({ llm: LLM_DEEPSEEK, credentials: CREDENTIALS_ENV })
+    const service = new UsageService(ctx, OPTIONS)
+    await service.refresh()
+    expect(service.overview().providers[0]?.balance).toBeDefined()
+
+    // The probe starts failing; within the TTL the stale fact stays.
+    fetchMock.mockImplementation(async () => jsonResponse({ message: 'Invalid key' }, 401))
+    vi.setSystemTime(Date.now() + 60 * 60 * 1000)
+    await service.refresh()
+    let provider = service.overview().providers[0]
+    expect(provider?.balance).toMatchObject({ totalBalance: '110.00' })
+    expect(provider?.error).toBe('HTTP 401: Invalid key')
+
+    // Past the TTL the fact degrades to absent; the error line remains.
+    vi.setSystemTime(Date.now() + 65 * 60 * 1000)
+    await service.refresh()
+    provider = service.overview().providers[0]
+    expect(provider?.balance).toBeUndefined()
+    expect(provider?.error).toBe('HTTP 401: Invalid key')
+    service.stop()
+  })
+
+  it('applies the same stale TTL to plan facts', async () => {
+    vi.useFakeTimers({ now: new Date('2026-10-27T00:00:00Z') })
+    const planBody = {
+      limits: [{ window: { duration: 300, timeUnit: 'TIME_UNIT_MINUTE' }, detail: { name: '5h limit', used: 50, limit: 100 } }],
+    }
+    const fetchMock = stubFetch(() => jsonResponse(planBody))
+    const { ctx } = makeCtx({ llm: LLM_KIMI, credentials: CREDENTIALS_KIMI_KEY })
+    const service = new UsageService(ctx, OPTIONS)
+    await service.refresh()
+    expect(service.overview().providers[0]?.plan?.windows).toHaveLength(1)
+
+    fetchMock.mockImplementation(async () => jsonResponse({}, 500))
+    vi.setSystemTime(Date.now() + 3 * 60 * 60 * 1000)
+    await service.refresh()
+    const provider = service.overview().providers[0]
+    expect(provider?.plan).toBeUndefined()
+    expect(provider?.error).toBeTruthy()
     service.stop()
   })
 
