@@ -1,0 +1,10 @@
+# dsh-mimo-relogin bundle patch: inserts the host-only MiMo re-login kit
+# into the web plugin roster. The bundle is the official dsh plugin shape —
+# install it into a dsh profile
+# (`dsh plugin --profile <name> add link:<repo>/packages/dsh-mimo-relogin`).
+# The single row mounts the host side only (GET /api/mimo-relogin/page plus
+# the status/renew/capture/open/paste actions); the package declares no
+# `dsh.client` face, so nothing appears in the browser roster.
+- insert:
+    - id: mimo-relogin
+      name: dsh-mimo-relogin

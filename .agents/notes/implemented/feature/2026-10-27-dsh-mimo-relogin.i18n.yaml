@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-27-dsh-mimo-relogin.md: 615963c20b27bdf32664aec2fb6fc18a8be6e975
+2026-10-27-dsh-mimo-relogin.zh.md: 5b6c889c1c7dba9f3a9da95c494e267367ed964e
