@@ -89,6 +89,8 @@ same-origin markers); remote sockets answer `403`.
   results), `targetProblem` (blocked-edge diagnostics)
 - `activeSet` (tracked sessions with running flag and request recency;
   subagent sessions are marked and never switched)
+- `manualLocks` (sessions a human touched: divergent `provider/model` value +
+  lock time — both edges skip them until realigned; A case, 2026-10-27)
 - `balanceGuardrail` (`enabled` plus a note naming the ruling that keeps it
   off)
 
@@ -108,6 +110,13 @@ same-origin markers); remote sockets answer `403`.
   default save); the shared restore returns both — but its session pass runs
   only when the in-flight leg had engaged, so a default-only restore never
   stomps sessions the policy never moved.
+- **Manual locks (A case, 2026-10-27 人工锁定优先)**: every durable
+  `model/selection` event is classified auto vs human (write expectation +
+  ledger + live-target comparison — the shared `selectModel` channel carries
+  no origin metadata); a human touch locks the session so **both edges** report
+  `skipped` / `manual-lock` until its value realigns with the ledger or the
+  live target. Locks and ledger are in-memory (a restart clears them);
+  same-value and effort-only touches stay invisible (disclosed blind spots).
 - **No decision on bad data**: a failed meter poll records `lastPoll.ok:
   false` and touches nothing; recovery resumes on the next good reading.
 - Policy state is in-memory: a Host restart boots back to `baseline`, and the
@@ -124,6 +133,8 @@ same-origin markers); remote sockets answer `403`.
 - `src/meters.ts` — go/status fetch (unrounded ratios, no secret ever
   logged).
 - `src/active-set.ts` — running/recent/subagent activity ledger.
+- `src/manual-lock.ts` — manual-lock ledger (A case): write expectations,
+  ownership values, and the locks both edges honor.
 - `src/host/routes.ts` — the loopback-fenced status route.
 - `src/host/loopback.ts`, `src/host/http.ts`, `src/mount-once.ts` — generated
   copies of the repository-shared host modules (edit `shared/host/*` and run

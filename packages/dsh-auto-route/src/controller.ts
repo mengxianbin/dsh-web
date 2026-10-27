@@ -15,6 +15,7 @@ import type { ModelTarget, ResolvedConfig } from './config.ts'
 import type { ActiveSetTracker } from './active-set.ts'
 import { decide, initialPolicyState, type Decision, type EdgeRecord, type PolicyState } from './policy.ts'
 import type { MeterReading, WindowMeter } from './meters.ts'
+import { ManualLockTracker, type ManualLockEntry } from './manual-lock.ts'
 
 /** Minimal logger surface (the Host logger satisfies it). */
 export interface ControllerLogger {
@@ -107,6 +108,8 @@ export interface AutoRouteStatusView {
       readonly tracked: number
       readonly entries: readonly { sessionId: string; running: boolean; lastRequestAt?: number; subagent?: boolean }[]
     }
+    /** Human-touched sessions — both edges skip them until realigned (A case). */
+    readonly manualLocks: readonly ManualLockEntry[]
     readonly balanceGuardrail: {
       readonly enabled: boolean
       readonly minBalance?: number
@@ -134,6 +137,8 @@ export class AutoRouteController {
   private lastPoll?: { at: number; ok: boolean; error?: string }
   private targetProblem?: TargetProblem
   private lastOutcome?: OutcomeRecord
+  /** Manual-lock ledger (A case, 2026-10-27): human touches skip both edges. */
+  private readonly locks = new ManualLockTracker()
 
   constructor(private readonly deps: AutoRouteDeps) {
     this.now = deps.now ?? Date.now
@@ -236,8 +241,16 @@ export class AutoRouteController {
 
     const runSessionPass = decision.action === 'switch' || (decision.action === 'restore' && wasTriggered)
     const active = runSessionPass ? this.deps.tracker.snapshot(now, config.activeWindowMs) : []
+    const value = `${target.provider}/${target.model}`
     const results: SwitchOutcome[] = []
     for (const sessionId of active) {
+      // A case (2026-10-27): a human-touched session is locked — both edges
+      // skip it (visible as skipped/manual-lock) until its selection realigns.
+      if (this.locks.isLocked(sessionId)) {
+        results.push({ sessionId, status: 'skipped', detail: 'manual-lock' })
+        continue
+      }
+      this.locks.expect(sessionId, value)
       try {
         await this.deps.sessions.selectModel({
           sessionId,
@@ -245,8 +258,10 @@ export class AutoRouteController {
           model: target.model,
           ...(target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort }),
         })
+        this.locks.confirm(sessionId, value)
         results.push({ sessionId, status: 'switched' })
       } catch (error) {
+        this.locks.abort(sessionId)
         const classified = classify(error)
         results.push({ sessionId, status: classified.status, detail: classified.detail })
         this.deps.logger.warn(`dsh-auto-route: ${classified.status} session ${sessionId} during ${decision.action}: ${classified.detail}`)
@@ -320,6 +335,30 @@ export class AutoRouteController {
     }
   }
 
+  /**
+   * Host hook: classify one durable model/selection event (A case, 2026-10-27
+   * 人工锁定优先). A human touch locks the session — both edges skip it —
+   * until the selection realigns with the ledger or the live policy target.
+   * @param sessionId - session whose selection changed.
+   * @param selection - the new durable selection.
+   * @param now - wall-clock ms (tests inject; defaults to the controller clock).
+   */
+  onSelectionEvent(sessionId: string, selection: { readonly provider: string; readonly model: string }, now?: number): void {
+    const target = this.state.phase === 'triggered' ? this.deps.config.switchTo : this.deps.config.restoreTo
+    const verdict = this.locks.observe(
+      sessionId,
+      `${selection.provider}/${selection.model}`,
+      now ?? this.now(),
+      `${target.provider}/${target.model}`,
+    )
+    if (verdict === 'manual-lock' || verdict === 'manual-relock') {
+      this.deps.logger.info(
+        `dsh-auto-route: manual lock session ${sessionId} → ${selection.provider}/${selection.model}`
+        + ` (${verdict}; both edges skip it until realigned)`,
+      )
+    }
+  }
+
   /** The status endpoint's payload (badge + triage). */
   status(): AutoRouteStatusView {
     const { config } = this.deps
@@ -353,6 +392,7 @@ export class AutoRouteController {
         ...(this.targetProblem === undefined ? {} : { targetProblem: this.targetProblem }),
         ...(this.lastOutcome === undefined ? {} : { lastOutcome: this.lastOutcome }),
         activeSet: { tracked: this.deps.tracker.size, entries: this.deps.tracker.view(50) },
+        manualLocks: this.locks.snapshot(),
         balanceGuardrail: {
           enabled: config.balanceGuardrail.enabled,
           ...(config.balanceGuardrail.minBalance === undefined ? {} : { minBalance: config.balanceGuardrail.minBalance }),

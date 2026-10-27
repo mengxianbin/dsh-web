@@ -273,3 +273,72 @@ describe('auto-route guards', () => {
     expect(policy.activeSet.tracked).toBe(0)
   })
 })
+
+describe('manual locks (A case, 2026-10-27 人工锁定优先)', () => {
+  it('a human touch locks the session — the trigger edge skips it as manual-lock', async () => {
+    const env = rig()
+    env.tracker.recordRequest('s-lock', 10_000_000)
+    env.tracker.recordRequest('s-free', 10_000_000)
+    // baseline live target = opencode-go side; a human flip to mimo diverges → lock
+    env.rig.onSelectionEvent('s-lock', MIMO)
+    expect(env.rig.status().policy.manualLocks).toEqual([
+      { sessionId: 's-lock', value: 'mimo/mimo-v2.6-flash', lockedAt: 10_000_000 },
+    ])
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.selects).toEqual([{ sessionId: 's-free', ...MIMO }])
+    expect(env.rig.status().policy.lastOutcome?.results).toEqual([
+      { sessionId: 's-lock', status: 'skipped', detail: 'manual-lock' },
+      { sessionId: 's-free', status: 'switched' },
+    ])
+    expect(env.rig.status().policy.lastTrigger).toMatchObject({ switched: 1, skipped: 1, failed: 0 })
+    expect(env.logs.info.join('\n')).toContain('manual lock session s-lock')
+  })
+
+  it('the restore edge skips it too; a realigning touch unlocks it for the next edge', async () => {
+    const env = rig()
+    env.tracker.recordRequest('s-lock', 10_000_000)
+    env.tracker.recordRequest('s-free', 10_000_000)
+    env.rig.onSelectionEvent('s-lock', MIMO)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick() // trigger: s-lock skipped, s-free switched
+    expect(env.selects).toHaveLength(1)
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick() // restore: s-lock STILL skipped, s-free comes back
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-free', 's-free'])
+    expect(env.rig.status().policy.lastRestore).toMatchObject({ switched: 1, skipped: 1 })
+    expect(env.rig.status().policy.manualLocks).toHaveLength(1)
+    // human realigns with the live target (baseline = opencode-go) → unlock
+    env.rig.onSelectionEvent('s-lock', BACK)
+    expect(env.rig.status().policy.manualLocks).toEqual([])
+    env.advance(30_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick() // next trigger manages s-lock again
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-free', 's-free', 's-lock', 's-free'])
+    expect(env.rig.status().policy.lastTrigger).toMatchObject({ switched: 2, skipped: 0 })
+  })
+
+  it("the controller's own switch is never read back as a human touch", async () => {
+    const env = rig()
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.selects).toHaveLength(1)
+    // the durable event echo arrives late — must not self-lock
+    env.rig.onSelectionEvent('s-active', MIMO)
+    expect(env.rig.status().policy.manualLocks).toEqual([])
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick() // restore still touches it
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-active', 's-active'])
+  })
+
+  it('a touch to the live target never locks (same-value blind spot stays clean)', async () => {
+    const env = rig()
+    env.rig.onSelectionEvent('s-x', BACK) // baseline target = opencode-go side
+    expect(env.rig.status().policy.manualLocks).toEqual([])
+    await env.rig.tick()
+    expect(env.selects).toEqual([])
+  })
+})

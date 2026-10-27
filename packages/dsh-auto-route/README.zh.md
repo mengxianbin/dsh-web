@@ -77,6 +77,8 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
   `switched`/`skipped`/`failed`/`defaultSaved`）、`lastOutcome`（逐会话结果）、
   `targetProblem`（阻断诊断）
 - `activeSet`（跟踪中的会话：运行标记与请求新鲜度；子代理会话会标注且永不切）
+- `manualLocks`（被人工碰过的会话：发散的 `provider/model` 值 + 加锁时刻——
+  两条沿都跳过它们直到值重新对齐；A 案 2026-10-27）
 - `balanceGuardrail`（`enabled` + 指名使其关闭的裁定说明）
 
 非 loopback `403`、方法错 `405`、状态生产者异常 `500`。
@@ -92,6 +94,11 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
   （`agent-default-model`）、绝不碰在跑会话；在途边批量切活跃集（并重复一次
   默认保存）；共用下沿把两腿一起送回——但其会话趟**仅在在途腿曾动作过时**
   执行，默认腿单独回落绝不踩动策略从未挪过的会话。
+- **人工锁定（A 案，2026-10-27 人工锁定优先）**：每条耐久 `model/selection`
+  事件都做自动/人工判别（写入期望 + 台账 + 活目标对账——共享 `selectModel`
+  通道无来源元数据）；人工碰过即锁，**两条沿**都记 `skipped` / `manual-lock`
+  跳过，直到值与台账或活目标重新对齐。锁与台账为内存态（重启即清）；同值
+  触碰与仅 effort 变更不可见（已披露盲区）。
 - **坏数据不决策**：计量轮询失败只记 `lastPoll.ok: false`、状态分毫不动；
   下一次好读数照常决策。
 - 策略状态在内存中：宿主重启后回到 `baseline`，首次轮询即从实况读数重推相位。
@@ -104,6 +111,8 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
 - `src/controller.ts` — 轮询环、目录预检、切换批、默认保存、状态视图。
 - `src/meters.ts` — go/status 抓取（未取整比值；秘密永不入日志）。
 - `src/active-set.ts` — 运行/新鲜/子代理活动台账。
+- `src/manual-lock.ts` — 人工锁定台账（A 案）：写入期望、所有权值、两沿共守
+  的锁。
 - `src/host/routes.ts` — loopback 围栏状态路由。
 - `src/host/loopback.ts`、`src/host/http.ts`、`src/mount-once.ts` — 仓内共享
   host 模块的生成副本（改 `shared/host/*` 后跑 `node scripts/sync-shared.mjs`）。

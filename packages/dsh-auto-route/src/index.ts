@@ -32,9 +32,12 @@ export const inject = ['webServer', 'sessionController']
  * requested within 30 min), and all three windows `< 0.95` bring both back to
  * opencode-go. The policy state is served read-only at loopback-fenced
  * `GET /api/auto-route/status` — the authority for the sidebar's current-
- * source badge. The balance guardrail stays disabled per the 2026-10-27
- * ruling (no cash gate — burn to balance). Host-only package: no `dsh.client`
- * face, nothing in the browser roster.
+ * source badge. Manual overrides (2026-10-27 A ruling 人工锁定优先): a human
+ * model switch locks that session, both edges skip it until its selection
+ * realigns — health-class rescues (tool-call failures / model instability)
+ * stay human-only by scope. The balance guardrail stays disabled per the
+ * 2026-10-27 ruling (no cash gate — burn to balance). Host-only package: no
+ * `dsh.client` face, nothing in the browser roster.
  */
 export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config): void => {
   if (Config(config).enabled === false) return
@@ -76,12 +79,25 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
       catalog: ctx.sessionController as unknown as CatalogApi,
       ...(defaultModel === undefined ? {} : { defaultModel }),
     })
+    // Durable model/selection events classify auto vs human (A case: a human
+    // touch locks the session — both edges skip it until realigned). The
+    // shared selectModel channel carries no origin metadata, so the
+    // controller judges by expectation + ledger + live-target comparison.
+    const offSelection = ctx.on('session/event', (session, event) => {
+      if (event.type !== 'model/selection') return
+      const data = (event as unknown as { data?: unknown }).data
+      if (data === null || typeof data !== 'object') return
+      const { provider, model } = data as { provider?: unknown; model?: unknown }
+      if (typeof provider !== 'string' || typeof model !== 'string') return
+      controller.onSelectionEvent(String(session.id), { provider, model })
+    })
     controller.start()
     const disposeRoute = ctx.webServer.register(makeStatusRoute(controller))
     return () => {
       controller.stop()
       try { offRequest() } catch { /* listener already gone during shutdown */ }
       try { offStatus() } catch { /* listener already gone during shutdown */ }
+      try { offSelection() } catch { /* listener already gone during shutdown */ }
       try { disposeRoute() } catch { /* route fiber already gone during shutdown */ }
     }
   }, 'dsh-auto-route: policy controller')
