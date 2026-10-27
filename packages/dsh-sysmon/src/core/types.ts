@@ -33,40 +33,36 @@ export interface SysmonWarnThresholds {
 }
 
 /**
- * Which handshake shape produced a connection reading: `direct` (DNS + TCP +
- * TLS straight to the origin — all real network) or `proxy` (a local HTTP
- * proxy tunnel: the TCP leg to the proxy is loopback, the span covers the
- * CONNECT reply + TLS handshake over the tunnel). The chip tooltip states
- * this per shape (2026-10-27 ruling, ask id `sysmon-net-direction`).
- */
-export type SysmonNetVia = 'direct' | 'proxy'
-
-/**
- * Provider-network reading (v4, latency half revised 2026-10-27): passive
- * observations over one shared sliding window. `connMs` measures the pure
- * connection segment — DNS → TCP connect → TLS secureConnect — stamped at the
- * socket layer of the same real request that carried the model call (TTFT
- * was withdrawn from the main grid: provider queue + first-token generation
- * drowned the network component); `failures` counts network-class failures
- * (`TIMEOUT`/`TRANSPORT`) inside the window. An empty window reads null/`—`
- * — never a stale number.
+ * Network-quality reading (A-case, 2026-10-28 ruling, ask id
+ * `net-quality-semantics`): the latency half is now a low-frequency active
+ * ICMP probe — one `ping` round trip to a fixed domestic reference target
+ * every 60s — so the read-out means one simple thing: "is this machine's
+ * network healthy", on the same bare-network-layer dimension the user's
+ * `ping api.deepseek.com` (19ms) reference demonstrated. Cross-border and
+ * proxy-path trouble is carried by the failure half instead. The socket-layer
+ * connection reading (2026-10-27) and the v4 TTFT reading were both
+ * withdrawn from the grid; their wire fields stay as always-null stubs so
+ * pre-A-case client bundles render `—` rather than `NaNms` during a restart
+ * window.
  */
 export interface SysmonNet {
-  /** Latest connection-segment latency in the window, ms; null when none (or aged out). */
-  connMs: number | null
-  /** Epoch ms of that connection observation; null with connMs. */
-  connAt: number | null
-  /** Which handshake shape produced connMs; null with connMs. */
-  connVia: SysmonNetVia | null
-  /**
-   * v4 TTFT wire stub: always null. Kept so a pre-revision client bundle
-   * polling a revised host renders the dash instead of `NaNms` during the
-   * restart window (the mirror of v4's optional-`net` degradation).
-   */
+  /** Latest probe round trip within the staleness bound, ms; null when none/stale/probe-disabled. */
+  rttMs: number | null
+  /** Epoch ms of that probe result; null with rttMs. */
+  rttAt: number | null
+  /** The fixed probe target the reading is measured against; null when probing is disabled. */
+  probe: string | null
+  /** Retired connection-reading wire stub: always null (pre-A-case clients render the dash). */
+  connMs: null
+  /** Retired connection-reading wire stub: always null. */
+  connAt: null
+  /** Retired handshake-shape wire stub: always null. */
+  connVia: null
+  /** Retired v4 TTFT wire stub: always null (first withdrawn 2026-10-27). */
   ttftMs: null
   /** Network-class failures inside the window. */
   failures: number
-  /** Route of the most recent observation (tooltip provider label); null when unknown or stale. */
+  /** Route of the most recent counted failure (the probe has no route); null when unknown or stale. */
   provider: string | null
   /** Whether the failure count reached the configured warn threshold. */
   warn: boolean

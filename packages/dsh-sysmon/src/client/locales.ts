@@ -15,11 +15,10 @@ export const zh = {
   'chip.title': '系统负载（1s 采样 · 宿主常驻）',
   'chip.diskDetail': '磁盘 读 {read} · 写 {write} MB/s',
   'chip.memDetail': '内存 {used} / {total} GB · 可用 {avail} GB',
-  'chip.netDetail': '网络 连接 {conn} · 10 分钟失败 {failures} 次',
+  'chip.netDetail': '网络 往返 {rtt} · 10 分钟失败 {failures} 次',
   'chip.netProvider': '路由 {provider}',
-  'chip.netIdle': '网络 近 10 分钟无模型请求',
-  'chip.netPathDirect': '连接口径：直连——DNS + TCP + TLS 握手全段真网络',
-  'chip.netPathProxy': '连接口径：经本机 HTTP 代理——到代理的 TCP 为回环不算网络，读数 = CONNECT 应答 + TLS 隧道握手（≈真 RTT）',
+  'chip.netIdle': '网络 暂无读数',
+  'chip.netPath': '测量口径：到 {target} 的 ICMP 往返（ping）——纯网络层时延，不含 DNS/TCP/TLS 握手与代理开销',
   'chip.stamp': '数据刷新于 {t}',
 }
 
@@ -36,10 +35,9 @@ export const en: Record<SysmonKey, string> = {
   'chip.title': 'System load (1s sampling, host-resident)',
   'chip.diskDetail': 'Disk {read} read · {write} write MB/s',
   'chip.memDetail': 'Memory {used} / {total} GB · {avail} GB available',
-  'chip.netDetail': 'Net connect {conn} · {failures} failures in 10 min',
+  'chip.netDetail': 'Net round trip {rtt} · {failures} failures in 10 min',
   'chip.netProvider': 'Route {provider}',
-  'chip.netIdle': 'Net no model requests in the last 10 minutes',
-  'chip.netPathDirect': 'Connect path: direct — DNS + TCP + TLS handshake, all real network',
-  'chip.netPathProxy': 'Connect path: via local HTTP proxy — TCP to the proxy is loopback (not network); reading = CONNECT reply + TLS tunnel handshake (~true RTT)',
+  'chip.netIdle': 'Net no reading yet',
+  'chip.netPath': 'Measurement: ICMP echo round trip to {target} (ping) — network-layer latency only, no DNS/TCP/TLS handshake or proxy overhead',
   'chip.stamp': 'Refreshed at {t}',
 }

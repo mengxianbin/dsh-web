@@ -14,10 +14,9 @@ export const ru: Record<string, string> = {
   'chip.title': 'Нагрузка на систему (сэмпл 1 с, на стороне хоста)',
   'chip.diskDetail': 'Диск: чтение {read} · запись {write} МБ/с',
   'chip.memDetail': 'Память {used} / {total} ГБ · доступно {avail} ГБ',
-  'chip.netDetail': 'Сеть: подключение {conn} · {failures} сбоев за 10 мин',
+  'chip.netDetail': 'Сеть: круговой замер {rtt} · {failures} сбоев за 10 мин',
   'chip.netProvider': 'Маршрут {provider}',
-  'chip.netIdle': 'Сеть: запросов к модели за последние 10 минут нет',
-  'chip.netPathDirect': 'Путь подключения: напрямую — DNS + TCP + TLS рукопожатие, вся сеть настоящая',
-  'chip.netPathProxy': 'Путь подключения: через локальный HTTP-прокси — TCP до прокси петля (не сеть); чтение = ответ CONNECT + TLS-хендшейк туннеля (~настоящий RTT)',
+  'chip.netIdle': 'Сеть: показаний пока нет',
+  'chip.netPath': 'Измерение: ICMP-круговой замер до {target} (ping) — только сетевой уровень, без DNS/TCP/TLS-рукопожатия и накладных расходов прокси',
   'chip.stamp': 'Обновлено в {t}',
 }

@@ -43,9 +43,16 @@ function fakeSnapshot(): SamplesSnapshot {
     latest: sample,
     warn: { cpu: false, mem: false, disk: false },
     thresholds: { cpu: 90, mem: 90, disk: 90 },
-    net: { connMs: 128, connAt: 1_761_000_000_000, connVia: 'direct', ttftMs: null, failures: 2, provider: 'deepseek', warn: true },
+    net: netReading,
     history: [sample],
   }
+}
+
+/** The A-case network reading the route passes through untouched. */
+const netReading = {
+  rttMs: 19, rttAt: 1_761_000_000_000, probe: 'api.deepseek.com',
+  connMs: null, connAt: null, connVia: null, ttftMs: null,
+  failures: 2, provider: 'deepseek', warn: true,
 }
 
 async function run(handler: (req: IncomingMessage, res: ServerResponse) => void, req: IncomingMessage): Promise<Captured> {
@@ -64,7 +71,7 @@ describe('makeSamplesRoute', () => {
     expect((body.latest as { cpu: number }).cpu).toBe(12.4)
     expect(body.warn).toEqual({ cpu: false, mem: false, disk: false })
     expect(body.thresholds).toEqual({ cpu: 90, mem: 90, disk: 90 })
-    expect(body.net).toEqual({ connMs: 128, connAt: 1_761_000_000_000, connVia: 'direct', ttftMs: null, failures: 2, provider: 'deepseek', warn: true })
+    expect(body.net).toEqual(netReading)
     expect(body.history).toBeUndefined()
   })
 

@@ -3,13 +3,13 @@
 [English](README.md) | 中文
 
 DSH web GUI 插件 sysmon——会话头部的实时系统指标 chip。它展示宿主每秒采样的
-CPU、内存与磁盘活动，外加纯被动的 provider 网络读数，并把连续多秒处于阈值上方
-的指标染红，让你不用离开对话就能看到机器是否被打满、模型链路是否在劣化。
+CPU、内存与磁盘活动，外加低频探测的网络质量读数，并把连续多秒处于阈值上方
+的指标染红，让你不用离开对话就能看到机器是否被打满、网络是否健康。
 
 ## 能力
 
 - 在 `conversation.session.header.actions` 槽、agent-preset 标签右侧挂一枚紧凑
-  chip：四个等宽数字读数（CPU 忙碌 %、内存占用 %、磁盘忙碌 %、provider 网络），
+  chip：四个等宽数字读数（CPU 忙碌 %、内存占用 %、磁盘忙碌 %、网络），
   悬停 tooltip 展示磁盘吞吐、内存绝对值与网络明细。
 - 同一枚 chip 同时镜像到 `conversation.header.leading`——无会话时唯一仍渲染的
   头部单元格，空会话隐藏动作行时它也保持可见。两个座位经模块级挂载信号互斥，
@@ -17,16 +17,18 @@ CPU、内存与磁盘活动，外加纯被动的 provider 网络读数，并把�
 - 宿主每秒采样：CPU 来自 `os.cpus()` 差分，内存来自 `os.totalmem()` /
   `os.freemem()`，磁盘来自一个常驻 `typeperf` 子进程经 stdout 流式输出的三个
   `PhysicalDisk(_Total)` 计数器。
-- **provider 网络读数（v4，纯被动；延迟半区 2026-10-27 修订）**：宿主在 socket
-  层对每次真实模型请求打**连接段**时间戳——DNS 解析 → TCP 连接 → TLS 握手完成，
-  走的与业务请求完全同一条路（直连或经本机 HTTP 代理）——并监听 harness 的
-  `agent/request-error`（按 `TIMEOUT`/`TRANSPORT` 归类的失败），共用一个
-  **10 分钟滑动窗口**。tooltip 明示读数覆盖哪一段（直连 = 握手全段真网络；
-  走代理 = 到代理的回环不算网络，读数以 CONNECT 应答 + TLS 隧道握手为主）。
-  读数形如 `23ms` / `⚠3` / `23ms ⚠3`，窗口内失败数达阈值即染红；窗口清空显
-  `—`，绝不展示陈旧值。**零主动探测、零额外流量**。TTFT（首 token 延迟）随本次
-  修订撤出主格：服务端排队与首 token 生成把网络分量淹没，而连接段与
-  CPU/内存/磁盘读数同为毫秒量纲。
+- **网络质量读数（A 案，2026-10-28 判定）**：延迟半区 = 低频**主动 ICMP
+  探测**——宿主每 60 秒对固定国内参照点（`netProbeTarget`，默认
+  `api.deepseek.com`）发一个 `ping` 单包，取往返毫秒数；这是与
+  `ping <目标>` 同一个单纯概念（纯网络层往返），DNS/TCP/TLS 握手、代理
+  隧道与服务端排队**刻意排除在语义之外**（此前连接段口径把这几段叠加成
+  500ms 级读数，正是本次换口径的原因）。失败半区仍是**纯被动**：监听
+  harness 的 `agent/request-error`（按 `TIMEOUT`/`TRANSPORT` 归类的失败），
+  进 **10 分钟滑动窗口**——跨境/代理链路的问题由它兜底。读数形如 `19ms` /
+  `⚠3` / `19ms ⚠3`，窗口内失败数达阈值即染红；探测失败不更新读数，最后
+  实测值超过 150 秒自然老化显 `—`，绝不展示陈旧值；tooltip 明示测量口径
+  （到哪个目标的 ICMP 往返）。探测频率每分钟 1 包、32 字节，流量可忽略，
+  `netProbeTarget: ''` 可整体禁用（RTT 半区显 `—`，失败计数照常）。
 - 宿主内存里保留十分钟环形缓冲（600 个样本），藏在 `GET /api/sysmon/samples`
   后面，将来加历史视图无需改宿主。
 - 告警按「连续样本」而非「单点尖峰」触发：某指标只有连续 `warnStreak` 个样本
@@ -62,14 +64,16 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-sysmon
 | `diskWarnPercent` | number | `90` | 触发磁盘染红的忙碌百分比。 |
 | `warnStreak` | number | `3` | 告警所需的连续采样个数。 |
 | `netWarnFailures` | number | `1` | 10 分钟窗口内网络失败数达到该值时网络读数染红；`0` 关闭染红（计数仍显示）。 |
+| `netProbeTarget` | string | `api.deepseek.com` | ICMP 探测的固定参照点（国内、路由稳定）；空字符串禁用探测（RTT 半区显 `—`）。 |
 
 ## 安全模型
 
 `GET /api/sysmon/samples` 是只读路由，走共享的 pair-access 栅栏：loopback 请求
 恒过，配了 remote-web-ui 的配对设备 cookie 也过；未配对的局域网或隧道请求一律
 `403` 拒绝。链路上不传任何凭据、路径或进程名——只有每秒聚合计数器与网络
-读数（连接段毫秒 + `direct`/`proxy` 握手形态标志、失败计数、provider 路由名，
-如 `deepseek`——路由标识，非端点 URL、非密钥；`ttftMs` 为恒空的兼容桩字段）。
+读数（探测往返毫秒 + 参照点目标名、失败计数、失败来源的 provider 路由名，
+如 `deepseek`——路由标识，非端点 URL、非密钥；`connMs`/`connAt`/`connVia`/
+`ttftMs` 为已撤读数留下的恒空兼容桩字段）。
 
 ## 已知限制
 

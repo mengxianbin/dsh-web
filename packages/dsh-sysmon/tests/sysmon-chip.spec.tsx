@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-/** Sysmon header chip: values, warn coloring, the 404 hide contract, the v4 net reading. */
+/** Sysmon header chip: values, warn coloring, the 404 hide contract, the A-case net reading. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { SysmonChip, chipTitle, formatGB, netLine } from '../src/client/SysmonChip.tsx'
@@ -12,9 +12,9 @@ function makeTranslate() {
   return (key: string) => zh[key as SysmonKey] ?? key
 }
 
-/** The network reading fixtures carry by default: an empty window. */
+/** The network reading fixtures carry by default: no fresh probe round. */
 function netFixture(overrides: Partial<SysmonNet> = {}): SysmonNet {
-  return { connMs: null, connAt: null, connVia: null, ttftMs: null, failures: 0, provider: null, warn: false, ...overrides }
+  return { rttMs: null, rttAt: null, probe: 'api.deepseek.com', connMs: null, connAt: null, connVia: null, ttftMs: null, failures: 0, provider: null, warn: false, ...overrides }
 }
 
 function payload(
@@ -91,7 +91,7 @@ describe('SysmonChip', () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       status: 200,
       ok: true,
-      json: async () => payload({}, { cpu: false, mem: false, disk: false }, netFixture({ connMs: 128.4, connAt: 1_761_330_000_000, connVia: 'direct', failures: 3, provider: 'deepseek', warn: true })),
+      json: async () => payload({}, { cpu: false, mem: false, disk: false }, netFixture({ rttMs: 128.4, rttAt: 1_761_330_000_000, failures: 3, provider: 'deepseek', warn: true })),
     })))
     render(<SysmonChip t={makeTranslate()} />)
     await waitFor(() => expect(screen.getByText('128ms ⚠3')).toBeTruthy())
@@ -101,10 +101,11 @@ describe('SysmonChip', () => {
     expect(screen.getByText(zh['chip.net'])).toBeTruthy()
   })
 
-  it('degrades to the dash when a pre-revision host serves no connMs', async () => {
-    // Reverse window of v4's optional-`net` degradation: the payload still
-    // carries the v4 reading (ttftMs), the new client must render a dash.
-    const oldHostNet = { ttftMs: 128, ttftAt: 1_761_330_000_000, failures: 0, provider: 'deepseek', warn: false } as unknown as SysmonNet
+  it('degrades to the dash when a pre-A-case host serves no rttMs', async () => {
+    // Reverse window of the A-case wire change: the payload still carries
+    // the retired connection reading (connMs), the new client must render a
+    // dash instead of reusing it as if it were an RTT.
+    const oldHostNet = { connMs: 477, connAt: 1_761_330_000_000, connVia: 'proxy', ttftMs: null, failures: 0, provider: null, warn: false } as unknown as SysmonNet
     vi.stubGlobal('fetch', vi.fn(async () => ({
       status: 200,
       ok: true,
@@ -171,47 +172,50 @@ describe('chipTitle', () => {
     expect(chipTitle(null, makeTranslate())).toBe(zh['chip.title'])
   })
 
-  it('carries the net detail line with route label and the direct-path note', () => {
-    const title = chipTitle(payload({}, undefined, netFixture({ connMs: 96, connAt: 1_761_330_000_000, connVia: 'direct', failures: 1, provider: 'deepseek', warn: true })), makeTranslate())
-    expect(title).toContain('连接 96ms')
+  it('carries the net detail line with route label and the ICMP measurement note', () => {
+    const title = chipTitle(payload({}, undefined, netFixture({ rttMs: 96.2, rttAt: 1_761_330_000_000, failures: 1, provider: 'deepseek', warn: true })), makeTranslate())
+    expect(title).toContain('往返 96ms')
     expect(title).toContain('失败 1 次')
     expect(title).toContain('路由 deepseek')
-    expect(title).toContain(zh['chip.netPathDirect'])
-    // TTFT is withdrawn from the main grid and the tooltip (judge source
-    // 2026-10-27 ask `sysmon-net-direction`).
+    // Judge source 2026-10-28 ask `net-quality-semantics` (A-case): the
+    // tooltip names the fixed reference target the RTT is measured against.
+    expect(title).toContain(zh['chip.netPath'].replace('{target}', 'api.deepseek.com'))
+    expect(title).not.toContain('{target}')
+    // Retired wording must not resurface (connection segment / TTFT eras).
+    expect(title).not.toContain('连接口径')
     expect(title).not.toContain('首包')
   })
 
-  it('states the proxy-tunnel segment shape when the reading came through a local proxy', () => {
-    const title = chipTitle(payload({}, undefined, netFixture({ connMs: 210, connAt: 1_761_330_000_000, connVia: 'proxy', failures: 0, provider: 'deepseek', warn: false })), makeTranslate())
-    expect(title).toContain(zh['chip.netPathProxy'])
-    expect(title).not.toContain(zh['chip.netPathDirect'])
+  it('omits the measurement note when probing is disabled even with a reading', () => {
+    const title = chipTitle(payload({}, undefined, netFixture({ rttMs: 19, rttAt: 1_761_330_000_000, probe: null })), makeTranslate())
+    expect(title).toContain('往返 19ms')
+    expect(title).not.toContain('测量口径')
   })
 
-  it('omits the path note while the window holds no connection reading', () => {
+  it('omits the measurement note while the reading holds no fresh probe round', () => {
     const idle = chipTitle(payload({}, undefined, netFixture()), makeTranslate())
     expect(idle).toContain(zh['chip.netIdle'])
-    expect(idle).not.toContain('连接口径')
+    expect(idle).not.toContain('测量口径')
     const failuresOnly = chipTitle(payload({}, undefined, netFixture({ failures: 2 })), makeTranslate())
-    expect(failuresOnly).toContain('连接 —')
-    expect(failuresOnly).not.toContain('连接口径')
+    expect(failuresOnly).toContain('往返 —')
+    expect(failuresOnly).not.toContain('测量口径')
   })
 })
 
 describe('netLine', () => {
-  it('shows the idle notice when the window holds no observations', () => {
+  it('shows the idle notice when the reading holds nothing', () => {
     expect(netLine(netFixture(), makeTranslate())).toBe(zh['chip.netIdle'])
   })
 
-  it('omits the route label when the provider is unknown', () => {
-    const line = netLine(netFixture({ connMs: 200, connAt: 1_761_330_000_000 }), makeTranslate())
-    expect(line).toContain('200ms')
+  it('omits the route label when the provider is unknown (a probe round has no route)', () => {
+    const line = netLine(netFixture({ rttMs: 19, rttAt: 1_761_330_000_000 }), makeTranslate())
+    expect(line).toContain('19ms')
     expect(line).not.toContain('路由')
   })
 
-  it('reads dash for the connection segment when only failures landed in the window', () => {
+  it('reads dash for the round trip when only failures landed in the window', () => {
     const line = netLine(netFixture({ failures: 2 }), makeTranslate())
-    expect(line).toContain('连接 —')
+    expect(line).toContain('往返 —')
     expect(line).toContain('2 次')
   })
 })

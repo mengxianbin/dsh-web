@@ -2,7 +2,7 @@
 
 会话头部系统指标 chip：宿主每秒采 CPU/内存/磁盘，浏览器半区在会话头部动作槽
 （preset 标签右侧，主位）与头部 leading 单元格（无会话/空会话兜底位）渲染四读数
-（CPU/内存/磁盘 + v4 provider 网络）并按告警变红，两位经 `src/client/presence.ts`
+（CPU/内存/磁盘 + 网络质量）并按告警变红，两位经 `src/client/presence.ts`
 挂载信号互斥、恒只画一份。包级规则：只写本包特有约定，不重复根 AGENTS.md 与
 packages/AGENTS.md 的全局/包级规则。
 
@@ -16,20 +16,22 @@ packages/AGENTS.md 的全局/包级规则。
   `-f CSV` 会把 CSV 数据改道到进程 cwd 的 `输出.csv`，stdout 只剩控制噪声。
   采样器 spawn 时**不带 `-f`**，stdout 管道即可稳定 1 行/秒（2026-10-24/25
   P0a-d 实测）。改此参数会静默丢数据并污染 cwd。
-- **v4 网络读数（纯被动，勿加主动探测；延迟半区 2026-10-27 修订）**：
-  `src/host/conn-tap.ts` 在 socket 层包 `net.connect`/`tls.connect`，
-  每次真实模型请求的 TLS 握手完成即报一段连接耗时（直连 = DNS+TCP+TLS 全段；
-  经本机代理 = 回环首跳 → CONNECT 应答 + TLS 隧道握手，`connVia` 标
-  `direct`/`proxy`）；`src/host/net-observe.ts` 监听 `agent/assistant-stream`
-  的 start 帧开**归因窗**（连接段归给最老未归因的 attempt，无 pending 即弃，
-  挡掉背景流量；首 chunk / end 只关窗——keep-alive 复用连接无新段可报）与
-  `agent/request-error`（只计 `TIMEOUT`/`TRANSPORT`），喂给
-  `src/core/net.ts` 的 10 分钟滑动窗口；空窗显 `—`、绝不展示陈旧值。
-  **`{ prepend: true }` 是承重的**：llm-retry 对可重试失败直接返回重试决定、
-  不调 `next()`，排在其后的观察者会漏掉恰是最该数的那批失败。零额外流量，
-  与业务请求同路（含代理）。TTFT 已撤出主格与 tooltip（判据源 = 2026-10-27
-  ask `sysmon-net-direction`）；`ttftMs` 字段保留为恒空兼容桩（防旧客户端
-  网格显 `NaNms`）。
+- **网络读数（A 案 · 低频主动 ICMP 探测；2026-10-28 判据，取代 2026-10-27
+  「零主动探测」裁定）**：判据源 = 2026-10-28 ask `net-quality-semantics` 选 A
+  （读数 = 单一国内参照点的 ICMP RTT，语义单纯为「本机网络质量好不好」；
+  跨境/代理链路由失败计数兜底）。`src/host/ping-probe.ts` 每轮结算后再计 60s，
+  对 `netProbeTarget`（默认 `api.deepseek.com`；`''` 整体禁用探测）spawn
+  `ping -n 1 -w 3000`，中英双语输出解析（`时间=19ms` / `time=19ms` /
+  `<1ms`）。成功喂 `src/core/net.ts` 的 `noteRtt(ms)`；探测失败（超时/丢包/
+  spawn 错）喂 `null`——**不更新读数**，最后实测值过 150s 陈旧界限
+  （`RTT_STALE_MS`）自然显 `—`，绝不展示陈旧值。**失败计数仍纯被动**
+  `agent/request-error`（`{ prepend: true }` 承重：llm-retry 对可重试失败直接
+  返回重试决定、不调 `next()`，排在其后的观察者会漏掉恰是最该数的那批失败）；
+  10 分钟窗口、`netWarnFailures` 染红、`⚠n` 徽标与四态展示全部不变（RTT
+  本身不参与染红）。连接段被动观测（`conn-tap.ts` + `agent/assistant-stream`
+  归因窗）已随 A 案撤除（回滚锚 = `8ec42c58`）；`connMs`/`connAt`/`connVia`/
+  `ttftMs` 保留为恒空兼容桩（旧客户端显 `—` 防 `NaNms`）；`provider` 路由标签
+  自此只来自计数的失败（探针无路由属性）。
 - **Events 垫片**：`net-observe.ts` 里的 `declare module '@deepseek-ai/cordis'`
   逐字镜像 harness 的 `agent/assistant-stream` 声明（pinned rc.1 SDK 早于该
   事件），**cohort 升级带上官方声明后整块删除**（同键扩展会自冲突，

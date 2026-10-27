@@ -34,7 +34,7 @@ function payload(): SysmonPayload {
     },
     warn: { cpu: false, mem: false, disk: false },
     thresholds: { cpu: 90, mem: 90, disk: 90 },
-    net: { connMs: 128, connAt: 1_761_330_000_000, connVia: 'direct', ttftMs: null, failures: 0, provider: 'deepseek', warn: false },
+    net: { rttMs: 19, rttAt: 1_761_330_000_000, probe: 'api.deepseek.com', connMs: null, connAt: null, connVia: null, ttftMs: null, failures: 0, provider: null, warn: false },
   }
 }
 

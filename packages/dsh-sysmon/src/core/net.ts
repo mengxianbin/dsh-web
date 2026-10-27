@@ -1,30 +1,29 @@
 /**
- * Pure provider-network quality tracking for the sysmon chip (v4, latency
- * half revised 2026-10-27). Passive only: the host feeds it real
- * model-request observations — attempt start, then the connection segment of
- * that same request (DNS → TCP connect → TLS secureConnect, stamped at the
- * socket layer by `host/conn-tap.ts`), and network-class failures from
- * `agent/request-error` — and it derives one bounded snapshot. No active
- * probing, no network I/O, no timers: both halves compile this file and the
- * tests drive it with an injected clock.
+ * Pure network-quality tracking for the sysmon chip (A-case, 2026-10-28
+ * ruling, ask id `net-quality-semantics`). Two independent halves:
  *
- * Semantics pinned by the 2026-10-27 revision (m-note dsh-sysmon.md, task
- * `#sysmon-conn-latency-1027`, user ask id `sysmon-net-direction`): the
- * latency reading is the pure connection segment — the same millisecond
- * dimension as CPU/memory/disk. TTFT was withdrawn from the main grid
- * because provider queue time plus first-token generation drowned the
- * network component (signal ratio on the order of 1:3–1:30). One shared
- * 10-minute sliding window backs both readings; a window with no
- * observation yields `—` rather than a stale number (the disk row's "never
- * show stale values" rule, with a bound matched to request cadence — model
- * requests arrive per step, so the disk row's 5s bound would flicker the
- * reading through every tool run).
+ * - **Latency**: an active, low-frequency ICMP probe — the host spawns
+ *   `ping -n 1` at a fixed domestic reference target every 60s
+ *   (`host/ping-probe.ts`) and feeds the round trip here. This replaces both
+ *   the v4 TTFT reading (withdrawn 2026-10-27) and the socket-layer
+ *   connection reading (withdrawn with this case): a bare network-layer RTT
+ *   is the one simple concept the ruling asked for — same dimension as the
+ *   user's own `ping api.deepseek.com` baseline — with handshake, proxy and
+ *   provider-queue overhead deliberately outside its semantics.
+ * - **Failures**: still purely passive — `host/net-observe.ts` counts
+ *   `TIMEOUT`/`TRANSPORT` request errors in a 10-minute sliding window;
+ *   cross-border / proxy trouble shows up here (the A-case "兜底" half).
+ *
+ * This file compiles into both the host and the client program, so it stays
+ * free of node/DOM APIs and timers: the probe loop lives host-side, the
+ * staleness bound is checked on read, and tests drive the monitor with an
+ * injected clock.
  * @module dsh-sysmon/core/net
  */
 
-import type { SysmonNet, SysmonNetVia } from './types.ts'
+import type { SysmonNet } from './types.ts'
 
-/** Sliding window backing both the connection reading and the failure count: ten minutes. */
+/** Failure-window length backing the count: ten minutes. */
 export const NET_WINDOW_MS = 600_000
 
 /** Failure codes that count as provider-link trouble (deepseek + pi-ai adapters normalize to these). */
@@ -33,17 +32,16 @@ export const NET_FAILURE_CODES: readonly string[] = Object.freeze(['TIMEOUT', 'T
 /** Warn when the window holds at least this many network failures (0 disables the red state). */
 export const DEFAULT_NET_WARN_FAILURES = 1
 
+/**
+ * A probe round trip older than this reads as no value at all: two probe
+ * intervals (60s each) plus 30s grace. A failed probe records nothing, so
+ * sustained probe loss ages the last good reading out and the cell falls to
+ * `—` — the disk row's "never show stale values" rule at probe cadence.
+ */
+export const RTT_STALE_MS = 150_000
+
 /** Hard cap on retained failure records — a pathological burst inside one tick cannot grow unbounded. */
 const MAX_FAILURES = 1_000
-
-/** Hard cap on pending attempt starts (a start without its end frame evicts the oldest). */
-const MAX_PENDING = 64
-
-/** One observed attempt start, awaiting its connection segment or end frame. */
-interface PendingAttempt {
-  at: number
-  provider: string | null
-}
 
 /** One network-class failure inside the window. */
 interface FailureRecord {
@@ -51,12 +49,10 @@ interface FailureRecord {
   code: string
 }
 
-/** The newest settled connection-segment observation inside the window. */
-interface ConnectRecord {
+/** The newest probe result, aged out on read past {@link RTT_STALE_MS}. */
+interface RttRecord {
   at: number
   ms: number
-  via: SysmonNetVia
-  provider: string | null
 }
 
 /** Injectable clock seam so tests run without real timers. */
@@ -66,36 +62,39 @@ export interface NetMonitorDeps {
 
 /** Options accepted by the monitor constructor. */
 export interface NetMonitorOptions {
-  /** Window length (default {@link NET_WINDOW_MS}). */
+  /** Failure-window length (default {@link NET_WINDOW_MS}). */
   windowMs?: number
   /** Failures required to redden the reading; 0 disables (default {@link DEFAULT_NET_WARN_FAILURES}). */
   warnFailures?: number
   /** Failure codes counted as network trouble (default {@link NET_FAILURE_CODES}). */
   failureCodes?: readonly string[]
+  /** The fixed probe target echoed to the payload tooltip; null when probing is disabled. */
+  probe?: string | null
   deps?: Partial<NetMonitorDeps>
 }
 
 /**
- * Sliding-window observer over passive model-request facts. Feed it attempt
- * lifecycle events, settled connection segments, and failures; read
- * `snapshot()` for the chip. The monitor owns no timers — pruning happens on
- * read, so an idle host costs nothing.
+ * The chip's network reading: probe RTT (bounded by staleness, never stale)
+ * plus passive failure counting. The monitor owns no timers — probe cadence
+ * belongs to the host loop, pruning happens on read, so an idle host costs
+ * nothing.
  */
 export class NetMonitor {
   private readonly windowMs: number
   private readonly warnFailures: number
   private readonly failureCodes: readonly string[]
+  private readonly probe: string | null
   private readonly deps: NetMonitorDeps
-  private readonly pending = new Map<string, PendingAttempt>()
   private readonly failures: FailureRecord[] = []
-  private conn: ConnectRecord | null = null
+  private rtt: RttRecord | null = null
   private lastProvider: string | null = null
-  private lastObservedAt = 0
+  private lastFailureAt = 0
 
   constructor(options: NetMonitorOptions = {}) {
     this.windowMs = options.windowMs ?? NET_WINDOW_MS
     this.warnFailures = options.warnFailures ?? DEFAULT_NET_WARN_FAILURES
     this.failureCodes = options.failureCodes ?? NET_FAILURE_CODES
+    this.probe = options.probe ?? null
     this.deps = { now: () => Date.now(), ...options.deps }
   }
 
@@ -104,49 +103,19 @@ export class NetMonitor {
     return this.deps.now()
   }
 
-  /** An attempt emitted its start frame: remember when and on which route it began. */
-  noteStart(attemptId: string, provider: string | null): void {
-    if (this.pending.size >= MAX_PENDING) {
-      const oldest = this.pending.keys().next()
-      if (oldest.done !== true) this.pending.delete(oldest.value)
-    }
-    this.pending.set(attemptId, { at: this.deps.now(), provider })
-  }
-
   /**
-   * A real request's connection segment settled (TLS handshake done). It is
-   * attributed to the oldest still-unsettled attempt — the connection that
-   * just finished belongs to the earliest request still waiting on one — and
-   * dropped entirely when no attempt is pending, so background connections
-   * outside a model request never enter the reading. The attempt is consumed:
-   * a later first chunk or end frame finds nothing to close.
-   * @param ms - first-hop start → secureConnect, ms (clamped at 0).
-   * @param via - which handshake shape produced it (direct vs proxy tunnel).
+   * One probe round completed. `ms` is the measured round trip; `null` means
+   * the probe failed (timeout / packet loss / spawn error) and records
+   * nothing — the last good reading stands until {@link RTT_STALE_MS} ages it
+   * out. The probe carries no provider route, so a successful round does not
+   * touch `lastProvider`/`lastFailureAt`: the route label describes counted
+   * failures only.
+   * @param ms - ICMP echo round trip, ms (clamped at 0), or null on failure.
    */
-  noteConnect(ms: number, via: SysmonNetVia): void {
-    const oldest = this.pending.entries().next()
-    if (oldest.done === true) return
-    const [attemptId, attempt] = oldest.value
-    this.pending.delete(attemptId)
+  noteRtt(ms: number | null): void {
+    if (ms === null) return
     const at = this.deps.now()
-    this.conn = { at, ms: Math.max(0, ms), via, provider: attempt.provider }
-    this.lastProvider = attempt.provider
-    this.lastObservedAt = at
-  }
-
-  /**
-   * An attempt produced its first chunk with no connection settled: the
-   * request reused a warm keep-alive socket, so there is no new connection
-   * segment for it — just close its attribution window (chunks after that
-   * find no start, same as v4's end-without-chunk drop).
-   */
-  noteChunk(attemptId: string): void {
-    this.pending.delete(attemptId)
-  }
-
-  /** An attempt emitted its end frame without a settled connection (failure or empty response): drop its start. */
-  noteEnd(attemptId: string): void {
-    this.pending.delete(attemptId)
+    this.rtt = { at, ms: Math.max(0, ms) }
   }
 
   /** A model request failed. Only configured network-class codes count; every code is capped in the ring. */
@@ -155,53 +124,54 @@ export class NetMonitor {
     if (this.failures.length >= MAX_FAILURES) this.failures.shift()
     this.failures.push({ at: this.deps.now(), code })
     this.lastProvider = provider
-    this.lastObservedAt = this.deps.now()
+    this.lastFailureAt = this.deps.now()
   }
 
   /**
-   * The bounded reading for the payload: latest connection segment (ms +
-   * handshake shape), windowed failure count, the route of the most recent
-   * observation, and the warn flag. Prunes everything the window has aged
-   * out — including orphaned attempt starts whose end frame never arrived.
-   * `ttftMs` is emitted as the always-null v4 wire stub (see {@link SysmonNet}).
+   * The bounded reading for the payload: the freshest probe round trip
+   * (null past the staleness bound — a failed-probe gap never renders a
+   * stale number), the windowed failure count, the route of the most recent
+   * counted failure, and the warn flag. `connMs`/`connAt`/`connVia`/`ttftMs`
+   * are emitted as the always-null retired wire stubs (see {@link SysmonNet}).
    */
   snapshot(): SysmonNet {
     const now = this.deps.now()
     const cutoff = now - this.windowMs
     while (this.failures.length > 0 && (this.failures[0] as FailureRecord).at < cutoff) this.failures.shift()
-    for (const [attemptId, start] of this.pending) {
-      if (start.at < cutoff) this.pending.delete(attemptId)
-    }
-    if (this.conn !== null && this.conn.at < cutoff) this.conn = null
-    const stale = this.lastObservedAt < cutoff
+    const freshRtt = this.rtt !== null && this.rtt.at >= now - RTT_STALE_MS
+    const rtt = freshRtt ? this.rtt : null
+    const stale = this.lastFailureAt < cutoff
     const failures = this.failures.length
     return {
-      connMs: this.conn?.ms ?? null,
-      connAt: this.conn?.at ?? null,
-      connVia: this.conn?.via ?? null,
+      rttMs: rtt?.ms ?? null,
+      rttAt: rtt?.at ?? null,
+      probe: this.probe,
+      connMs: null,
+      connAt: null,
+      connVia: null,
       ttftMs: null,
       failures,
-      provider: stale ? null : this.lastProvider,
+      provider: stale || this.lastFailureAt === 0 ? null : this.lastProvider,
       warn: this.warnFailures > 0 && failures >= this.warnFailures,
     }
   }
 }
 
 /**
- * Format the chip's net value: `—` when the window holds nothing, otherwise
- * the rounded connection segment and/or the failure badge (`23ms`, `⚠2`,
- * `23ms ⚠2`). The badge appears whenever the window holds failures; the red
+ * Format the chip's net value: `—` when the reading holds nothing, otherwise
+ * the rounded probe round trip and/or the failure badge (`19ms`, `⚠2`,
+ * `19ms ⚠2`). The badge appears whenever the window holds failures; the red
  * state is the warn threshold's decision, not this function's. `?? null`
- * tolerates a pre-revision host that serves no `connMs` (degrades to the
- * dash / failures only, mirroring v4's optional-`net` degradation).
+ * tolerates a pre-A-case host that serves no `rttMs` (degrades to the dash /
+ * failures only, mirroring v4's optional-`net` degradation).
  * @param net - the snapshot to format.
  * @returns the display string.
  */
 export function formatNetValue(net: SysmonNet): string {
-  const conn = net.connMs ?? null
-  if (net.failures <= 0 && conn === null) return '—'
+  const rtt = net.rttMs ?? null
+  if (net.failures <= 0 && rtt === null) return '—'
   const parts: string[] = []
-  if (conn !== null) parts.push(`${String(Math.round(conn))}ms`)
+  if (rtt !== null) parts.push(`${String(Math.round(rtt))}ms`)
   if (net.failures > 0) parts.push(`⚠${String(net.failures)}`)
   return parts.join(' ')
 }

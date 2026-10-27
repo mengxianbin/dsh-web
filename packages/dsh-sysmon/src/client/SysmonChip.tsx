@@ -54,11 +54,11 @@ export function formatGB(bytes: number): string {
 
 /**
  * Build the multi-line tooltip: header, disk throughput, memory absolutes,
- * the network reading (connection segment + failure count) with its honest
- * segment note, refresh clock. Disk detail is omitted while the disk fields
- * are null; the net lines appear only when the host serves the network
- * reading, falling back to the idle notice when the 10-minute window holds
- * no observations.
+ * the network reading (probe round trip + failure count) with its honest
+ * measurement note, refresh clock. Disk detail is omitted while the disk
+ * fields are null; the net lines appear only when the host serves the
+ * network reading, falling back to the idle notice when the window holds no
+ * reading at all (no fresh probe round and no counted failures).
  * @param payload - the last successful host document.
  * @param t - the namespace translator.
  * @returns the title string.
@@ -80,11 +80,12 @@ export function chipTitle(payload: SysmonPayload | null, t: (key: SysmonKey) => 
   // between bundle build and host reload. Omit the line, keep the render alive.
   if (net !== undefined) {
     lines.push(netLine(net, t))
-    // Judge source 2026-10-27 (ask `sysmon-net-direction`): the tooltip must
-    // state which segment the reading covers — direct handshake or local
-    // proxy tunnel — so the number is never read as more than it measures.
-    if ((net.connMs ?? null) !== null) {
-      lines.push(t(net.connVia === 'proxy' ? 'chip.netPathProxy' : 'chip.netPathDirect'))
+    // Judge source 2026-10-28 (ask `net-quality-semantics`, A-case): the
+    // tooltip must state what the number measures — a bare ICMP round trip
+    // to the fixed reference target — so it is never read as a handshake or
+    // end-to-end request time.
+    if ((net.rttMs ?? null) !== null && (net.probe ?? null) !== null) {
+      lines.push(t('chip.netPath').replace('{target}', net.probe as string))
     }
   }
   lines.push(t('chip.stamp').replace('{t}', formatClock(payload.at)))
@@ -92,20 +93,21 @@ export function chipTitle(payload: SysmonPayload | null, t: (key: SysmonKey) => 
 }
 
 /**
- * The tooltip's network line: the idle notice when the window holds nothing,
- * otherwise the connection-segment latency + failure count, with the route
- * label when the host knows which route the observations came from.
- * `?? null` tolerates a pre-revision host that serves no `connMs` (renders
+ * The tooltip's network line: the idle notice when the window holds no
+ * reading at all, otherwise the probe round trip + failure count, with the
+ * route label when the host knows which route the counted failures came from
+ * (the probe itself is route-agnostic).
+ * `?? null` tolerates a pre-A-case host that serves no `rttMs` (renders
  * the dash / failures only instead of `NaN`).
- * @param net - the passive network reading.
+ * @param net - the network reading.
  * @param t - the namespace translator.
  * @returns one tooltip line.
  */
 export function netLine(net: SysmonNet, t: (key: SysmonKey) => string): string {
-  const conn = net.connMs ?? null
-  if (conn === null && net.failures === 0) return t('chip.netIdle')
+  const rtt = net.rttMs ?? null
+  if (rtt === null && net.failures === 0) return t('chip.netIdle')
   const detail = t('chip.netDetail')
-    .replace('{conn}', conn === null ? dash : `${String(Math.round(conn))}ms`)
+    .replace('{rtt}', rtt === null ? dash : `${String(Math.round(rtt))}ms`)
     .replace('{failures}', String(net.failures))
   return net.provider === null ? detail : `${detail} · ${t('chip.netProvider').replace('{provider}', net.provider)}`
 }

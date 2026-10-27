@@ -1,6 +1,6 @@
-/** NetMonitor windowing/format: connection-segment settle, failure counting, stale pruning, warn flag. */
+/** NetMonitor windowing/format: probe-RTT recording + staleness, failure counting, warn flag. */
 import { describe, expect, it } from 'vitest'
-import { DEFAULT_NET_WARN_FAILURES, NET_FAILURE_CODES, NetMonitor, formatNetValue } from '../src/core/net.ts'
+import { DEFAULT_NET_WARN_FAILURES, NET_FAILURE_CODES, RTT_STALE_MS, NetMonitor, formatNetValue } from '../src/core/net.ts'
 import type { SysmonNet } from '../src/core/types.ts'
 
 /** A monitor on a hand-cranked clock. */
@@ -14,63 +14,44 @@ function harness(options: ConstructorParameters<typeof NetMonitor>[0] = {}) {
   }
 }
 
-const empty: SysmonNet = { connMs: null, connAt: null, connVia: null, ttftMs: null, failures: 0, provider: null, warn: false }
+const empty: SysmonNet = { rttMs: null, rttAt: null, probe: null, connMs: null, connAt: null, connVia: null, ttftMs: null, failures: 0, provider: null, warn: false }
 
 describe('NetMonitor', () => {
-  it('settles the pending attempt into a connection reading at secureConnect', () => {
-    const h = harness()
-    h.monitor.noteStart('s:1', 'deepseek')
-    h.advance(42)
-    h.monitor.noteConnect(42, 'direct')
+  it('records a probe round trip with the stub fields retired to null', () => {
+    const h = harness({ probe: 'api.deepseek.com' })
+    h.monitor.noteRtt(19)
     expect(h.monitor.snapshot()).toMatchObject({
-      connMs: 42, connVia: 'direct', failures: 0, provider: 'deepseek', warn: false, ttftMs: null,
+      rttMs: 19, rttAt: h.now, probe: 'api.deepseek.com', failures: 0, provider: null, warn: false,
+      connMs: null, connAt: null, connVia: null, ttftMs: null,
     })
-    expect(h.monitor.snapshot().connAt).toBe(h.now)
   })
 
-  it('ignores connection segments while no attempt is pending (background traffic filter)', () => {
+  it('records nothing for a failed probe — the last good reading stands', () => {
     const h = harness()
-    h.monitor.noteConnect(15, 'proxy')
-    expect(h.monitor.snapshot()).toEqual(empty)
-    // A chunk already closed the window: a connection landing afterwards stays out.
-    h.monitor.noteStart('s:1', 'deepseek')
-    h.monitor.noteChunk('s:1')
-    h.advance(50)
-    h.monitor.noteConnect(9, 'direct')
-    expect(h.monitor.snapshot().connMs).toBeNull()
+    h.monitor.noteRtt(23)
+    h.advance(60_000)
+    h.monitor.noteRtt(null)
+    expect(h.monitor.snapshot().rttMs).toBe(23)
+    // A failure before any success never invents a value.
+    const fresh = harness()
+    fresh.monitor.noteRtt(null)
+    expect(fresh.monitor.snapshot().rttMs).toBeNull()
   })
 
-  it('attributes segments to the oldest pending attempt, FIFO, and consumes it', () => {
+  it('ages the reading out past the staleness bound — no stale RTT', () => {
     const h = harness()
-    h.monitor.noteStart('s:1', 'deepseek')
-    h.monitor.noteStart('s:2', 'pi-ai')
-    h.monitor.noteConnect(30, 'direct')
-    expect(h.monitor.snapshot()).toMatchObject({ connMs: 30, provider: 'deepseek' })
-    h.monitor.noteConnect(75, 'proxy')
-    expect(h.monitor.snapshot()).toMatchObject({ connMs: 75, connVia: 'proxy', provider: 'pi-ai' })
-    // Both consumed: a third segment has nothing to attribute to.
-    h.monitor.noteConnect(99, 'direct')
-    expect(h.monitor.snapshot().connMs).toBe(75)
+    h.monitor.noteRtt(19)
+    h.advance(RTT_STALE_MS - 1)
+    expect(h.monitor.snapshot().rttMs).toBe(19)
+    h.advance(2)
+    expect(h.monitor.snapshot().rttMs).toBeNull()
+    expect(h.monitor.snapshot().rttAt).toBeNull()
   })
 
-  it('drops an attempt whose end frame arrives before any connection', () => {
+  it('clamps a negative span', () => {
     const h = harness()
-    h.monitor.noteStart('s:1', null)
-    h.monitor.noteEnd('s:1')
-    h.monitor.noteConnect(40, 'direct')
-    expect(h.monitor.snapshot()).toEqual(empty)
-    // The consumed pair leaves nothing behind: later frames find no start.
-    h.monitor.noteChunk('s:1')
-    expect(h.monitor.snapshot()).toEqual(empty)
-  })
-
-  it('keeps the newest connection across attempts and clamps negative spans', () => {
-    const h = harness()
-    h.monitor.noteStart('s:1', null)
-    h.monitor.noteConnect(300, 'direct')
-    h.monitor.noteStart('s:2', null)
-    h.monitor.noteConnect(-5, 'direct')
-    expect(h.monitor.snapshot().connMs).toBe(0)
+    h.monitor.noteRtt(-5)
+    expect(h.monitor.snapshot().rttMs).toBe(0)
   })
 
   it('counts only network-class failure codes', () => {
@@ -85,6 +66,16 @@ describe('NetMonitor', () => {
     expect(snap.failures).toBe(2)
     expect(snap.warn).toBe(true)
     expect(snap.provider).toBe('deepseek')
+  })
+
+  it('keeps the route label bound to counted failures: a probe round never invents or extends it', () => {
+    const h = harness()
+    h.monitor.noteFailure('deepseek', 'TIMEOUT')
+    h.advance(600_001)
+    // The failure aged out of the window: label gone even though a fresh
+    // probe round just landed (the probe has no provider route).
+    h.monitor.noteRtt(19)
+    expect(h.monitor.snapshot()).toMatchObject({ rttMs: 19, failures: 0, provider: null })
   })
 
   it('reddens at the configured threshold and honours 0 as disabled', () => {
@@ -102,40 +93,23 @@ describe('NetMonitor', () => {
     expect(DEFAULT_NET_WARN_FAILURES).toBe(1)
   })
 
-  it('ages everything out of the window — no stale readings', () => {
+  it('ages failures out of the window — no stale counts or labels', () => {
     const h = harness()
-    h.monitor.noteStart('s:1', 'deepseek')
-    h.advance(50)
-    h.monitor.noteConnect(50, 'direct')
     h.monitor.noteFailure('deepseek', 'TIMEOUT')
-    // Orphan a start whose end frame never arrives, inside the window.
-    h.monitor.noteStart('s:2', 'deepseek')
     h.advance(600_001)
     expect(h.monitor.snapshot()).toEqual(empty)
-    // The orphaned start aged out too: its late segment stays unheard.
-    h.monitor.noteConnect(60, 'direct')
-    expect(h.monitor.snapshot()).toEqual(empty)
-  })
-
-  it('evicts the oldest pending start beyond the cap', () => {
-    const h = harness()
-    for (let i = 0; i < 65; i += 1) h.monitor.noteStart(`s:${String(i)}`, `p${String(i)}`)
-    h.advance(10)
-    // s:0 was evicted, so the next segment attributes to s:1.
-    h.monitor.noteConnect(10, 'direct')
-    expect(h.monitor.snapshot()).toMatchObject({ connMs: 10, provider: 'p1' })
   })
 })
 
 describe('formatNetValue', () => {
-  it('reads dash for an empty window', () => {
+  it('reads dash for an empty reading', () => {
     expect(formatNetValue(empty)).toBe('—')
   })
 
-  it('formats latency only, failures only, and both', () => {
-    expect(formatNetValue({ ...empty, connMs: 128.4 })).toBe('128ms')
+  it('formats rtt only, failures only, and both', () => {
+    expect(formatNetValue({ ...empty, rttMs: 19.4 })).toBe('19ms')
     expect(formatNetValue({ ...empty, failures: 3 })).toBe('⚠3')
-    expect(formatNetValue({ ...empty, connMs: 128.4, failures: 3 })).toBe('128ms ⚠3')
+    expect(formatNetValue({ ...empty, rttMs: 19.6, failures: 3 })).toBe('20ms ⚠3')
   })
 
   it('keeps the badge without warn when failures sit below the threshold', () => {
@@ -144,9 +118,10 @@ describe('formatNetValue', () => {
     expect(formatNetValue({ ...empty, failures: 2 })).toBe('⚠2')
   })
 
-  it('degrades to the dash when a pre-revision host serves no connMs', () => {
-    // Reverse of v4's optional-`net` degradation: new client, old host.
-    const oldHost = { ...empty, connMs: undefined } as unknown as SysmonNet
+  it('degrades to the dash when a pre-A-case host serves no rttMs', () => {
+    // Reverse window of the A-case wire change: new client, old host — the
+    // payload still carries the retired connMs reading, no rttMs.
+    const oldHost = { ...empty, rttMs: undefined, connMs: 477 } as unknown as SysmonNet
     expect(formatNetValue(oldHost)).toBe('—')
     expect(formatNetValue({ ...oldHost, failures: 2 })).toBe('⚠2')
   })

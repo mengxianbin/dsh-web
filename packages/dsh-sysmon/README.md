@@ -4,16 +4,16 @@ English | [中文](README.zh.md)
 
 DSH web GUI plugin sysmon — a live system-metrics chip in the session header.
 It shows CPU, memory and disk activity sampled every second on the Host plus a
-passive provider-network reading, and reddens any metric that has sat at or
-above its threshold for a sustained streak, so a saturated machine or a
-degrading model link is visible without leaving the chat.
+low-frequency probed network-quality reading, and reddens any metric that has
+sat at or above its threshold for a sustained streak, so a saturated machine
+or an unhealthy network is visible without leaving the chat.
 
 ## What it does
 
 - Seats a compact chip into `conversation.session.header.actions`, right of
   the agent-preset label: four tabular-numeral read-outs (CPU busy %, memory
-  used %, disk busy %, provider network) plus a hover tooltip with disk
-  throughput, memory absolutes, and the network detail line.
+  used %, disk busy %, network) plus a hover tooltip with disk throughput,
+  memory absolutes, and the network detail line.
 - Mirrors the same chip into `conversation.header.leading`, the one header
   cell that renders with no Session and stays visible while a blank Session
   hides the actions row. A module-level mount signal keeps the two seats
@@ -22,22 +22,24 @@ degrading model link is visible without leaving the chat.
 - Samples on the Host every second: CPU from an `os.cpus()` diff, memory from
   `os.totalmem()`/`os.freemem()`, and disk from one resident `typeperf` child
   that streams the three `PhysicalDisk(_Total)` counters over stdout.
-- Reads the provider network passively (v4, latency half revised 2026-10-27):
-  the Host taps the connection segment of each real model request at the
-  socket layer — DNS lookup → TCP connect → TLS handshake completion, on the
-  exact route real requests travel, direct or through a local HTTP proxy —
-  and listens to the harness's `agent/request-error` for failures classified
-  as `TIMEOUT`/`TRANSPORT`, both over one shared **10-minute sliding window**.
-  The tooltip states which segment the number covers (direct handshake, or
-  proxy tunnel where the loopback leg to the proxy is not network). The
-  reading renders as `23ms` / `⚠3` / `23ms ⚠3` and reddens once the
-  windowed failure count reaches the threshold; an empty window shows `—`,
-  never a stale number. **Zero active probes, zero extra traffic** — the
-  measurement rides the same path as real requests, proxy configuration
-  included. TTFT (first-token latency) left the main grid with this revision:
-  provider queue time and first-token generation drown the network component,
-  while a connection segment shares the millisecond dimension of the
-  CPU/memory/disk read-outs.
+- Reads network quality (A-case ruling, 2026-10-28): the latency half is a
+  **low-frequency active ICMP probe** — the Host sends one `ping` per minute
+  to a fixed domestic reference target (`netProbeTarget`, default
+  `api.deepseek.com`) and takes the round trip in milliseconds. That is the
+  one simple concept `ping <target>` measures (bare network-layer RTT), with
+  DNS/TCP/TLS handshake, proxy tunnel and provider queue **deliberately
+  outside its semantics** (the retired connection reading stacked those spans
+  into a scary 500ms-scale number — the reason this ruling replaced it). The
+  failure half stays **purely passive**: it listens to the harness's
+  `agent/request-error` for failures classified as `TIMEOUT`/`TRANSPORT` over
+  a **10-minute sliding window**, carrying cross-border / proxy trouble as
+  the reading's fallback half. The reading renders as `19ms` / `⚠3` /
+  `19ms ⚠3` and reddens once the windowed failure count reaches the
+  threshold; a failed probe updates nothing and the last good round trip ages
+  out to `—` after 150 seconds — never a stale number. The tooltip states the
+  measurement (ICMP round trip to which target). The probe is one 32-byte
+  packet per minute (negligible traffic) and `netProbeTarget: ''` disables it
+  entirely (the RTT half reads `—`, failures keep counting).
 - Keeps a ten-minute in-memory ring buffer (600 samples) behind
   `GET /api/sysmon/samples`, so a future history view needs no host change.
 - Warns by sustained streak, not by single spike: a metric reddens only after
@@ -74,6 +76,7 @@ The plugin exposes a schemastery config; override any key in the profile
 | `diskWarnPercent` | number | `90` | Disk busy percent that reddens the chip. |
 | `warnStreak` | number | `3` | Consecutive 1s samples required to warn. |
 | `netWarnFailures` | number | `1` | Windowed network failures that redden the net reading; `0` disables the red state (the count still renders). |
+| `netProbeTarget` | string | `api.deepseek.com` | Fixed ICMP probe reference target (domestic, stable route); an empty string disables probing (the RTT half reads `—`). |
 
 ## Security model
 
@@ -81,10 +84,11 @@ The plugin exposes a schemastery config; override any key in the profile
 fence: a loopback request always passes, and a live remote-web-ui paired-device
 cookie passes too. Every unpaired LAN or tunnel request is refused with `403`.
 No credential, file path, or process name crosses the wire — only aggregate
-per-second counters plus the network reading (connection-segment milliseconds
-with a `direct`/`proxy` handshake-shape flag, a failure count, and the
-provider route name, e.g. `deepseek` — a route identifier, not an endpoint
-URL and not a key; the `ttftMs` field is a null compatibility stub).
+per-second counters plus the network reading (probe round-trip milliseconds
+with the reference target name, a failure count, and the provider route the
+counted failures came from, e.g. `deepseek` — a route identifier, not an
+endpoint URL and not a key; `connMs`/`connAt`/`connVia`/`ttftMs` are null
+compatibility stubs left for the retired readings).
 
 ## Known limitations
 
