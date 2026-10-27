@@ -1,6 +1,6 @@
 {
   "name": "@linxin666/dsh-client-ui-sysmon",
-  "description": "Live system-metrics chip for the DSH Web session header: CPU, memory and disk activity sampled every second on the Host (one resident typeperf child plus os counters), warn-streak coloring at configurable thresholds, and a 10-minute in-memory ring buffer behind GET /api/sysmon/samples. Loopback/paired fence; link-install only, no npm release.",
+  "description": "Live system-metrics chip for the DSH Web session header: CPU, memory and disk activity sampled every second on the Host (one resident typeperf child plus os counters), warn-streak coloring at configurable thresholds, a 10-minute in-memory ring buffer behind GET /api/sysmon/samples, and — since v4 — a passive provider-network reading (attempt start → first-chunk TTFT plus windowed TIMEOUT/TRANSPORT failure count) fed by harness agent events. Loopback/paired fence; link-install only, no npm release.",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -49,6 +49,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-agent": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-client-locale": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.2-rc.1",
     "@deepseek-ai/dsh-client-ui-renderer": "^0.1.2-rc.1",

@@ -9,20 +9,27 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { SysmonNet } from '../core/types.ts'
 import { writeJson } from './http.ts'
 import { isPairedOrLoopbackAllowed } from './pair-access.ts'
 import type { SamplerSnapshot } from './sampler.ts'
 
 export const SYSMON_API_PREFIX = '/api/sysmon'
 
+/** What the route serves: the system sampler's snapshot plus the v4 network reading. */
+export interface SamplesSnapshot extends SamplerSnapshot {
+  net: SysmonNet
+}
+
 /**
  * `GET /api/sysmon/samples` — the newest sample, sustained warn flags, the
- * thresholds in force, and (only when asked with `?history=1`) the full ring.
+ * thresholds in force, the v4 provider-network reading, and (only when asked
+ * with `?history=1`) the full ring.
  * @param ctx - host context; may expose remoteWebUiPairing.
- * @param snapshot - reads the live sampler state at request time.
+ * @param snapshot - reads the live sampler + net monitor state at request time.
  * @returns the route.
  */
-export function makeSamplesRoute(ctx: Context, snapshot: () => SamplerSnapshot): WebRoute {
+export function makeSamplesRoute(ctx: Context, snapshot: () => SamplesSnapshot): WebRoute {
   return {
     kind: 'exact',
     path: SYSMON_API_PREFIX + '/samples',
@@ -40,6 +47,7 @@ export function makeSamplesRoute(ctx: Context, snapshot: () => SamplerSnapshot):
         latest: snap.latest,
         warn: snap.warn,
         thresholds: snap.thresholds,
+        net: snap.net,
         ...(wantHistory ? { history: snap.history } : {}),
       }, { 'cache-control': 'no-store' })
     },

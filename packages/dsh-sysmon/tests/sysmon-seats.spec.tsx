@@ -34,6 +34,7 @@ function payload(): SysmonPayload {
     },
     warn: { cpu: false, mem: false, disk: false },
     thresholds: { cpu: 90, mem: 90, disk: 90 },
+    net: { ttftMs: 128, ttftAt: 1_761_330_000_000, failures: 0, provider: 'deepseek', warn: false },
   }
 }
 

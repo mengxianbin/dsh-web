@@ -11,9 +11,13 @@ export const zh = {
   'chip.cpu': 'CPU',
   'chip.mem': '内存',
   'chip.disk': '磁盘',
+  'chip.net': '网络',
   'chip.title': '系统负载（1s 采样 · 宿主常驻）',
   'chip.diskDetail': '磁盘 读 {read} · 写 {write} MB/s',
   'chip.memDetail': '内存 {used} / {total} GB · 可用 {avail} GB',
+  'chip.netDetail': '网络 首包 {ttft} · 10 分钟失败 {failures} 次',
+  'chip.netProvider': '路由 {provider}',
+  'chip.netIdle': '网络 近 10 分钟无模型请求',
   'chip.stamp': '数据刷新于 {t}',
 }
 
@@ -26,8 +30,12 @@ export const en: Record<SysmonKey, string> = {
   'chip.cpu': 'CPU',
   'chip.mem': 'Mem',
   'chip.disk': 'Disk',
+  'chip.net': 'Net',
   'chip.title': 'System load (1s sampling, host-resident)',
   'chip.diskDetail': 'Disk {read} read · {write} write MB/s',
   'chip.memDetail': 'Memory {used} / {total} GB · {avail} GB available',
+  'chip.netDetail': 'Net first byte {ttft} · {failures} failures in 10 min',
+  'chip.netProvider': 'Route {provider}',
+  'chip.netIdle': 'Net no model requests in the last 10 minutes',
   'chip.stamp': 'Refreshed at {t}',
 }

@@ -10,8 +10,12 @@ export const ru: Record<string, string> = {
   'chip.cpu': 'ЦП',
   'chip.mem': 'Память',
   'chip.disk': 'Диск',
+  'chip.net': 'Сеть',
   'chip.title': 'Нагрузка на систему (сэмпл 1 с, на стороне хоста)',
   'chip.diskDetail': 'Диск: чтение {read} · запись {write} МБ/с',
   'chip.memDetail': 'Память {used} / {total} ГБ · доступно {avail} ГБ',
+  'chip.netDetail': 'Сеть: первый байт {ttft} · {failures} сбоев за 10 мин',
+  'chip.netProvider': 'Маршрут {provider}',
+  'chip.netIdle': 'Сеть: запросов к модели за последние 10 минут нет',
   'chip.stamp': 'Обновлено в {t}',
 }

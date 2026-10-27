@@ -3,16 +3,17 @@
 English | [中文](README.zh.md)
 
 DSH web GUI plugin sysmon — a live system-metrics chip in the session header.
-It shows CPU, memory and disk activity sampled every second on the Host, and
-reddens any metric that has sat at or above its threshold for a sustained
-streak, so a saturated machine is visible without leaving the chat.
+It shows CPU, memory and disk activity sampled every second on the Host plus a
+passive provider-network reading, and reddens any metric that has sat at or
+above its threshold for a sustained streak, so a saturated machine or a
+degrading model link is visible without leaving the chat.
 
 ## What it does
 
 - Seats a compact chip into `conversation.session.header.actions`, right of
-  the agent-preset label: three tabular-numeral read-outs (CPU busy %, memory
-  used %, disk busy %) plus a hover tooltip with disk throughput and memory
-  absolutes.
+  the agent-preset label: four tabular-numeral read-outs (CPU busy %, memory
+  used %, disk busy %, provider network) plus a hover tooltip with disk
+  throughput, memory absolutes, and the network detail line.
 - Mirrors the same chip into `conversation.header.leading`, the one header
   cell that renders with no Session and stays visible while a blank Session
   hides the actions row. A module-level mount signal keeps the two seats
@@ -21,6 +22,15 @@ streak, so a saturated machine is visible without leaving the chat.
 - Samples on the Host every second: CPU from an `os.cpus()` diff, memory from
   `os.totalmem()`/`os.freemem()`, and disk from one resident `typeperf` child
   that streams the three `PhysicalDisk(_Total)` counters over stdout.
+- Reads the provider network passively (v4): the Host listens to the harness's
+  `agent/assistant-stream` (attempt start frame → first chunk = connect + first
+  byte + first token — the TTFT on the exact route real requests travel) and
+  `agent/request-error` (failures classified as `TIMEOUT`/`TRANSPORT`), both
+  over one shared **10-minute sliding window**. The reading renders as `128ms`
+  / `⚠3` / `128ms ⚠3` and reddens once the windowed failure count reaches the
+  threshold; an empty window shows `—`, never a stale number. **Zero active
+  probes, zero extra traffic** — the measurement rides the same path as real
+  requests, proxy configuration included.
 - Keeps a ten-minute in-memory ring buffer (600 samples) behind
   `GET /api/sysmon/samples`, so a future history view needs no host change.
 - Warns by sustained streak, not by single spike: a metric reddens only after
@@ -51,11 +61,12 @@ The plugin exposes a schemastery config; override any key in the profile
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `enabled` | boolean | `true` | Master switch for the sampler and the route. |
+| `enabled` | boolean | `true` | Master switch for the sampler, the network observer, and the route. |
 | `cpuWarnPercent` | number | `90` | CPU busy percent that reddens the chip. |
 | `memWarnPercent` | number | `90` | Memory used percent that reddens the chip. |
 | `diskWarnPercent` | number | `90` | Disk busy percent that reddens the chip. |
 | `warnStreak` | number | `3` | Consecutive 1s samples required to warn. |
+| `netWarnFailures` | number | `1` | Windowed network failures that redden the net reading; `0` disables the red state (the count still renders). |
 
 ## Security model
 
@@ -63,7 +74,9 @@ The plugin exposes a schemastery config; override any key in the profile
 fence: a loopback request always passes, and a live remote-web-ui paired-device
 cookie passes too. Every unpaired LAN or tunnel request is refused with `403`.
 No credential, file path, or process name crosses the wire — only aggregate
-per-second counters.
+per-second counters plus the v4 network reading (TTFT milliseconds, a failure
+count, and the provider route name, e.g. `deepseek` — a route identifier, not
+an endpoint URL and not a key).
 
 ## Known limitations
 

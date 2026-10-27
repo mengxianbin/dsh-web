@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import type { Context } from '@deepseek-ai/cordis'
-import { makeSamplesRoute } from '../src/host/routes.ts'
-import type { SamplerSnapshot } from '../src/host/sampler.ts'
+import { makeSamplesRoute, type SamplesSnapshot } from '../src/host/routes.ts'
 
 /** Minimal req double: the route reads url/headers/socket and writes once. */
 function fakeReq(opts: { loopback?: boolean; url?: string } = {}): IncomingMessage {
@@ -29,7 +28,7 @@ function fakeCtx(): Context {
   return { get: () => undefined } as unknown as Context
 }
 
-function fakeSnapshot(): SamplerSnapshot {
+function fakeSnapshot(): SamplesSnapshot {
   const sample = {
     t: 1_761_000_000_000,
     cpu: 12.4,
@@ -44,6 +43,7 @@ function fakeSnapshot(): SamplerSnapshot {
     latest: sample,
     warn: { cpu: false, mem: false, disk: false },
     thresholds: { cpu: 90, mem: 90, disk: 90 },
+    net: { ttftMs: 128, ttftAt: 1_761_000_000_000, failures: 2, provider: 'deepseek', warn: true },
     history: [sample],
   }
 }
@@ -64,6 +64,7 @@ describe('makeSamplesRoute', () => {
     expect((body.latest as { cpu: number }).cpu).toBe(12.4)
     expect(body.warn).toEqual({ cpu: false, mem: false, disk: false })
     expect(body.thresholds).toEqual({ cpu: 90, mem: 90, disk: 90 })
+    expect(body.net).toEqual({ ttftMs: 128, ttftAt: 1_761_000_000_000, failures: 2, provider: 'deepseek', warn: true })
     expect(body.history).toBeUndefined()
   })
 
