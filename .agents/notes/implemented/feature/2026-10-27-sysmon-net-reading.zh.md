@@ -60,6 +60,8 @@ bundle 的根上下文上观察，零行为改变：
 
 **把连接/TTFB 单列为独立阶段。** 缓期：TTFT 把服务端排队时间混进了读数，
 但拆出连接段需要在适配器内部再打一个点。已作为已知限制记入 m-note 设计草案。
+（同日后续修订 `sysmon-net-direction` 已完成此拆分——见
+[conn-latency](2026-10-27-sysmon-conn-latency.zh.md)。）
 
 **计数只在达到阈值时才显示。** 否决：徽标本身就是计数（阈值 5 时 `⚠2`
 保持不红），阈值以下的失败应保持可见而不是消失。
@@ -76,3 +78,7 @@ bundle 的根上下文上观察，零行为改变：
   zh↔ru 含 sysmon 四个新键）保持绿。
 - m-note 设计草案（`content/tech/ai/dsh/dsh-sysmon.md` v4 条目）承载裁定
   溯源：本笔记是它的实现记录。
+- 同日修订：延迟半区改量连接段、TTFT 撤出主格与 tooltip（用户 ask
+  `sysmon-net-direction`）——已落地形态见
+  [conn-latency](2026-10-27-sysmon-conn-latency.zh.md)；本笔记保留 v4 原裁定
+  记录不改。

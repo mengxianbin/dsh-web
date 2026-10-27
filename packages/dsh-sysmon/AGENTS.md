@@ -16,13 +16,20 @@ packages/AGENTS.md 的全局/包级规则。
   `-f CSV` 会把 CSV 数据改道到进程 cwd 的 `输出.csv`，stdout 只剩控制噪声。
   采样器 spawn 时**不带 `-f`**，stdout 管道即可稳定 1 行/秒（2026-10-24/25
   P0a-d 实测）。改此参数会静默丢数据并污染 cwd。
-- **v4 网络读数（纯被动，勿加主动探测）**：`src/host/net-observe.ts` 监听
-  `agent/assistant-stream`（start → 首 chunk = TTFT，end 无 chunk 即弃）与
+- **v4 网络读数（纯被动，勿加主动探测；延迟半区 2026-10-27 修订）**：
+  `src/host/conn-tap.ts` 在 socket 层包 `net.connect`/`tls.connect`，
+  每次真实模型请求的 TLS 握手完成即报一段连接耗时（直连 = DNS+TCP+TLS 全段；
+  经本机代理 = 回环首跳 → CONNECT 应答 + TLS 隧道握手，`connVia` 标
+  `direct`/`proxy`）；`src/host/net-observe.ts` 监听 `agent/assistant-stream`
+  的 start 帧开**归因窗**（连接段归给最老未归因的 attempt，无 pending 即弃，
+  挡掉背景流量；首 chunk / end 只关窗——keep-alive 复用连接无新段可报）与
   `agent/request-error`（只计 `TIMEOUT`/`TRANSPORT`），喂给
   `src/core/net.ts` 的 10 分钟滑动窗口；空窗显 `—`、绝不展示陈旧值。
   **`{ prepend: true }` 是承重的**：llm-retry 对可重试失败直接返回重试决定、
   不调 `next()`，排在其后的观察者会漏掉恰是最该数的那批失败。零额外流量，
-  与业务请求同路（含代理）。
+  与业务请求同路（含代理）。TTFT 已撤出主格与 tooltip（判据源 = 2026-10-27
+  ask `sysmon-net-direction`）；`ttftMs` 字段保留为恒空兼容桩（防旧客户端
+  网格显 `NaNms`）。
 - **Events 垫片**：`net-observe.ts` 里的 `declare module '@deepseek-ai/cordis'`
   逐字镜像 harness 的 `agent/assistant-stream` 声明（pinned rc.1 SDK 早于该
   事件），**cohort 升级带上官方声明后整块删除**（同键扩展会自冲突，

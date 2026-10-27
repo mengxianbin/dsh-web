@@ -33,17 +33,37 @@ export interface SysmonWarnThresholds {
 }
 
 /**
- * Provider-network reading (v4): passive observations over one shared sliding
- * window. `ttftMs` measures attempt start → first chunk on real requests
- * (connect + first byte + first token); `failures` counts network-class
- * failures (`TIMEOUT`/`TRANSPORT`) inside the window. An empty window reads
- * null/`—` — never a stale number.
+ * Which handshake shape produced a connection reading: `direct` (DNS + TCP +
+ * TLS straight to the origin — all real network) or `proxy` (a local HTTP
+ * proxy tunnel: the TCP leg to the proxy is loopback, the span covers the
+ * CONNECT reply + TLS handshake over the tunnel). The chip tooltip states
+ * this per shape (2026-10-27 ruling, ask id `sysmon-net-direction`).
+ */
+export type SysmonNetVia = 'direct' | 'proxy'
+
+/**
+ * Provider-network reading (v4, latency half revised 2026-10-27): passive
+ * observations over one shared sliding window. `connMs` measures the pure
+ * connection segment — DNS → TCP connect → TLS secureConnect — stamped at the
+ * socket layer of the same real request that carried the model call (TTFT
+ * was withdrawn from the main grid: provider queue + first-token generation
+ * drowned the network component); `failures` counts network-class failures
+ * (`TIMEOUT`/`TRANSPORT`) inside the window. An empty window reads null/`—`
+ * — never a stale number.
  */
 export interface SysmonNet {
-  /** Latest first-token latency in the window, ms; null when none (or aged out). */
-  ttftMs: number | null
-  /** Epoch ms of that TTFT observation; null with ttftMs. */
-  ttftAt: number | null
+  /** Latest connection-segment latency in the window, ms; null when none (or aged out). */
+  connMs: number | null
+  /** Epoch ms of that connection observation; null with connMs. */
+  connAt: number | null
+  /** Which handshake shape produced connMs; null with connMs. */
+  connVia: SysmonNetVia | null
+  /**
+   * v4 TTFT wire stub: always null. Kept so a pre-revision client bundle
+   * polling a revised host renders the dash instead of `NaNms` during the
+   * restart window (the mirror of v4's optional-`net` degradation).
+   */
+  ttftMs: null
   /** Network-class failures inside the window. */
   failures: number
   /** Route of the most recent observation (tooltip provider label); null when unknown or stale. */

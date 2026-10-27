@@ -1,8 +1,9 @@
-/** Passive observer wiring: stream-frame routing, failure delegation, prepend posture. */
+/** Passive observer wiring: stream-frame routing, connection-tap feed, failure delegation, prepend posture. */
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import { NetMonitor } from '../src/core/net.ts'
 import { observeNet, type NetAgentFace } from '../src/host/net-observe.ts'
+import type { ConnSegment } from '../src/host/conn-tap.ts'
 
 /** Captured ctx.on registrations. */
 interface Registration {
@@ -24,18 +25,31 @@ function harness() {
       return disposer
     },
   } as unknown as Context
-  const stop = observeNet(ctx, monitor)
+  let onSegment: ((segment: ConnSegment) => void) | null = null
+  const stopTap = vi.fn(() => { /* removed */ })
+  const stop = observeNet(ctx, monitor, {
+    tap: (settle) => {
+      onSegment = settle
+      return stopTap
+    },
+  })
   const find = (name: string): Registration => {
     const hit = registrations.find((entry) => entry.name === name)
     if (hit === undefined) throw new Error(`no listener for ${name}`)
     return hit
+  }
+  const settle = (segment: ConnSegment): void => {
+    if (onSegment === null) throw new Error('connection tap not installed')
+    onSegment(segment)
   }
   return {
     monitor,
     registrations,
     disposers,
     stop,
+    stopTap,
     find,
+    settle,
     advance(ms: number) { now += ms },
   }
 }
@@ -57,26 +71,42 @@ describe('observeNet', () => {
     expect(h.registrations[1]?.options).toEqual({ prepend: true })
   })
 
-  it('routes start/chunk/end frames into the monitor with the logged route', () => {
+  it('routes an attempt start into the tap feed: connection settles with the logged route', () => {
     const h = harness()
     const stream = h.find('agent/assistant-stream').listener as (payload: { agent: NetAgentFace; frame: { type: 'start' | 'chunk' | 'end'; attemptId: string } }) => void
     stream({ agent: agentWithRoute, frame: { type: 'start', attemptId: 's:1' } })
     h.advance(142)
-    stream({ agent: agentWithRoute, frame: { type: 'chunk', attemptId: 's:1' } })
+    h.settle({ ms: 142, via: 'direct' })
     const snap = h.monitor.snapshot()
-    expect(snap.ttftMs).toBe(142)
+    expect(snap.connMs).toBe(142)
+    expect(snap.connVia).toBe('direct')
     expect(snap.provider).toBe('deepseek')
+    expect(snap.ttftMs).toBeNull()
+    // The consumed attempt: its end frame finds nothing to change.
     stream({ agent: agentWithRoute, frame: { type: 'end', attemptId: 's:1' } })
-    expect(h.monitor.snapshot().ttftMs).toBe(142)
+    expect(h.monitor.snapshot().connMs).toBe(142)
+  })
+
+  it('closes the attribution window at the first chunk or the end frame (keep-alive reuse has no segment)', () => {
+    const h = harness()
+    const stream = h.find('agent/assistant-stream').listener as (payload: { agent: NetAgentFace; frame: { type: 'start' | 'chunk' | 'end'; attemptId: string } }) => void
+    stream({ agent: agentWithRoute, frame: { type: 'start', attemptId: 's:1' } })
+    h.advance(200)
+    stream({ agent: agentWithRoute, frame: { type: 'chunk', attemptId: 's:1' } })
+    h.settle({ ms: 200, via: 'direct' })
+    expect(h.monitor.snapshot().connMs).toBeNull()
+    stream({ agent: agentWithRoute, frame: { type: 'start', attemptId: 's:2' } })
+    stream({ agent: agentWithRoute, frame: { type: 'end', attemptId: 's:2' } })
+    h.settle({ ms: 80, via: 'proxy' })
+    expect(h.monitor.snapshot().connMs).toBeNull()
   })
 
   it('falls back to agent options when no request header is logged yet', () => {
     const h = harness()
     const stream = h.find('agent/assistant-stream').listener as (payload: { agent: NetAgentFace; frame: { type: 'start' | 'chunk' | 'end'; attemptId: string } }) => void
     stream({ agent: { options: { provider: 'options-provider' } }, frame: { type: 'start', attemptId: 's:1' } })
-    h.advance(10)
-    stream({ agent: { options: { provider: 'options-provider' } }, frame: { type: 'chunk', attemptId: 's:1' } })
-    expect(h.monitor.snapshot().provider).toBe('options-provider')
+    h.settle({ ms: 10, via: 'direct' })
+    expect(h.monitor.snapshot()).toMatchObject({ connMs: 10, provider: 'options-provider' })
   })
 
   it('records the failure then delegates the waterfall untouched', async () => {
@@ -89,9 +119,10 @@ describe('observeNet', () => {
     expect(h.monitor.snapshot()).toMatchObject({ failures: 1, warn: true, provider: 'deepseek' })
   })
 
-  it('unregisters both listeners on dispose', () => {
+  it('unregisters the tap and both listeners on dispose', () => {
     const h = harness()
     h.stop()
+    expect(h.stopTap).toHaveBeenCalledOnce()
     expect(h.disposers).toHaveLength(2)
     for (const disposer of h.disposers) expect(disposer).toHaveBeenCalledOnce()
   })

@@ -1,13 +1,20 @@
 /**
- * Pure provider-network quality tracking for the sysmon chip (v4). Passive
- * only: the host feeds it real model-request observations — attempt start →
- * first chunk (TTFT) from `agent/assistant-stream`, and network-class failures
- * from `agent/request-error` — and it derives one bounded snapshot. No active
+ * Pure provider-network quality tracking for the sysmon chip (v4, latency
+ * half revised 2026-10-27). Passive only: the host feeds it real
+ * model-request observations — attempt start, then the connection segment of
+ * that same request (DNS → TCP connect → TLS secureConnect, stamped at the
+ * socket layer by `host/conn-tap.ts`), and network-class failures from
+ * `agent/request-error` — and it derives one bounded snapshot. No active
  * probing, no network I/O, no timers: both halves compile this file and the
  * tests drive it with an injected clock.
  *
- * Semantics pinned by the v4 design ruling (m-note dsh-sysmon.md, 2026-10-27):
- * one shared 10-minute sliding window backs both readings; a window with no
+ * Semantics pinned by the 2026-10-27 revision (m-note dsh-sysmon.md, task
+ * `#sysmon-conn-latency-1027`, user ask id `sysmon-net-direction`): the
+ * latency reading is the pure connection segment — the same millisecond
+ * dimension as CPU/memory/disk. TTFT was withdrawn from the main grid
+ * because provider queue time plus first-token generation drowned the
+ * network component (signal ratio on the order of 1:3–1:30). One shared
+ * 10-minute sliding window backs both readings; a window with no
  * observation yields `—` rather than a stale number (the disk row's "never
  * show stale values" rule, with a bound matched to request cadence — model
  * requests arrive per step, so the disk row's 5s bound would flicker the
@@ -15,9 +22,9 @@
  * @module dsh-sysmon/core/net
  */
 
-import type { SysmonNet } from './types.ts'
+import type { SysmonNet, SysmonNetVia } from './types.ts'
 
-/** Sliding window backing both the TTFT reading and the failure count: ten minutes. */
+/** Sliding window backing both the connection reading and the failure count: ten minutes. */
 export const NET_WINDOW_MS = 600_000
 
 /** Failure codes that count as provider-link trouble (deepseek + pi-ai adapters normalize to these). */
@@ -32,7 +39,7 @@ const MAX_FAILURES = 1_000
 /** Hard cap on pending attempt starts (a start without its end frame evicts the oldest). */
 const MAX_PENDING = 64
 
-/** One observed attempt start, awaiting its first chunk or end frame. */
+/** One observed attempt start, awaiting its connection segment or end frame. */
 interface PendingAttempt {
   at: number
   provider: string | null
@@ -44,10 +51,11 @@ interface FailureRecord {
   code: string
 }
 
-/** Latest successful first-token observation inside the window. */
-interface TtftRecord {
+/** The newest settled connection-segment observation inside the window. */
+interface ConnectRecord {
   at: number
   ms: number
+  via: SysmonNetVia
   provider: string | null
 }
 
@@ -69,8 +77,9 @@ export interface NetMonitorOptions {
 
 /**
  * Sliding-window observer over passive model-request facts. Feed it attempt
- * lifecycle events and failures; read `snapshot()` for the chip. The monitor
- * owns no timers — pruning happens on read, so an idle host costs nothing.
+ * lifecycle events, settled connection segments, and failures; read
+ * `snapshot()` for the chip. The monitor owns no timers — pruning happens on
+ * read, so an idle host costs nothing.
  */
 export class NetMonitor {
   private readonly windowMs: number
@@ -79,7 +88,7 @@ export class NetMonitor {
   private readonly deps: NetMonitorDeps
   private readonly pending = new Map<string, PendingAttempt>()
   private readonly failures: FailureRecord[] = []
-  private ttft: TtftRecord | null = null
+  private conn: ConnectRecord | null = null
   private lastProvider: string | null = null
   private lastObservedAt = 0
 
@@ -104,20 +113,38 @@ export class NetMonitor {
     this.pending.set(attemptId, { at: this.deps.now(), provider })
   }
 
-  /** An attempt produced its first chunk: settle it into the TTFT reading. Chunks after the first are ignored. */
-  noteChunk(attemptId: string): void {
-    const start = this.pending.get(attemptId)
-    if (start === undefined) return
-    // End frames and first chunks both remove the entry; whichever lands first wins.
+  /**
+   * A real request's connection segment settled (TLS handshake done). It is
+   * attributed to the oldest still-unsettled attempt — the connection that
+   * just finished belongs to the earliest request still waiting on one — and
+   * dropped entirely when no attempt is pending, so background connections
+   * outside a model request never enter the reading. The attempt is consumed:
+   * a later first chunk or end frame finds nothing to close.
+   * @param ms - first-hop start → secureConnect, ms (clamped at 0).
+   * @param via - which handshake shape produced it (direct vs proxy tunnel).
+   */
+  noteConnect(ms: number, via: SysmonNetVia): void {
+    const oldest = this.pending.entries().next()
+    if (oldest.done === true) return
+    const [attemptId, attempt] = oldest.value
     this.pending.delete(attemptId)
     const at = this.deps.now()
-    const ms = Math.max(0, at - start.at)
-    this.ttft = { at, ms, provider: start.provider }
-    this.lastProvider = start.provider
+    this.conn = { at, ms: Math.max(0, ms), via, provider: attempt.provider }
+    this.lastProvider = attempt.provider
     this.lastObservedAt = at
   }
 
-  /** An attempt emitted its end frame without a first chunk (failure or empty response): drop its start. */
+  /**
+   * An attempt produced its first chunk with no connection settled: the
+   * request reused a warm keep-alive socket, so there is no new connection
+   * segment for it — just close its attribution window (chunks after that
+   * find no start, same as v4's end-without-chunk drop).
+   */
+  noteChunk(attemptId: string): void {
+    this.pending.delete(attemptId)
+  }
+
+  /** An attempt emitted its end frame without a settled connection (failure or empty response): drop its start. */
   noteEnd(attemptId: string): void {
     this.pending.delete(attemptId)
   }
@@ -132,10 +159,11 @@ export class NetMonitor {
   }
 
   /**
-   * The bounded reading for the payload: latest TTFT, windowed failure count,
-   * the route of the most recent observation, and the warn flag. Prunes
-   * everything the window has aged out — including orphaned attempt starts
-   * whose end frame never arrived.
+   * The bounded reading for the payload: latest connection segment (ms +
+   * handshake shape), windowed failure count, the route of the most recent
+   * observation, and the warn flag. Prunes everything the window has aged
+   * out — including orphaned attempt starts whose end frame never arrived.
+   * `ttftMs` is emitted as the always-null v4 wire stub (see {@link SysmonNet}).
    */
   snapshot(): SysmonNet {
     const now = this.deps.now()
@@ -144,12 +172,14 @@ export class NetMonitor {
     for (const [attemptId, start] of this.pending) {
       if (start.at < cutoff) this.pending.delete(attemptId)
     }
-    if (this.ttft !== null && this.ttft.at < cutoff) this.ttft = null
+    if (this.conn !== null && this.conn.at < cutoff) this.conn = null
     const stale = this.lastObservedAt < cutoff
     const failures = this.failures.length
     return {
-      ttftMs: this.ttft?.ms ?? null,
-      ttftAt: this.ttft?.at ?? null,
+      connMs: this.conn?.ms ?? null,
+      connAt: this.conn?.at ?? null,
+      connVia: this.conn?.via ?? null,
+      ttftMs: null,
       failures,
       provider: stale ? null : this.lastProvider,
       warn: this.warnFailures > 0 && failures >= this.warnFailures,
@@ -159,16 +189,19 @@ export class NetMonitor {
 
 /**
  * Format the chip's net value: `—` when the window holds nothing, otherwise
- * the rounded TTFT and/or the failure badge (`128ms`, `⚠2`, `128ms ⚠2`).
- * The badge appears whenever the window holds failures; the red state is the
- * warn threshold's decision, not this function's.
+ * the rounded connection segment and/or the failure badge (`23ms`, `⚠2`,
+ * `23ms ⚠2`). The badge appears whenever the window holds failures; the red
+ * state is the warn threshold's decision, not this function's. `?? null`
+ * tolerates a pre-revision host that serves no `connMs` (degrades to the
+ * dash / failures only, mirroring v4's optional-`net` degradation).
  * @param net - the snapshot to format.
  * @returns the display string.
  */
 export function formatNetValue(net: SysmonNet): string {
-  if (net.failures <= 0 && net.ttftMs === null) return '—'
+  const conn = net.connMs ?? null
+  if (net.failures <= 0 && conn === null) return '—'
   const parts: string[] = []
-  if (net.ttftMs !== null) parts.push(`${String(Math.round(net.ttftMs))}ms`)
+  if (conn !== null) parts.push(`${String(Math.round(conn))}ms`)
   if (net.failures > 0) parts.push(`⚠${String(net.failures)}`)
   return parts.join(' ')
 }

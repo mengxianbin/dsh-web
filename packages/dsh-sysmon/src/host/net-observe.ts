@@ -1,13 +1,22 @@
 /**
- * Passive provider-network observation (v4): feeds the NetMonitor from two
- * harness agent events, with zero behavior change on either.
+ * Passive provider-network observation (v4, revised 2026-10-27): feeds the
+ * NetMonitor from two harness agent events plus the socket-layer connection
+ * tap, with zero behavior change on any of them.
  *
- * - `agent/assistant-stream` (emit): attempt `start` stamps the clock, the
- *   first `chunk` settles it into a TTFT reading, `end` without a chunk drops
- *   it (failure or empty response — `agent/request-error` counts those).
- *   The deepseek adapter's `stream()` is a lazy async generator, so the
- *   start frame lands before connect: start → first chunk measures connect +
- *   first byte + first token on the exact route real requests travel.
+ * - `agent/assistant-stream` (emit): attempt `start` stamps the attribution
+ *   window (and the route label); the first `chunk` or the `end` frame
+ *   closes it when no connection settled — that request reused a warm
+ *   keep-alive socket, so it has no new connection segment (or it failed
+ *   before connecting; `agent/request-error` counts those). The deepseek
+ *   adapter's `stream()` is a lazy async generator, so the start frame lands
+ *   before connect: the connection segment that follows belongs to this
+ *   attempt and settles the latency reading.
+ * - connection tap (`host/conn-tap.ts`): wraps the process net/tls connect
+ *   entry points the undici fetch stack uses (probe-verified both shapes —
+ *   direct TLS and local-proxy CONNECT tunnel, 2026-10-27) and reports one
+ *   DNS→TCP→TLS segment per completed handshake. The monitor attributes it
+ *   to the oldest pending attempt and ignores segments with no pending
+ *   attempt, so background traffic outside a model request stays out.
  * - `agent/request-error` (waterfall): counts `TIMEOUT`/`TRANSPORT` failures,
  *   then delegates `next()` untouched. **Prepend is load-bearing** — llm-retry
  *   owns recovery and returns its retry decision WITHOUT calling `next()`, so
@@ -26,6 +35,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // Pulls the pinned SDK's Events declarations (agent/request-error) into scope.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { NetMonitor } from '../core/net.ts'
+import { tapConnections, type ConnSegment } from './conn-tap.ts'
 
 /** The agent fields the observer reads — structural, session route is best-effort. */
 export interface NetAgentFace {
@@ -62,13 +72,25 @@ function routeOf(agent: NetAgentFace): string | null {
   return typeof options === 'string' && options !== '' ? options : null
 }
 
+/** Wiring seam: the connection-tap installer (tests inject a fake, no real sockets). */
+export type ConnTapInstaller = (onSegment: (segment: ConnSegment) => void) => () => void
+
+/** Options accepted by {@link observeNet}. */
+export interface ObserveNetOptions {
+  /** Connection-tap installer (default = the real socket-layer tap). */
+  tap?: ConnTapInstaller
+}
+
 /**
- * Register both passive observers on the plugin context.
+ * Register both passive observers plus the connection tap on the plugin context.
  * @param ctx - registrant context; every listener unwinds with its fiber.
- * @param monitor - the windowed reading the listeners feed.
- * @returns a disposer removing both listeners (idempotent via cordis).
+ * @param monitor - the windowed reading the listeners and tap feed.
+ * @param options - wiring seam for tests.
+ * @returns a disposer removing the tap and both listeners (idempotent via cordis).
  */
-export function observeNet(ctx: Context, monitor: NetMonitor): () => void {
+export function observeNet(ctx: Context, monitor: NetMonitor, options: ObserveNetOptions = {}): () => void {
+  const installTap = options.tap ?? ((onSegment: (segment: ConnSegment) => void) => tapConnections(onSegment))
+  const stopTap = installTap((segment) => monitor.noteConnect(segment.ms, segment.via))
   const offStream = ctx.on('agent/assistant-stream', ({ agent, frame }) => {
     if (frame.type === 'start') monitor.noteStart(frame.attemptId, routeOf(agent))
     else if (frame.type === 'chunk') monitor.noteChunk(frame.attemptId)
@@ -82,6 +104,7 @@ export function observeNet(ctx: Context, monitor: NetMonitor): () => void {
     return next()
   }, { prepend: true })
   return () => {
+    stopTap()
     offFailures()
     offStream()
   }

@@ -43,7 +43,7 @@ function fakeSnapshot(): SamplesSnapshot {
     latest: sample,
     warn: { cpu: false, mem: false, disk: false },
     thresholds: { cpu: 90, mem: 90, disk: 90 },
-    net: { ttftMs: 128, ttftAt: 1_761_000_000_000, failures: 2, provider: 'deepseek', warn: true },
+    net: { connMs: 128, connAt: 1_761_000_000_000, connVia: 'direct', ttftMs: null, failures: 2, provider: 'deepseek', warn: true },
     history: [sample],
   }
 }
@@ -64,7 +64,7 @@ describe('makeSamplesRoute', () => {
     expect((body.latest as { cpu: number }).cpu).toBe(12.4)
     expect(body.warn).toEqual({ cpu: false, mem: false, disk: false })
     expect(body.thresholds).toEqual({ cpu: 90, mem: 90, disk: 90 })
-    expect(body.net).toEqual({ ttftMs: 128, ttftAt: 1_761_000_000_000, failures: 2, provider: 'deepseek', warn: true })
+    expect(body.net).toEqual({ connMs: 128, connAt: 1_761_000_000_000, connVia: 'direct', ttftMs: null, failures: 2, provider: 'deepseek', warn: true })
     expect(body.history).toBeUndefined()
   })
 

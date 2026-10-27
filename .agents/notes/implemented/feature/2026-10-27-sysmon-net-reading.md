@@ -75,7 +75,9 @@ observed symptom, TTFT is the auxiliary one. Hence the dual reading.
 **Measured connect/TTFB as a separate phase.** Deferred: TTFT mixes
 provider queue time into the reading, but separating the connect phase
 needs another instrumentation point inside the adapter. Recorded as a
-known limitation in the m-note design draft instead.
+known limitation in the m-note design draft instead. (Later the same day
+the `sysmon-net-direction` revision shipped exactly this split — see
+[conn-latency](2026-10-27-sysmon-conn-latency.md).)
 
 **Show the count only when it reaches the threshold.** Rejected: the badge
 is a count (`⚠2` stays unreddened below a threshold of 5), so sub-threshold
@@ -97,3 +99,8 @@ failures remain visible rather than disappearing.
   keys) stay green.
 - The m-note design draft (`content/tech/ai/dsh/dsh-sysmon.md`, v4 entry)
   carries the ruling provenance: this note is its implementation record.
+- Same-day revision: the latency half now measures the connection segment
+  and TTFT left the main grid and the tooltip (user ask
+  `sysmon-net-direction`) — shipped shape in
+  [conn-latency](2026-10-27-sysmon-conn-latency.md); this note keeps the v4
+  decision record as written.

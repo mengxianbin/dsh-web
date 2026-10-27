@@ -2,12 +2,13 @@
  * Host loader entry for the dsh-sysmon plugin — runs in the DSH host process.
  *
  * The host half owns one resident SysmonSampler (a typeperf disk stream plus
- * os CPU/memory on a 1s tick), one passive NetMonitor fed by harness agent
- * events (attempt start → first chunk = TTFT; TIMEOUT/TRANSPORT failures in a
- * 10-minute window), and the read-only GET /api/sysmon/samples route behind
- * the loopback/paired fence. Setting `enabled: false` in the profile patch
- * stops everything and leaves the route unregistered, so the browser chip
- * receives 404 and hides itself.
+ * os CPU/memory on a 1s tick), one passive NetMonitor fed by the socket-layer
+ * connection tap (DNS → TCP → TLS segment of each real model request; TTFT
+ * withdrawn from the main grid on 2026-10-27) plus harness agent events
+ * (TIMEOUT/TRANSPORT failures in a 10-minute window), and the read-only
+ * GET /api/sysmon/samples route behind the loopback/paired fence. Setting
+ * `enabled: false` in the profile patch stops everything and leaves the route
+ * unregistered, so the browser chip receives 404 and hides itself.
  * @module dsh-sysmon
  */
 
@@ -50,10 +51,11 @@ export const Config: z<Config> = z.object({
 
 /**
  * Dual-face system-metrics plugin: the host half samples every second,
- * passively observes real model requests for the provider-network reading,
- * and serves one fenced read-only route; the browser half renders the chip in
- * the session header's actions slot. Both halves degrade independently —
- * host off means 404 means the chip hides.
+ * passively observes the connection segment of real model requests (via the
+ * socket tap) for the provider-network reading, and serves one fenced
+ * read-only route; the browser half renders the chip in the session header's
+ * actions slot. Both halves degrade independently — host off means 404 means
+ * the chip hides.
  */
 export const apply = mountOnce('dsh-sysmon', (ctx: Context, config?: Config): void => {
   const cfg = Config(config)
