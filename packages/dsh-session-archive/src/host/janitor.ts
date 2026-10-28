@@ -27,6 +27,7 @@ import type {
   InventoryView,
   OpResult,
   RunStats,
+  SealCheckResult,
   SessionPreviewView,
   WorkspaceView,
 } from '../core/types.ts'
@@ -35,10 +36,14 @@ import {
   capEntries,
   deserializeAutoState,
   deserializeLedger,
+  normalizeOverrideReason,
   writeJsonAtomic,
   type AutoStateDocument,
   type LedgerDocument,
+  type LedgerEntry,
+  type LedgerSource,
 } from './ledger.ts'
+import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { TtlMemo } from './ttl-memo.ts'
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
@@ -69,6 +74,30 @@ interface LiveStoreFace {
 
 export interface ArchiveServiceOptions {
   dshHome?: string
+}
+
+/**
+ * The archive seal gate (contract C2), passed only by `POST /archive` — the
+ * automatic cycles and every other caller stay ungated (C6: `auto/run` is out
+ * of scope). Absent gate = historical behaviour, no seal reads at all.
+ */
+export interface ArchiveGate {
+  /**
+   * Forced pass-through for the whole batch. The route validates that a
+   * `force:true` request carries a non-empty reason before this exists, so
+   * the reason here is always real words (裁定③: force 一视同仁 + 真实理由).
+   */
+  force?: { readonly reason: string }
+}
+
+/** One row of the `POST /archive-override` response: the entry as written (contract C4). */
+export interface ArchiveOverrideRow {
+  readonly id: string
+  readonly status: 'ok'
+  readonly archivedAt: number
+  readonly source: LedgerSource
+  readonly reason?: string
+  readonly seal?: string
 }
 
 const PREVIEW_MESSAGE_CAP = 6
@@ -382,6 +411,19 @@ export class ArchiveService {
     }
   }
 
+  /**
+   * The six-value seal grouping for a batch of ids — the single implementation
+   * behind both archive channels (contract C1: 分组实现全插件仅此一份): the
+   * native dialog consumes it through `POST /seal-check`, the REST hard gate
+   * calls `analyzeSeal` directly through {@link archive}. Location reuses the
+   * sessions-root directory index; an id with no locatable transcript answers
+   * `UNKNOWN` (fail-closed, never a silent pass).
+   */
+  sealCheck(ids: readonly string[]): SealCheckResult[] {
+    const index = this.dirIndex.get()
+    return ids.map((id) => analyzeSeal(id, index.byId.get(id)))
+  }
+
   // ------------------------------------------------------------------
   // Archive / unarchive
   // ------------------------------------------------------------------
@@ -398,7 +440,7 @@ export class ArchiveService {
     return run
   }
 
-  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string): Promise<BatchResponse> {
+  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, gate?: ArchiveGate): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
@@ -422,12 +464,41 @@ export class ArchiveService {
             continue
           }
         }
+        // Seal gate (contract C2): decided per id after the existence checks,
+        // so one refused session never drags its batch down (批内不连坐).
+        let entrySource: LedgerSource = source
+        let entryReason: string | undefined
+        let entrySeal: string | undefined
+        if (gate !== undefined) {
+          const seal = analyzeSeal(id, built.dirIndex.byId.get(id))
+          if (gate.force !== undefined) {
+            // Forced pass: the whole batch archives under the caller's stated
+            // reason, each entry carrying the seal judgement it overrode.
+            entrySource = 'override'
+            entryReason = gate.force.reason
+            entrySeal = sealMarker(seal)
+          } else if (isGreenSeal(seal.verdict)) {
+            // Green tier: archives exactly as before — no seal field, source manual.
+          } else if (isStaleSeal(seal)) {
+            // Stale tier (裁定①): pass through with the pinned marker.
+            entrySeal = 'stale'
+          } else {
+            // True red (UNSEALED) and UNKNOWN: refuse this id with its grouping.
+            results.push({ id, status: 'skipped', reason: 'seal-required', seal: { verdict: seal.verdict, detail: seal.detail } })
+            continue
+          }
+        }
         this.busy.add(id)
         try {
           // The registry records the harness's native id spelling; rows and
           // ledger keys stay canonical.
           await archiveSession(this.ctx, built.nativeIds[id] ?? id)
-          this.ledger.entries[id] = { archivedAt: now, source }
+          this.ledger.entries[id] = {
+            archivedAt: now,
+            source: entrySource,
+            ...(entryReason !== undefined ? { reason: entryReason } : {}),
+            ...(entrySeal !== undefined ? { seal: entrySeal } : {}),
+          }
           results.push({ id, status: 'ok' })
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
@@ -476,6 +547,68 @@ export class ArchiveService {
       await this.flushLedger()
       return { results, freedBytes: 0 }
     })
+  }
+
+  // ------------------------------------------------------------------
+  // Native-channel write-back (archive-override)
+  // ------------------------------------------------------------------
+
+  /**
+   * Native-channel ledger write-back (contract C4). `mode: "force"` ends the
+   * entry in `source: "override"` with its reason (blank/missing normalizes to
+   * `override:no-reason` at the write layer) and the seal judgement; `mode:
+   * "note"` adds the pinned `seal: "stale"` marker of the stale pass-through
+   * tier without touching an existing entry's source. Both modes are idempotent
+   * write-ups: an existing `archivedAt` is never reset (a write-back must not
+   * refresh the 30-day retention countdown), and repeated identical calls
+   * write nothing. Because `observedArchiveIds` skips rows that already carry
+   * an archive time, either order of backfill and write-back leaves exactly
+   * one entry (contract C5).
+   *
+   * Deliberately lock-free, mirroring `recordObservedArchives`: one ledger
+   * document, atomic whole-file writes, single-process read-modify-write.
+   */
+  async archiveOverride(
+    ids: readonly string[],
+    mode: 'force' | 'note',
+    options: { reason?: string; seal?: string } = {},
+  ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
+    const now = Date.now()
+    const index = this.dirIndex.get()
+    const results: ArchiveOverrideRow[] = []
+    let changed = false
+    for (const id of ids) {
+      const existing = this.ledger.entries[id]
+      let next: LedgerEntry
+      if (mode === 'force') {
+        const providedSeal = typeof options.seal === 'string' && options.seal.trim() !== '' ? options.seal.trim() : undefined
+        next = {
+          archivedAt: existing?.archivedAt ?? now,
+          source: 'override',
+          reason: normalizeOverrideReason(options.reason),
+          seal: providedSeal ?? sealMarker(analyzeSeal(id, index.byId.get(id))),
+        }
+      } else {
+        next = existing !== undefined
+          ? { ...existing, seal: 'stale' }
+          : { archivedAt: now, source: 'observed', seal: 'stale' }
+      }
+      if (JSON.stringify(existing) !== JSON.stringify(next)) {
+        this.ledger.entries[id] = next
+        changed = true
+      }
+      const entry = this.ledger.entries[id] as LedgerEntry
+      results.push({
+        id,
+        status: 'ok',
+        archivedAt: entry.archivedAt,
+        source: entry.source,
+        ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+        ...(entry.seal !== undefined ? { seal: entry.seal } : {}),
+      })
+    }
+    if (changed) await this.flushLedger()
+    return { results }
   }
 
   // ------------------------------------------------------------------

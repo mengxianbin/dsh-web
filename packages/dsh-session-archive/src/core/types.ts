@@ -23,7 +23,36 @@ export type OpReason =
   | 'unreadable'
   | 'missing-seam'
   | 'busy'
+  | 'seal-required'
   | 'error'
+
+/**
+ * Seal (收口) verdict — the six-value grouping of the archive seal gate
+ * (contract C1). The vocabulary is copied from the m-note preflight scanner
+ * `scripts/dsh/session-sentinel-scan.mjs`; `DONE`/`N_A`/`NEUTRAL`/`LEGACY`
+ * are green (archive as usual), `UNSEALED` and `UNKNOWN` are refused by the
+ * REST hard gate unless forced, and `sentinel-stale` inside `UNSEALED` is the
+ * degraded pass-through tier that archives with `seal: "stale"` recorded.
+ */
+export type SealVerdict = 'DONE' | 'N_A' | 'UNSEALED' | 'NEUTRAL' | 'LEGACY' | 'UNKNOWN'
+
+/** Machine detail codes an `UNSEALED` verdict may carry (contract C1). */
+export type SealUnsealedDetail = 'sentinel-pending' | 'save-tail-no-sentinel' | 'save-trace-no-sentinel' | 'sentinel-stale'
+
+/** One row served by `POST /seal-check` (contract C1). */
+export interface SealCheckResult {
+  readonly id: string
+  readonly verdict: SealVerdict
+  readonly detail: string
+  /** Chat messages after the last sentinel-bearing message; stale rows only. */
+  readonly followUpCount?: number
+}
+
+/** The per-id seal attachment on a `seal-required` skip (contract C2). */
+export interface SealRef {
+  readonly verdict: SealVerdict
+  readonly detail: string
+}
 
 /** One per-session result inside a batch operation response. */
 export interface OpResult {
@@ -31,6 +60,8 @@ export interface OpResult {
   readonly status: OpStatus
   readonly reason?: OpReason
   readonly detail?: string
+  /** Seal grouping for `seal-required` skips (contract C2). */
+  readonly seal?: SealRef
 }
 
 /** Aggregate counters for one executed batch or automatic cycle. */
@@ -63,9 +94,20 @@ export interface ArchiveSessionRow {
    * Where {@link archivedAt} came from; present only together with it.
    * `observed` marks a backfilled entry: the session was already archived when
    * this plugin first saw it, so the time is the observation moment, not the
-   * real archive moment.
+   * real archive moment. `override` marks a forced archive carrying an
+   * explicit reason (contract C3).
    */
-  readonly archivedAtSource?: 'manual' | 'auto' | 'observed'
+  readonly archivedAtSource?: 'manual' | 'auto' | 'observed' | 'override'
+  /**
+   * Forced-archive reason from the ledger entry (`source: "override"`),
+   * surfaced so the inventory can show why an archive was forced (contract C3).
+   */
+  readonly reason?: string
+  /**
+   * Seal marker from the ledger entry: `"stale"` for a degraded pass-through,
+   * `"<VERDICT>:<detail>"` for a forced archive's seal judgement (contract C3).
+   */
+  readonly seal?: string
   /** Last activity from the authoritative session feed; absent when unknown. */
   readonly lastActivityAt?: number
   /** False when last activity could not be determined reliably. */
@@ -137,6 +179,34 @@ export interface BatchRequestBody {
    * can re-confirm.
    */
   readonly expectedTotal?: number
+}
+
+/** Request body for `POST /seal-check` (contract C1). */
+export interface SealCheckRequestBody {
+  readonly ids: readonly string[]
+}
+
+/**
+ * Request body for `POST /archive` once the seal gate exists (contract C2):
+ * `force` only changes anything when it is exactly `true` together with a
+ * non-empty `reason`; a non-boolean or absent `force` reads as "no force".
+ */
+export interface ArchiveGateBody extends BatchRequestBody {
+  readonly force?: boolean
+  readonly reason?: string
+}
+
+/**
+ * Request body for `POST /archive-override` — the native-channel ledger
+ * write-back (contract C4). `mode: "force"` records the forced archive with
+ * its reason (empty normalizes to `override:no-reason`); `mode: "note"`
+ * records the stale pass-through seal.
+ */
+export interface ArchiveOverrideBody {
+  readonly ids: readonly string[]
+  readonly mode: 'force' | 'note'
+  readonly reason?: string
+  readonly seal?: string
 }
 
 /** Batch route response. */

@@ -64,6 +64,12 @@ dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 - **从现在开始倒计时是刻意的取舍。** 很久以前归档的会话，倒计时从观测时刻重新起算而不是按真实年龄；因此补记不可能删除归档时间比保留期更近的会话。
 - **受保护会话无论手动还是自动都不会被删除**：运行中的会话、当前正在查看的会话、有运行中子会话的会话，以及正在执行其他归档操作的会话。绝不会通过强制停止会话来完成删除。
 
+## 归档收口闸（seal gate）
+
+`POST /api/dsh-session-archive/archive` 归档前逐 id 跑收口判定：解码转录（zstd 多帧）读最后一条 save 哨兵，得六值分组——`DONE` / `N_A` / `NEUTRAL` / `LEGACY` 照常归档；`sentinel-stale`（此前 save 已完成、其后续聊过）降级放行并记 `seal: "stale"`；真红 `UNSEALED` 与 `UNKNOWN` 逐 id 拒绝，返回 `reason: "seal-required"` 与该 id 的 `{verdict, detail}` 分组详情，批内不连坐。强制归档必须同一请求携带 `force: true` **与非空** `reason`（缺失即整请求 400）；强制放行的条目以 `source: "override"` 记入原因与收口判定。分组实现全插件仅此一份，同时以 `POST /api/dsh-session-archive/seal-check {ids}` 供原生归档弹窗读取；`POST /api/dsh-session-archive/archive-override {ids, mode: "force" | "note", reason?, seal?}` 为原生通道台账回写（force 原因空值归一 `override:no-reason`，note 固定 `seal: "stale"`），两种回写都不会重置已有的 `archivedAt`，保留期倒计时不会被回写刷新。
+
+- **降级注记**：不认识 `override` 源的旧版插件读取（并随后改写）新台账时会丢弃 `override` 条目——该会话归档时间变回"未知"、不启动保留期倒计时。方向安全：降级至多丢账，绝不会提前安排物理删除。
+
 ## 安全模型
 
 全部 HTTP 路由（`/api/dsh-session-archive/*`）要求回环套接字 + 回环 Host 头 + 浏览器同源标记；永不信任 `X-Forwarded-For`。删除只通过插件自己的会话根目录索引解析存储路径，移除前再次校验 realpath，并拒绝任何位于 `$DSH_HOME/sessions` 之外的路径。客户端只提交会话 ID，从不提交文件路径。session-rdb（SQLite）在删除前校验存储指纹。

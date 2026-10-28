@@ -20,14 +20,26 @@ import type { RunStats } from '../core/types.ts'
  *   (archived from the official sidebar, which never reaches this plugin), and
  *   the time records the moment of observation — a conservative lower bound on
  *   the real archive moment, never a file timestamp.
+ * - `override`: a forced archive that carried an explicit reason (contract
+ *   C3) — either `force:true + reason` through `POST /archive`, or the native
+ *   dialog's `POST /archive-override` write-back. The reason travels in
+ *   {@link LedgerEntry.reason}, the seal judgement in {@link LedgerEntry.seal}.
  */
-export type LedgerSource = 'manual' | 'auto' | 'observed'
+export type LedgerSource = 'manual' | 'auto' | 'observed' | 'override'
 
 /** One archive-time record. The ledger stays the only archive-time fact source. */
 export interface LedgerEntry {
   /** Epoch ms of the archive action (manual, automatic) or of the observation. */
   archivedAt: number
   source: LedgerSource
+  /** Forced-archive reason (`source: "override"`); never written empty — see {@link normalizeOverrideReason}. */
+  reason?: string
+  /**
+   * Seal marker recorded with the archive: `"stale"` for the degraded
+   * pass-through tier (裁定①), `"<VERDICT>:<detail>"` for a forced archive's
+   * seal judgement (contract C3).
+   */
+  seal?: string
 }
 
 export interface LedgerDocument {
@@ -47,6 +59,20 @@ export function createLedgerDocument(): LedgerDocument {
   return { version: 1, entries: {} }
 }
 
+/** Default marker for a forced archive without a stated reason (裁定②). */
+export const OVERRIDE_NO_REASON = 'override:no-reason'
+
+/**
+ * Normalize a forced-archive reason at the write layer (contract C4): any
+ * missing/blank reason becomes {@link OVERRIDE_NO_REASON}, so "forced but
+ * never said why" stays recognizable and countable in the ledger instead of
+ * colliding with entries that carry real words.
+ */
+export function normalizeOverrideReason(reason: unknown): string {
+  if (typeof reason === 'string' && reason.trim() !== '') return reason.trim()
+  return OVERRIDE_NO_REASON
+}
+
 /** Tolerant deserialize: corrupt or foreign documents start fresh. */
 export function deserializeLedger(raw: string): LedgerDocument {
   let parsed: unknown
@@ -61,12 +87,18 @@ export function deserializeLedger(raw: string): LedgerDocument {
   const entries: Record<string, LedgerEntry> = {}
   for (const [id, value] of Object.entries(doc.entries as Record<string, unknown>)) {
     if (typeof value !== 'object' || value === null) continue
-    const entry = value as { archivedAt?: unknown; source?: unknown }
+    const entry = value as { archivedAt?: unknown; source?: unknown; reason?: unknown; seal?: unknown }
     if (typeof entry.archivedAt !== 'number' || !Number.isFinite(entry.archivedAt)) continue
-    // Documents written before `observed` existed carry only manual/auto and
-    // keep deserializing unchanged; an unknown source is still dropped.
-    if (entry.source !== 'manual' && entry.source !== 'auto' && entry.source !== 'observed') continue
-    entries[id] = { archivedAt: entry.archivedAt, source: entry.source }
+    // Documents written before `observed`/`override` existed keep deserializing
+    // unchanged; an unknown source is still dropped. `override` (added with the
+    // seal gate, 2026-10-28) MUST survive this whitelist: dropping it here
+    // would be downgrade-lost accounting — see the note in deserializeLedger's
+    // callers and the README "Downgrade note".
+    if (entry.source !== 'manual' && entry.source !== 'auto' && entry.source !== 'observed' && entry.source !== 'override') continue
+    const restored: LedgerEntry = { archivedAt: entry.archivedAt, source: entry.source }
+    if (typeof entry.reason === 'string' && entry.reason !== '') restored.reason = entry.reason
+    if (typeof entry.seal === 'string' && entry.seal !== '') restored.seal = entry.seal
+    entries[id] = restored
   }
   return { version: 1, entries }
 }

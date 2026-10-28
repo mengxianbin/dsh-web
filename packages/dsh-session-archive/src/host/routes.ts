@@ -59,6 +59,11 @@ function batchBody(body: unknown): BatchRequestBody {
   }
 }
 
+/** The raw body as a record for the seal-gate fields (`force`/`reason`) the shared batchBody drops. */
+function bodyRecord(body: unknown): Record<string, unknown> {
+  return (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>
+}
+
 function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 300) : String(error)
 }
@@ -144,8 +149,137 @@ function batchRoute(service: ArchiveService, path: string, run: (body: BatchRequ
   }
 }
 
+/**
+ * `POST /seal-check` (contract C1): the six-value grouping per id, served from
+ * the one shared implementation so the native dialog (channel A) and this
+ * plugin's own gate (channel B) can never disagree. Same loopback fence as
+ * every route; `GET ?ids=a,b` is accepted alongside `POST {ids:[…]}`.
+ */
+export function makeSealCheckRoute(service: ArchiveService): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${ARCHIVE_API_PREFIX}/seal-check`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      let ids: string[]
+      if (req.method === 'POST') {
+        ids = idList(bodyRecord(await readBody(req)).ids)
+      } else if (req.method === 'GET') {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        ids = idList((url.searchParams.get('ids') ?? '').split(','))
+      } else {
+        writeJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      if (ids.length === 0) {
+        writeJson(res, 400, { ok: false, error: 'no session ids' })
+        return
+      }
+      try {
+        const results = service.sealCheck(ids)
+        writeJson(res, 200, { results }, { 'cache-control': 'no-store' })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: errorDetail(error) })
+      }
+    },
+  }
+}
+
+/**
+ * `POST /archive` behind the seal gate (contract C2). Body gains `force`/
+ * `reason`: a non-boolean or absent `force` reads as "no force"; `force:true`
+ * without a non-empty reason refuses the WHOLE request with 400 (the REST
+ * channel only ever forces with real words — 裁定③). Otherwise the gate runs
+ * per id inside the service: green and stale archive, true red and UNKNOWN
+ * are refused with `seal-required` + their grouping (no batch contagion).
+ */
 export function makeArchiveRoute(service: ArchiveService): WebRoute {
-  return batchRoute(service, `${ARCHIVE_API_PREFIX}/archive`, (body) => service.archive(body.ids, 'manual', body.currentSessionId))
+  return {
+    kind: 'exact',
+    path: `${ARCHIVE_API_PREFIX}/archive`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const raw = await readBody(req)
+      const record = bodyRecord(raw)
+      const body = batchBody(raw)
+      if (body.ids.length === 0) {
+        writeJson(res, 400, { ok: false, error: 'no session ids' })
+        return
+      }
+      if (body.ids.length > 20_000) {
+        writeJson(res, 413, { ok: false, error: 'too many session ids' })
+        return
+      }
+      const forced = record.force === true
+      const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
+      if (forced && reason === '') {
+        writeJson(res, 400, { ok: false, error: 'force requires a non-empty reason' })
+        return
+      }
+      try {
+        const response = await service.archive(body.ids, 'manual', body.currentSessionId, forced ? { force: { reason } } : {})
+        writeJson(res, 200, response, { 'cache-control': 'no-store' })
+      } catch (error) {
+        if (error instanceof BusyError) {
+          writeJson(res, 409, { ok: false, error: 'busy: another archive operation is running' })
+          return
+        }
+        if (error instanceof PlanMismatchError) {
+          writeJson(res, 409, { error: 'plan-mismatch', plan: error.plan })
+          return
+        }
+        writeJson(res, 500, { ok: false, error: errorDetail(error) })
+      }
+    },
+  }
+}
+
+/**
+ * `POST /archive-override` (contract C4): the native dialog's ledger
+ * write-back after a confirmed forced archive (`mode: "force"`, reason
+ * normalizes to `override:no-reason` when blank) or a stale pass-through
+ * (`mode: "note"`, pins `seal: "stale"`). It only writes the ledger — it
+ * never archives anything, so it cannot bypass the gate.
+ */
+export function makeArchiveOverrideRoute(service: ArchiveService): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${ARCHIVE_API_PREFIX}/archive-override`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed' })
+        return
+      }
+      const record = bodyRecord(await readBody(req))
+      const ids = idList(record.ids)
+      if (ids.length === 0) {
+        writeJson(res, 400, { ok: false, error: 'no session ids' })
+        return
+      }
+      if (ids.length > 20_000) {
+        writeJson(res, 413, { ok: false, error: 'too many session ids' })
+        return
+      }
+      if (record.mode !== 'force' && record.mode !== 'note') {
+        writeJson(res, 400, { ok: false, error: 'mode must be force or note' })
+        return
+      }
+      try {
+        const response = await service.archiveOverride(ids, record.mode, {
+          ...(typeof record.reason === 'string' ? { reason: record.reason } : {}),
+          ...(typeof record.seal === 'string' ? { seal: record.seal } : {}),
+        })
+        writeJson(res, 200, { ok: true, ...response }, { 'cache-control': 'no-store' })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: errorDetail(error) })
+      }
+    },
+  }
 }
 
 export function makeUnarchiveRoute(service: ArchiveService): WebRoute {
@@ -218,5 +352,7 @@ export function makeArchiveRoutes(service: ArchiveService): WebRoute[] {
     makeDeleteRoute(service),
     makeAutoPreviewRoute(service),
     makeAutoRunRoute(service),
+    makeSealCheckRoute(service),
+    makeArchiveOverrideRoute(service),
   ]
 }
