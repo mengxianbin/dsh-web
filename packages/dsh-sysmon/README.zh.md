@@ -22,13 +22,14 @@ CPU、内存与磁盘活动，外加低频探测的网络质量读数，并把�
   `api.deepseek.com`）发一个 `ping` 单包，取往返毫秒数；这是与
   `ping <目标>` 同一个单纯概念（纯网络层往返），DNS/TCP/TLS 握手、代理
   隧道与服务端排队**刻意排除在语义之外**（此前连接段口径把这几段叠加成
-  500ms 级读数，正是本次换口径的原因）。失败半区仍是**纯被动**：监听
-  harness 的 `agent/request-error`（按 `TIMEOUT`/`TRANSPORT` 归类的失败），
-  进 **10 分钟滑动窗口**——跨境/代理链路的问题由它兜底。读数形如 `19ms` /
-  `⚠3` / `19ms ⚠3`，窗口内失败数达阈值即染红；探测失败不更新读数，最后
-  实测值超过 150 秒自然老化显 `—`，绝不展示陈旧值；tooltip 明示测量口径
-  （到哪个目标的 ICMP 往返）。探测频率每分钟 1 包、32 字节，流量可忽略，
-  `netProbeTarget: ''` 可整体禁用（RTT 半区显 `—`，失败计数照常）。
+  500ms 级读数，正是本次换口径的原因）。**展示只此一格**：`19ms` 或
+  `—`——10 分钟窗口失败计数、`⚠n` 徽标与网络格红色已于同日「撤失败数
+  展示」裁定一并退出展示（窗口太长代表不了当下；失败仍纯被动计数进载荷，
+  仅不再渲染）。探测失败不更新读数、**15 秒后快速重试**（成功才回到 60 秒
+  节奏，瞬时丢包不再把读数拖成几分钟的 `—`），最后实测值超过 150 秒自然
+  老化显 `—`，绝不展示陈旧值；tooltip 明示测量口径（到哪个目标的 ICMP
+  往返）。正常节奏每分钟 1 包、32 字节，流量可忽略，`netProbeTarget: ''`
+  可整体禁用（显 `—`）。
 - 宿主内存里保留十分钟环形缓冲（600 个样本），藏在 `GET /api/sysmon/samples`
   后面，将来加历史视图无需改宿主。
 - 告警按「连续样本」而非「单点尖峰」触发：某指标只有连续 `warnStreak` 个样本
@@ -63,7 +64,7 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-sysmon
 | `memWarnPercent` | number | `90` | 触发内存染红的占用百分比。 |
 | `diskWarnPercent` | number | `90` | 触发磁盘染红的忙碌百分比。 |
 | `warnStreak` | number | `3` | 告警所需的连续采样个数。 |
-| `netWarnFailures` | number | `1` | 10 分钟窗口内网络失败数达到该值时网络读数染红；`0` 关闭染红（计数仍显示）。 |
+| `netWarnFailures` | number | `1` | 载荷 `net.warn` 标志的窗口失败数阈值（chip 已不据此染红——2026-10-28 撤展示裁定）；`0` 关闭该标志。 |
 | `netProbeTarget` | string | `api.deepseek.com` | ICMP 探测的固定参照点（国内、路由稳定）；空字符串禁用探测（RTT 半区显 `—`）。 |
 
 ## 安全模型
@@ -72,8 +73,9 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-sysmon
 恒过，配了 remote-web-ui 的配对设备 cookie 也过；未配对的局域网或隧道请求一律
 `403` 拒绝。链路上不传任何凭据、路径或进程名——只有每秒聚合计数器与网络
 读数（探测往返毫秒 + 参照点目标名、失败计数、失败来源的 provider 路由名，
-如 `deepseek`——路由标识，非端点 URL、非密钥；`connMs`/`connAt`/`connVia`/
-`ttftMs` 为已撤读数留下的恒空兼容桩字段）。
+如 `deepseek`——路由标识，非端点 URL、非密钥，且后两者仅随载荷传输、chip
+不再渲染；`connMs`/`connAt`/`connVia`/`ttftMs` 为已撤读数留下的恒空兼容桩
+字段）。
 
 ## 已知限制
 

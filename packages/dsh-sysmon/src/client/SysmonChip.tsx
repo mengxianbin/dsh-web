@@ -4,11 +4,17 @@
  * label) and the always-rendered conversation-header leading cell (fallback,
  * covering the no-session and blank-session states the actions row never
  * mounts for). The shared body polls the host route `api/sysmon/samples` once
- * per second while the tab is visible, reddens any metric the host marks as
- * warned (sustained-streak at threshold; the net reading reddens on windowed
- * network failures), and shows disk throughput, memory absolutes, and the
- * provider-network line in its tooltip. The seats coordinate through
- * {@link ./presence.ts} so exactly one copy paints at a time.
+ * per second while the tab is visible, reddens any CPU/memory/disk metric the
+ * host marks as warned (sustained-streak at threshold — the net reading never
+ * reddens: its failure count left the display on 2026-10-28), and shows disk
+ * throughput, memory absolutes, and the probe round-trip line in its tooltip.
+ * The seats coordinate through {@link ./presence.ts} so exactly one copy
+ * paints at a time.
+ *
+ * Tooltip stability: the payload ticks every second, and mutating a native
+ * `title` attribute under the pointer dismisses the browser tooltip (the
+ * flicker users saw). While hovered the title snapshot is frozen; leaving
+ * resumes the live title on the next payload.
  *
  * Degradation contract (mirrors UsageGlance): a 404 means the host half is
  * off or disabled and the chip hides itself entirely; a transport failure
@@ -17,7 +23,7 @@
  * @module dsh-sysmon/client/SysmonChip
  */
 
-import { useEffect, useLayoutEffect, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the ui-conversation SlotMap merge (the header actions hole).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
@@ -54,11 +60,11 @@ export function formatGB(bytes: number): string {
 
 /**
  * Build the multi-line tooltip: header, disk throughput, memory absolutes,
- * the network reading (probe round trip + failure count) with its honest
- * measurement note, refresh clock. Disk detail is omitted while the disk
- * fields are null; the net lines appear only when the host serves the
- * network reading, falling back to the idle notice when the window holds no
- * reading at all (no fresh probe round and no counted failures).
+ * the network reading (probe round trip only — the 10-minute failure count
+ * left the display on 2026-10-28) with its honest measurement note, refresh
+ * clock. Disk detail is omitted while the disk fields are null; the net
+ * lines appear only when the host serves the network reading, falling back
+ * to the idle notice when the window holds no fresh probe round.
  * @param payload - the last successful host document.
  * @param t - the namespace translator.
  * @returns the title string.
@@ -93,28 +99,26 @@ export function chipTitle(payload: SysmonPayload | null, t: (key: SysmonKey) => 
 }
 
 /**
- * The tooltip's network line: the idle notice when the window holds no
- * reading at all, otherwise the probe round trip + failure count, with the
- * route label when the host knows which route the counted failures came from
- * (the probe itself is route-agnostic).
- * `?? null` tolerates a pre-A-case host that serves no `rttMs` (renders
- * the dash / failures only instead of `NaN`).
+ * The tooltip's network line: the idle notice when the window holds no fresh
+ * probe round, otherwise the probe round trip alone. The windowed failure
+ * count and the route label are deliberately absent — judge source 2026-10-28
+ * display ruling ("彻底撤"): a ten-minute window cannot show the present
+ * state, so no failure number appears anywhere in the display. `?? null`
+ * tolerates a pre-A-case host that serves no `rttMs` (renders the dash
+ * instead of `NaN`).
  * @param net - the network reading.
  * @param t - the namespace translator.
  * @returns one tooltip line.
  */
 export function netLine(net: SysmonNet, t: (key: SysmonKey) => string): string {
   const rtt = net.rttMs ?? null
-  if (rtt === null && net.failures === 0) return t('chip.netIdle')
-  const detail = t('chip.netDetail')
-    .replace('{rtt}', rtt === null ? dash : `${String(Math.round(rtt))}ms`)
-    .replace('{failures}', String(net.failures))
-  return net.provider === null ? detail : `${detail} · ${t('chip.netProvider').replace('{provider}', net.provider)}`
+  if (rtt === null) return t('chip.netIdle')
+  return t('chip.netDetail').replace('{rtt}', `${String(Math.round(rtt))}ms`)
 }
 
 /**
  * The shared chip body: polls the host route and renders the four read-outs
- * (CPU, memory, disk, provider network). Both seats render this component;
+ * (CPU, memory, disk, probe round trip). Both seats render this component;
  * seat coordination happens in the wrappers.
  * @param props - the shell's locale translator.
  * @returns the chip span, or null when the host route 404s.
@@ -122,6 +126,19 @@ export function netLine(net: SysmonNet, t: (key: SysmonKey) => string): string {
 function SysmonBody({ t }: SysmonChipProps) {
   const [payload, setPayload] = useState<SysmonPayload | null>(null)
   const [hostOff, setHostOff] = useState(false)
+
+  // Freeze the native title while hovered (2026-10-28 flicker fix): the
+  // payload re-renders the chip every second, and rewriting `title` under the
+  // pointer dismisses the browser tooltip, so it blinked once per second and
+  // never stayed readable. While hovered the snapshot below is not written;
+  // leave resumes the live title from the latest payload. (Hooks live above
+  // the 404 early-return — hook order must not depend on hostOff.)
+  const [title, setTitle] = useState(() => chipTitle(null, t))
+  const hoveredRef = useRef(false)
+  const liveTitle = chipTitle(payload, t)
+  useEffect(() => {
+    if (!hoveredRef.current) setTitle(liveTitle)
+  }, [liveTitle])
 
   useEffect(() => {
     let alive = true
@@ -171,9 +188,12 @@ function SysmonBody({ t }: SysmonChipProps) {
   const mem = latest?.mem
   const disk = latest?.diskBusy
   const net = payload?.net ?? null
+  // The net key is absent from data-warn by design: its red state left the
+  // display with the failure count (2026-10-28 ruling). The host payload may
+  // still carry net.warn — the chip just does not paint it.
   const warnAttr = warn === undefined
     ? undefined
-    : ([warn.cpu && 'cpu', warn.mem && 'mem', warn.disk && 'disk', net?.warn && 'net'].filter(Boolean) as string[]).join(' ') || undefined
+    : ([warn.cpu && 'cpu', warn.mem && 'mem', warn.disk && 'disk'].filter(Boolean) as string[]).join(' ') || undefined
 
   return (
     <span
@@ -181,8 +201,13 @@ function SysmonBody({ t }: SysmonChipProps) {
       data-dsh-plugin="sysmon"
       data-dsh-part="chip"
       data-warn={warnAttr}
-      title={chipTitle(payload, t)}
+      title={title}
       aria-label={t('chip.aria')}
+      onMouseEnter={() => { hoveredRef.current = true }}
+      onMouseLeave={() => {
+        hoveredRef.current = false
+        setTitle(chipTitle(payload, t))
+      }}
     >
       <span className={css.metric}>
         <span className={css.k}>{t('chip.cpu')}</span>
@@ -201,7 +226,9 @@ function SysmonBody({ t }: SysmonChipProps) {
       <span className={css.sep} aria-hidden="true" />
       <span className={css.metric}>
         <span className={css.k}>{t('chip.net')}</span>
-        <span className={net?.warn ? `${css.v} ${css.vWarn}` : css.v}>{net === null ? dash : formatNetValue(net)}</span>
+        {/* Never warns: the net red state left the display with the failure
+            count (2026-10-28 ruling); only the probe round trip renders. */}
+        <span className={css.v}>{net === null ? dash : formatNetValue(net)}</span>
       </span>
     </span>
   )

@@ -18,20 +18,32 @@ packages/AGENTS.md 的全局/包级规则。
   P0a-d 实测）。改此参数会静默丢数据并污染 cwd。
 - **网络读数（A 案 · 低频主动 ICMP 探测；2026-10-28 判据，取代 2026-10-27
   「零主动探测」裁定）**：判据源 = 2026-10-28 ask `net-quality-semantics` 选 A
-  （读数 = 单一国内参照点的 ICMP RTT，语义单纯为「本机网络质量好不好」；
-  跨境/代理链路由失败计数兜底）。`src/host/ping-probe.ts` 每轮结算后再计 60s，
-  对 `netProbeTarget`（默认 `api.deepseek.com`；`''` 整体禁用探测）spawn
-  `ping -n 1 -w 3000`，中英双语输出解析（`时间=19ms` / `time=19ms` /
-  `<1ms`）。成功喂 `src/core/net.ts` 的 `noteRtt(ms)`；探测失败（超时/丢包/
-  spawn 错）喂 `null`——**不更新读数**，最后实测值过 150s 陈旧界限
-  （`RTT_STALE_MS`）自然显 `—`，绝不展示陈旧值。**失败计数仍纯被动**
-  `agent/request-error`（`{ prepend: true }` 承重：llm-retry 对可重试失败直接
-  返回重试决定、不调 `next()`，排在其后的观察者会漏掉恰是最该数的那批失败）；
-  10 分钟窗口、`netWarnFailures` 染红、`⚠n` 徽标与四态展示全部不变（RTT
-  本身不参与染红）。连接段被动观测（`conn-tap.ts` + `agent/assistant-stream`
-  归因窗）已随 A 案撤除（回滚锚 = `8ec42c58`）；`connMs`/`connAt`/`connVia`/
-  `ttftMs` 保留为恒空兼容桩（旧客户端显 `—` 防 `NaNms`）；`provider` 路由标签
-  自此只来自计数的失败（探针无路由属性）。
+  （读数 = 单一国内参照点的 ICMP RTT，语义单纯为「本机网络质量好不好」）。
+  `src/host/ping-probe.ts` 每轮结算后再计 60s，对 `netProbeTarget`（默认
+  `api.deepseek.com`；`''` 整体禁用探测）spawn `ping -n 1 -w 3000`，中英双语
+  输出解析（`时间=19ms` / `time=19ms` / `<1ms`）。成功喂
+  `src/core/net.ts` 的 `noteRtt(ms)`；探测失败（超时/丢包/ spawn 错）喂
+  `null`——**不更新读数**，最后实测值过 150s 陈旧界限（`RTT_STALE_MS`）
+  自然显 `—`，绝不展示陈旧值。**失败轮 15s 快速重试**（`PROBE_RETRY_MS`，
+  2026-10-28 延迟可见性修复：60s 节奏下三次连败即把读数拖成分钟级 `—`；
+  成功才回 60s 节奏，稳态流量仍每分钟 1 包）。
+- **失败数只计不显（2026-10-28「彻底撤」展示裁定）**：判据源 = 同日 ask 回执
+  （用户原话「不要显示失败会话数量了，数量更新的窗口太长了，体现不了当下
+  实时状态」，选项「彻底撤」）。**`⚠n` 徽标、网络格红色、`data-warn` 的
+  `net` 键、tooltip 失败数与路由行全部退出展示**——网络格只渲染
+  `formatNetValue`（`19ms` / `—`），`netLine` 只渲染往返或空窗提示。
+  载荷与计数管道**原样保留**（`failures`/`provider`/`warn` 照常上线路，
+  `netWarnFailures` 只定载荷 `net.warn` 标志），语义契约表 `chip` 行的
+  `net` 键已同步摘除。失败计数仍纯被动 `agent/request-error`
+  （`{ prepend: true }` 承重：llm-retry 对可重试失败直接返回重试决定、
+  不调 `next()`，排在其后的观察者会漏掉恰是最该数的那批失败）。
+- **tooltip 悬停冻结（2026-10-28 闪烁修复）**：载荷每秒换一次，原生
+  `title` 在指针下方被重写即被浏览器打断 → 一闪一闪。`SysmonBody` 把
+  title 放进 state：**悬停期间不写**、离开悬停恢复实时值（钩子必须在
+  404 early-return 之前，顺序不得随 `hostOff` 变化）。
+- 连接段被动观测（`conn-tap.ts` + `agent/assistant-stream` 归因窗）已随 A 案
+  撤除（回滚锚 = `8ec42c58`）；`connMs`/`connAt`/`connVia`/`ttftMs` 保留为
+  恒空兼容桩（旧客户端显 `—` 防 `NaNms`）。
 - **Events 垫片**：`net-observe.ts` 里的 `declare module '@deepseek-ai/cordis'`
   逐字镜像 harness 的 `agent/assistant-stream` 声明（pinned rc.1 SDK 早于该
   事件），**cohort 升级带上官方声明后整块删除**（同键扩展会自冲突，

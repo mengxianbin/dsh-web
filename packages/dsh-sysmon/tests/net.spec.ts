@@ -106,16 +106,12 @@ describe('formatNetValue', () => {
     expect(formatNetValue(empty)).toBe('—')
   })
 
-  it('formats rtt only, failures only, and both', () => {
+  it('renders the round trip alone — the failure badge left the display (2026-10-28 ruling)', () => {
     expect(formatNetValue({ ...empty, rttMs: 19.4 })).toBe('19ms')
-    expect(formatNetValue({ ...empty, failures: 3 })).toBe('⚠3')
-    expect(formatNetValue({ ...empty, rttMs: 19.6, failures: 3 })).toBe('20ms ⚠3')
-  })
-
-  it('keeps the badge without warn when failures sit below the threshold', () => {
-    // The badge is a count, the red state is the threshold's decision — a
-    // threshold of 5 shows ⚠2 unreddened.
-    expect(formatNetValue({ ...empty, failures: 2 })).toBe('⚠2')
+    // Counted failures stay on the payload, but never render: a 10-minute
+    // window cannot show the present state, so there is no ⚠n badge at all.
+    expect(formatNetValue({ ...empty, failures: 3 })).toBe('—')
+    expect(formatNetValue({ ...empty, rttMs: 19.6, failures: 3 })).toBe('20ms')
   })
 
   it('degrades to the dash when a pre-A-case host serves no rttMs', () => {
@@ -123,6 +119,6 @@ describe('formatNetValue', () => {
     // payload still carries the retired connMs reading, no rttMs.
     const oldHost = { ...empty, rttMs: undefined, connMs: 477 } as unknown as SysmonNet
     expect(formatNetValue(oldHost)).toBe('—')
-    expect(formatNetValue({ ...oldHost, failures: 2 })).toBe('⚠2')
+    expect(formatNetValue({ ...oldHost, failures: 2 })).toBe('—')
   })
 })

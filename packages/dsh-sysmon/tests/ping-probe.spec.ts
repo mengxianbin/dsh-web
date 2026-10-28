@@ -1,6 +1,6 @@
-/** ICMP probe: bilingual output parsing, cadence after settle, failure reporting, dispose posture. */
+/** ICMP probe: bilingual output parsing, cadence after settle, quick failure retry, failure reporting, dispose posture. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { PROBE_INTERVAL_MS, PROBE_TIMEOUT_MS, decodePingOutput, parsePingRtt, startPingProbe, type PingChild } from '../src/host/ping-probe.ts'
+import { PROBE_INTERVAL_MS, PROBE_RETRY_MS, PROBE_TIMEOUT_MS, decodePingOutput, parsePingRtt, startPingProbe, type PingChild } from '../src/host/ping-probe.ts'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -122,6 +122,7 @@ describe('startPingProbe', () => {
     const stop = startPingProbe({
       target: 'api.deepseek.com',
       intervalMs: 1_000,
+      retryMs: 1_000,
       onResult: (ms) => results.push(ms),
       spawner: () => { const scripted = fakeChild(); children.push(scripted); return scripted.child },
     })
@@ -132,6 +133,35 @@ describe('startPingProbe', () => {
     vi.advanceTimersByTime(1_001)
     expect(children).toHaveLength(3)
     expect(results).toEqual([null, null])
+    stop()
+  })
+
+  it('retries a failed round quickly instead of waiting the full interval', () => {
+    // 2026-10-28 latency-presence fix: the reading only survives
+    // RTT_STALE_MS, so a 60s wait per miss would blank the cell for minutes
+    // on a merely flaky link. Failure → PROBE_RETRY_MS, success → full cadence.
+    vi.useFakeTimers()
+    expect(PROBE_RETRY_MS).toBeLessThan(PROBE_INTERVAL_MS)
+    const results: (number | null)[] = []
+    const children: ReturnType<typeof fakeChild>[] = []
+    const stop = startPingProbe({
+      target: 'api.deepseek.com',
+      onResult: (ms) => results.push(ms),
+      spawner: () => { const scripted = fakeChild(); children.push(scripted); return scripted.child },
+    })
+    children[0]?.close(1)
+    expect(results).toEqual([null])
+    vi.advanceTimersByTime(PROBE_RETRY_MS - 1)
+    expect(children).toHaveLength(1)
+    vi.advanceTimersByTime(1)
+    expect(children).toHaveLength(2)
+    // A success right after restores the one-per-minute cadence.
+    children[1]?.reply('来自 x 的回复: 字节=32 时间=9ms TTL=52')
+    children[1]?.close(0)
+    vi.advanceTimersByTime(PROBE_RETRY_MS)
+    expect(children).toHaveLength(2)
+    vi.advanceTimersByTime(PROBE_INTERVAL_MS - PROBE_RETRY_MS)
+    expect(children).toHaveLength(3)
     stop()
   })
 

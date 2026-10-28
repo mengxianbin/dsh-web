@@ -29,17 +29,18 @@ or an unhealthy network is visible without leaving the chat.
   one simple concept `ping <target>` measures (bare network-layer RTT), with
   DNS/TCP/TLS handshake, proxy tunnel and provider queue **deliberately
   outside its semantics** (the retired connection reading stacked those spans
-  into a scary 500ms-scale number — the reason this ruling replaced it). The
-  failure half stays **purely passive**: it listens to the harness's
-  `agent/request-error` for failures classified as `TIMEOUT`/`TRANSPORT` over
-  a **10-minute sliding window**, carrying cross-border / proxy trouble as
-  the reading's fallback half. The reading renders as `19ms` / `⚠3` /
-  `19ms ⚠3` and reddens once the windowed failure count reaches the
-  threshold; a failed probe updates nothing and the last good round trip ages
-  out to `—` after 150 seconds — never a stale number. The tooltip states the
-  measurement (ICMP round trip to which target). The probe is one 32-byte
-  packet per minute (negligible traffic) and `netProbeTarget: ''` disables it
-  entirely (the RTT half reads `—`, failures keep counting).
+  into a scary 500ms-scale number — the reason this ruling replaced it).
+  **The cell renders this one value only**: `19ms` or `—`. The 10-minute
+  failure count, the `⚠n` badge and the red net state left the display the
+  same day under the "withdraw the failure count" ruling (a window that long
+  cannot show the present moment); failures are still counted passively onto
+  the wire, just never rendered. A failed probe updates nothing and retries
+  after **15 seconds** (success restores the 60-second cadence, so a
+  transient loss no longer blanks the cell for minutes), and the last good
+  round trip ages out to `—` after 150 seconds — never a stale number. The
+  tooltip states the measurement (ICMP round trip to which target). Steady
+  state is one 32-byte packet per minute (negligible traffic), and
+  `netProbeTarget: ''` disables probing entirely (the cell reads `—`).
 - Keeps a ten-minute in-memory ring buffer (600 samples) behind
   `GET /api/sysmon/samples`, so a future history view needs no host change.
 - Warns by sustained streak, not by single spike: a metric reddens only after
@@ -75,7 +76,7 @@ The plugin exposes a schemastery config; override any key in the profile
 | `memWarnPercent` | number | `90` | Memory used percent that reddens the chip. |
 | `diskWarnPercent` | number | `90` | Disk busy percent that reddens the chip. |
 | `warnStreak` | number | `3` | Consecutive 1s samples required to warn. |
-| `netWarnFailures` | number | `1` | Windowed network failures that redden the net reading; `0` disables the red state (the count still renders). |
+| `netWarnFailures` | number | `1` | Threshold for the payload's `net.warn` flag (the chip no longer reddens on it — 2026-10-28 display withdrawal); `0` disables the flag. |
 | `netProbeTarget` | string | `api.deepseek.com` | Fixed ICMP probe reference target (domestic, stable route); an empty string disables probing (the RTT half reads `—`). |
 
 ## Security model
@@ -87,7 +88,8 @@ No credential, file path, or process name crosses the wire — only aggregate
 per-second counters plus the network reading (probe round-trip milliseconds
 with the reference target name, a failure count, and the provider route the
 counted failures came from, e.g. `deepseek` — a route identifier, not an
-endpoint URL and not a key; `connMs`/`connAt`/`connVia`/`ttftMs` are null
+endpoint URL and not a key; the latter two ride the wire only and the chip
+no longer renders them; `connMs`/`connAt`/`connVia`/`ttftMs` are null
 compatibility stubs left for the retired readings).
 
 ## Known limitations

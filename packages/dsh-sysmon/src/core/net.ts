@@ -11,8 +11,11 @@
  *   user's own `ping api.deepseek.com` baseline — with handshake, proxy and
  *   provider-queue overhead deliberately outside its semantics.
  * - **Failures**: still purely passive — `host/net-observe.ts` counts
- *   `TIMEOUT`/`TRANSPORT` request errors in a 10-minute sliding window;
- *   cross-border / proxy trouble shows up here (the A-case "兜底" half).
+ *   `TIMEOUT`/`TRANSPORT` request errors in a 10-minute sliding window and
+ *   keeps serving them on the wire for API compatibility, but since the
+ *   2026-10-28 display ruling ("彻底撤": the ten-minute window cannot
+ *   represent the present moment) the chip renders neither the `⚠n` badge,
+ *   the red state, nor the tooltip count — only the RTT reading below.
  *
  * This file compiles into both the host and the client program, so it stays
  * free of node/DOM APIs and timers: the probe loop lives host-side, the
@@ -158,20 +161,18 @@ export class NetMonitor {
 }
 
 /**
- * Format the chip's net value: `—` when the reading holds nothing, otherwise
- * the rounded probe round trip and/or the failure badge (`19ms`, `⚠2`,
- * `19ms ⚠2`). The badge appears whenever the window holds failures; the red
- * state is the warn threshold's decision, not this function's. `?? null`
- * tolerates a pre-A-case host that serves no `rttMs` (degrades to the dash /
- * failures only, mirroring v4's optional-`net` degradation).
+ * Format the chip's net value: the rounded probe round trip, or `—` when the
+ * reading holds none — one value, never the failure badge. The 10-minute
+ * failure count still rides the payload (`failures`/`provider`/`warn`), but
+ * displaying it was withdrawn by the 2026-10-28 ruling: a window that long
+ * cannot show the present state, so the badge, the red state and the tooltip
+ * count went away together. `?? null` tolerates a pre-A-case host that serves
+ * no `rttMs` (degrades to the dash, mirroring v4's optional-`net`
+ * degradation).
  * @param net - the snapshot to format.
  * @returns the display string.
  */
 export function formatNetValue(net: SysmonNet): string {
   const rtt = net.rttMs ?? null
-  if (net.failures <= 0 && rtt === null) return '—'
-  const parts: string[] = []
-  if (rtt !== null) parts.push(`${String(Math.round(rtt))}ms`)
-  if (net.failures > 0) parts.push(`⚠${String(net.failures)}`)
-  return parts.join(' ')
+  return rtt === null ? '—' : `${String(Math.round(rtt))}ms`
 }

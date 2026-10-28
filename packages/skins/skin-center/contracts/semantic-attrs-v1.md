@@ -127,7 +127,7 @@ family / 插件区域：
 | `save` / `reset` / `disable` / `enable` / `reload` | model-capabilities | 扩展区动作按钮（保存 / 重置 / 禁用此提供方 / 启用 / 重新读取）；panel 内裸值按钮 |
 | `disabled-state` | model-capabilities | 已禁用提供方的卡片提示区（含启用按钮）；panel 内 `[data-dsh-part="disabled-state"]` |
 | `disabled-footer` / `disabled-row` | model-capabilities | Models 页底部存档区与其行；`settings.models.footer` 槽内 `section[data-dsh-part="disabled-footer"]` 与其中 `li[data-dsh-part="disabled-row"]` |
-| `chip` | sysmon | 会话头部系统指标控件根 span；`conversation.session.header.actions` 槽 entry id `sysmon`，`[data-dsh-plugin="sysmon"][data-dsh-part="chip"]`；`data-warn` 为空格分隔的当前告警指标键（`cpu`/`mem`/`disk`/`net`，`net` 自 v4 起为窗口内网络失败告警），无告警时缺省 |
+| `chip` | sysmon | 会话头部系统指标控件根 span；`conversation.session.header.actions` 槽 entry id `sysmon`，`[data-dsh-plugin="sysmon"][data-dsh-part="chip"]`；`data-warn` 为空格分隔的当前告警指标键（`cpu`/`mem`/`disk`；`net` 键随 2026-10-28「失败数撤展示」裁定退出——网络格只显探测往返、永不染红），无告警时缺省 |
 
 ## plugin 组（14 个）
 

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /** Sysmon header chip: values, warn coloring, the 404 hide contract, the A-case net reading. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { SysmonChip, chipTitle, formatGB, netLine } from '../src/client/SysmonChip.tsx'
 import { zh } from '../src/client/locales.ts'
 import type { SysmonKey } from '../src/client/locales.ts'
@@ -87,17 +87,20 @@ describe('SysmonChip', () => {
     expect(screen.getAllByText('—')).toHaveLength(4)
   })
 
-  it('renders the net reading and reddens it when the window holds failures', async () => {
+  it('renders the round trip alone and never reddens the net cell, even with counted failures', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       status: 200,
       ok: true,
       json: async () => payload({}, { cpu: false, mem: false, disk: false }, netFixture({ rttMs: 128.4, rttAt: 1_761_330_000_000, failures: 3, provider: 'deepseek', warn: true })),
     })))
     render(<SysmonChip t={makeTranslate()} />)
-    await waitFor(() => expect(screen.getByText('128ms ⚠3')).toBeTruthy())
+    // 2026-10-28 display ruling (彻底撤): no ⚠n badge, no red net state —
+    // the 10-minute failure window cannot represent the present moment.
+    await waitFor(() => expect(screen.getByText('128ms')).toBeTruthy())
     const chip = screen.getByLabelText(zh['chip.aria'])
-    expect(chip.getAttribute('data-warn')).toBe('net')
-    expect(screen.getByText('128ms ⚠3').className).toContain('vWarn')
+    expect(chip.getAttribute('data-warn')).toBeNull()
+    expect(screen.getByText('128ms').className).not.toContain('vWarn')
+    expect(screen.queryByText(/⚠/)).toBeNull()
     expect(screen.getByText(zh['chip.net'])).toBeTruthy()
   })
 
@@ -150,6 +153,30 @@ describe('SysmonChip', () => {
     await new Promise((resolve) => setTimeout(resolve, 1100))
     expect(screen.getByText('12%')).toBeTruthy()
   })
+
+  it('freezes the title while hovered so the 1s payload tick never flickers the tooltip', async () => {
+    // Bug (2026-10-28): the native tooltip is dismissed whenever `title` is
+    // rewritten under the pointer, so a per-second payload made it blink
+    // once a second. The snapshot must hold for the whole hover.
+    let call = 0
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1
+      const doc = call === 1 ? payload() : payload({ memUsedBytes: 10_000_000_000 })
+      return { status: 200, ok: true, json: async () => doc }
+    }))
+    render(<SysmonChip t={makeTranslate()} />)
+    const chip = await screen.findByLabelText(zh['chip.aria'])
+    await waitFor(() => expect(chip.getAttribute('title')).toContain('8.9'))
+    fireEvent.mouseEnter(chip)
+    // Poll tick #2 lands mid-hover (memDetail would change 8.9 → 9.3).
+    await new Promise((resolve) => setTimeout(resolve, 1_100))
+    expect(call).toBeGreaterThanOrEqual(2)
+    expect(chip.getAttribute('title')).toContain('8.9')
+    expect(chip.getAttribute('title')).not.toContain('9.3')
+    // Leave resumes the live title from the latest payload.
+    fireEvent.mouseLeave(chip)
+    expect(chip.getAttribute('title')).toContain('9.3')
+  })
 })
 
 describe('chipTitle', () => {
@@ -172,11 +199,14 @@ describe('chipTitle', () => {
     expect(chipTitle(null, makeTranslate())).toBe(zh['chip.title'])
   })
 
-  it('carries the net detail line with route label and the ICMP measurement note', () => {
+  it('carries the round trip and the ICMP measurement note — no failure or route text', () => {
+    // The fixture still carries a counted failure with a provider route: the
+    // display must ignore all of it (2026-10-28 彻底撤 ruling).
     const title = chipTitle(payload({}, undefined, netFixture({ rttMs: 96.2, rttAt: 1_761_330_000_000, failures: 1, provider: 'deepseek', warn: true })), makeTranslate())
     expect(title).toContain('往返 96ms')
-    expect(title).toContain('失败 1 次')
-    expect(title).toContain('路由 deepseek')
+    expect(title).not.toContain('失败')
+    expect(title).not.toContain('路由')
+    expect(title).not.toContain('⚠')
     // Judge source 2026-10-28 ask `net-quality-semantics` (A-case): the
     // tooltip names the fixed reference target the RTT is measured against.
     expect(title).toContain(zh['chip.netPath'].replace('{target}', 'api.deepseek.com'))
@@ -196,27 +226,29 @@ describe('chipTitle', () => {
     const idle = chipTitle(payload({}, undefined, netFixture()), makeTranslate())
     expect(idle).toContain(zh['chip.netIdle'])
     expect(idle).not.toContain('测量口径')
-    const failuresOnly = chipTitle(payload({}, undefined, netFixture({ failures: 2 })), makeTranslate())
-    expect(failuresOnly).toContain('往返 —')
+    // Failures in the window change nothing in the display: no count, no
+    // dash-vs-detail difference — just the same idle notice (no fresh RTT).
+    const failuresOnly = chipTitle(payload({}, undefined, netFixture({ failures: 2, warn: true })), makeTranslate())
+    expect(failuresOnly).toContain(zh['chip.netIdle'])
+    expect(failuresOnly).not.toContain('失败')
     expect(failuresOnly).not.toContain('测量口径')
   })
 })
 
 describe('netLine', () => {
-  it('shows the idle notice when the reading holds nothing', () => {
+  it('shows the idle notice when the reading holds no fresh probe round', () => {
     expect(netLine(netFixture(), makeTranslate())).toBe(zh['chip.netIdle'])
   })
 
-  it('omits the route label when the provider is unknown (a probe round has no route)', () => {
-    const line = netLine(netFixture({ rttMs: 19, rttAt: 1_761_330_000_000 }), makeTranslate())
-    expect(line).toContain('19ms')
+  it('renders only the round trip — no failure count, no route label', () => {
+    const line = netLine(netFixture({ rttMs: 19, rttAt: 1_761_330_000_000, failures: 5, provider: 'deepseek', warn: true }), makeTranslate())
+    expect(line).toBe(zh['chip.netDetail'].replace('{rtt}', '19ms'))
+    expect(line).not.toContain('失败')
     expect(line).not.toContain('路由')
   })
 
-  it('reads dash for the round trip when only failures landed in the window', () => {
-    const line = netLine(netFixture({ failures: 2 }), makeTranslate())
-    expect(line).toContain('往返 —')
-    expect(line).toContain('2 次')
+  it('reads the idle notice when only failures landed in the window', () => {
+    expect(netLine(netFixture({ failures: 2, warn: true }), makeTranslate())).toBe(zh['chip.netIdle'])
   })
 })
 

@@ -11,7 +11,12 @@
  *   what made the retired connection reading read as a scary 500ms).
  * - **Low frequency, negligible traffic**: one 32-byte ICMP echo per minute;
  *   `intervalMs` is scheduled after each round finishes, so a slow/failing
- *   probe can never overlap itself.
+ *   probe can never overlap itself. A *failed* round retries after the much
+ *   shorter {@link PROBE_RETRY_MS} instead of the full interval: the reading
+ *   only survives `RTT_STALE_MS` (150s), so three consecutive misses on a
+ *   60s cadence would blank the cell for minutes on an otherwise flaky — not
+ *   dead — link. Success restores the one-per-minute cadence, so steady-state
+ *   traffic stays one packet per minute.
  * - **Windows-only by construction**: the package is Windows-only already
  *   (typeperf sampling); `ping.exe` output is parsed for both locale shapes
  *   (`时间=19ms` / `time=19ms`, and the `<1ms` sub-millisecond form).
@@ -29,6 +34,14 @@ import { spawn } from 'node:child_process'
 
 /** Probe cadence: one echo per minute (scheduled after each round settles). */
 export const PROBE_INTERVAL_MS = 60_000
+
+/**
+ * Retry cadence after a *failed* round (2026-10-28 latency-presence fix):
+ * transient packet loss must not wait out the full minute while the reading
+ * races its staleness bound. Still low frequency: at most one extra echo per
+ * 15s window, and only while probes are failing.
+ */
+export const PROBE_RETRY_MS = 15_000
 
 /** Per-probe reply timeout passed to `ping -w`, ms. */
 export const PROBE_TIMEOUT_MS = 3_000
@@ -94,6 +107,8 @@ export interface PingProbeOptions {
   target: string
   /** Cadence after each round settles (default {@link PROBE_INTERVAL_MS}). */
   intervalMs?: number
+  /** Cadence after a *failed* round (default {@link PROBE_RETRY_MS}). */
+  retryMs?: number
   /** Reply timeout passed to `ping -w`, ms (default {@link PROBE_TIMEOUT_MS}). */
   timeoutMs?: number
   /** Result sink: the measured round trip, or null when the probe failed. */
@@ -110,6 +125,7 @@ export interface PingProbeOptions {
  */
 export function startPingProbe(options: PingProbeOptions): () => void {
   const intervalMs = options.intervalMs ?? PROBE_INTERVAL_MS
+  const retryMs = options.retryMs ?? PROBE_RETRY_MS
   const timeoutMs = options.timeoutMs ?? PROBE_TIMEOUT_MS
   const spawner: PingSpawner = options.spawner
     ?? ((command, args) => spawn(command, [...args], {
@@ -121,9 +137,9 @@ export function startPingProbe(options: PingProbeOptions): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null
   let child: PingChild | null = null
 
-  const schedule = (): void => {
+  const schedule = (delayMs: number): void => {
     if (stopped) return
-    timer = setTimeout(run, intervalMs)
+    timer = setTimeout(run, delayMs)
     // Never hold the process open for a cadence timer (host shutdown path).
     timer.unref?.()
   }
@@ -137,7 +153,10 @@ export function startPingProbe(options: PingProbeOptions): () => void {
       child = null
       if (!stopped) {
         options.onResult(ms)
-        schedule()
+        // Success keeps the one-per-minute cadence; a failed round retries
+        // quickly so transient loss never races the reading's staleness bound
+        // into a minutes-long `—` (see PROBE_RETRY_MS).
+        schedule(ms === null ? retryMs : intervalMs)
       }
     }
     try {
