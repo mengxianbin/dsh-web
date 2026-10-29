@@ -13,19 +13,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { credentialRef, type CredentialRef } from '@deepseek-ai/dsh-credentials'
+import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { isLoopbackRequest } from './loopback.ts'
 import { readJsonBody, writeJson } from './http.ts'
 import { cdpAlive, readJars, type BrowserJars } from './cdp.ts'
-import { renewChain } from './chain.ts'
+import { performRenew, ACCOUNT_REF, PLATFORM_REF, credentialsOf, type CredentialsSeam } from './renew-core.ts'
 import { ensurePlatformWindow, type OpenOutcome } from './chrome.ts'
 import { assembleHeader, jarFromHeader, probeBalance, type Jar } from './probe.ts'
 import { PAGE_HTML, PAGE_PATH } from './page.ts'
-
-/** The managed credential the dsh-usage MiMo adapter probes with (platform jar). */
-const PLATFORM_REF: CredentialRef = credentialRef('MIMO_PLATFORM_COOKIE')
-/** The managed credential the renewal chain consumes (account jar / passToken). */
-const ACCOUNT_REF: CredentialRef = credentialRef('MIMO_ACCOUNT_COOKIES')
 
 /** Cap for one dsh-usage refresh poke (its worst case probes every provider serially). */
 const REFRESH_POKE_TIMEOUT_MS = 30_000
@@ -54,21 +49,12 @@ export interface ReloginDeps {
   alive?: (port: number) => Promise<boolean>
   /** Window opener (default: attach-or-spawn). */
   ensureWindow?: (options: { chromePath: string, profile: string, port: number, platformUrl: string }) => Promise<OpenOutcome>
-}
-
-/** The credential seam duck-typed from ctx.get('credentials'). */
-interface CredentialsSeam {
-  resolve(ref: CredentialRef): Promise<{ value?: string } | undefined>
-  set(ref: CredentialRef, value: string): Promise<void>
-  describe(ref: CredentialRef): Promise<{ configured: boolean }>
-}
-
-function credentialsOf(ctx: Context): CredentialsSeam | undefined {
-  try {
-    return ctx.get('credentials') as CredentialsSeam | undefined
-  } catch {
-    return undefined
-  }
+  /**
+   * Auto-renew hook: a successful manual store (renew / capture / account
+   * paste) re-arms a loop paused on an interactive verdict (FORK
+   * mimo-relogin-l3). Absent in tests that do not run the loop.
+   */
+  autoRenew?: { rearm(): void }
 }
 
 /** The Host header of a fence-passed request (validated loopback by isLoopbackRequest). */
@@ -167,37 +153,28 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
     path: '/api/mimo-relogin/renew',
     handler: async (req, res): Promise<void> => {
       if (refused(req, res, 'POST')) return
-      const creds = credentialsOf(ctx)
-      if (creds === undefined) {
+      const result = await performRenew(ctx, options.platformUrl, fetchImpl)
+      if (result.status === 'no-credentials') {
         writeJson(res, 503, { ok: false, error: 'credentials service unavailable' })
         return
       }
-      const accountHeader = (await creds.resolve(ACCOUNT_REF).catch(() => undefined))?.value
-      if (accountHeader === undefined || accountHeader === '') {
+      if (result.status === 'no-account') {
         writeJson(res, 409, { ok: false, error: '账号凭据未入库——先「打开登录窗」完成登录后点「抓取登录态」（或在下方粘贴账号 Cookie）' })
         return
       }
-      const platformHeader = (await creds.resolve(PLATFORM_REF).catch(() => undefined))?.value ?? ''
-      const outcome = await renewChain({
-        platformUrl: options.platformUrl,
-        platformJar: jarFromHeader(platformHeader),
-        accountJar: jarFromHeader(accountHeader),
-        fetchImpl,
-      })
-      if (outcome.verdict !== 'ok') {
-        const status = outcome.verdict === 'interactive' ? 409 : 502
-        writeJson(res, status, { ok: false, verdict: outcome.verdict, note: outcome.note, hops: outcome.hops })
+      if (result.status === 'chain') {
+        const status = result.verdict === 'interactive' ? 409 : 502
+        writeJson(res, status, { ok: false, verdict: result.verdict, note: result.note, hops: result.hops })
         return
       }
-      try {
-        await creds.set(PLATFORM_REF, assembleHeader(outcome.platformJar))
-        await creds.set(ACCOUNT_REF, assembleHeader(outcome.accountJar))
-      } catch (error) {
-        writeJson(res, 500, { ok: false, error: `credential store write failed: ${String(error)}` })
+      if (result.status === 'store-error') {
+        writeJson(res, 500, { ok: false, error: `credential store write failed: ${result.error}` })
         return
       }
+      // A successful manual renew also re-arms a paused auto-renew loop.
+      deps.autoRenew?.rearm()
       const mimo = await refreshMimoRow(hostOf(req), fetchImpl)
-      writeJson(res, 200, { ok: true, verdict: 'ok', hops: outcome.hops, balance: outcome.balance, ...(mimo === undefined ? {} : { mimo }) })
+      writeJson(res, 200, { ok: true, verdict: 'ok', hops: result.hops, balance: result.balance, ...(mimo === undefined ? {} : { mimo }) })
     },
   }
 
@@ -243,6 +220,8 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
         writeJson(res, 500, { ok: false, error: `credential store write failed: ${String(error)}` })
         return
       }
+      // A fresh capture re-arms a paused auto-renew loop (new passToken root).
+      deps.autoRenew?.rearm()
       const mimo = await refreshMimoRow(hostOf(req), fetchImpl)
       const names = (jar: Jar): string[] => [...jar.keys()]
       writeJson(res, 200, {
@@ -305,6 +284,8 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
         writeJson(res, 500, { ok: false, error: `credential store write failed: ${String(error)}` })
         return
       }
+      // An account paste carries a fresh passToken root — re-arm a paused loop.
+      deps.autoRenew?.rearm()
       writeJson(res, 200, { ok: true, slot: body.slot })
     },
   }
