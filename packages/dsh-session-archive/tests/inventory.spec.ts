@@ -149,6 +149,19 @@ describe('buildInventory', () => {
     expect(ghost?.issues).toContain('no-archive-time')
   })
 
+  it('asks the feed for the full corpus through the row-cut opt-in flags', async () => {
+    // The default session/list drops archived and subagent rows server-side
+    // (f5-list-thin-1029); inventory is the full-corpus consumer and must opt
+    // back in or it loses lastActivity facts and parent→child links.
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-feed', updatedAt: 500, cwd: '/tmp/demo' }],
+      workspaces: [{ id: 'ws-1', path: '/tmp/demo', title: 'Demo', sessionIds: ['session-feed'] }],
+      archivedSessionIds: ['session-feed'],
+    })
+    await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    expect(host.feedRequests.at(-1)).toEqual({ includeArchived: true, includeSubagents: true })
+  })
+
   it('enriches rows from per-session projcache files when the aggregate index misses them', async () => {
     const host = createFakeHost({
       archivedSessionIds: ['session-oldarchived', 'session-barefoot'],

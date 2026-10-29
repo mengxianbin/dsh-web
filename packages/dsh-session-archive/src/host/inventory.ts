@@ -182,7 +182,12 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
 
   if (sources.feed !== undefined) {
     try {
-      const response = await sources.feed.list({}, signal)
+      // Row-cut (f5-list-thin-1029): the default listing drops archived and
+      // subagent rows server-side; inventory is the full-corpus consumer —
+      // archived rows keep lastActivity/running facts (and avoid the
+      // unreadable issue), subagent rows keep parent→child links for
+      // cascade deletes.
+      const response = await sources.feed.list({ includeArchived: true, includeSubagents: true }, signal)
       for (const item of response.items ?? []) {
         if (typeof item.sessionId !== 'string' || item.sessionId === '') continue
         // The feed mixes id spellings (bare uuids beside `session-<uuid>`);

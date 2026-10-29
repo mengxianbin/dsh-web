@@ -57,4 +57,14 @@ describe('reusableSessionId (#1419)', () => {
     expect(reusableSessionId(chained, new Set(['session-a']))).toBe('session-a')
     expect(reusableSessionId(chained, new Set(['session-old']))).toBeUndefined()
   })
+
+  it('mints a fresh session when the roster omits the last session (row-cut list shape)', () => {
+    // Server row-cut (f5-list-thin-1029): the default session/list no longer
+    // returns archived (or subagent) rows, so a previously executed session
+    // that has since been archived is simply absent from the roster — reuse
+    // must fail closed into a fresh session instead of prompting into a
+    // session the host gate would refuse to run.
+    const opted = task({ reuseSession: true, executions: [execution({ sessionId: 'session-archived' })] })
+    expect(reusableSessionId(opted, new Set(['session-idle-other']))).toBeUndefined()
+  })
 })
