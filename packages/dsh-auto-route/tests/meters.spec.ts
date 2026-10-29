@@ -1,14 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import { fetchGoMeters, MeterError } from '../src/meters.ts'
 
-/** A go/status-shaped body in micro-cents (value / 1e8 = USD). */
+/**
+ * A go/status-shaped body in micro-cents (value / 1e8 = USD). The live
+ * endpoint answers the micro-cents fields as JSON **strings** — verified
+ * against `https://opencode.ai/console/api/go/status` on 2026-10-30 — so the
+ * default fixture pins that real shape; numeric fixtures stay covered by the
+ * mixed-shape test below.
+ */
 function body(overrides: Record<string, unknown> = {}, meters?: unknown): unknown {
   return {
     access: {
       meters: meters ?? {
-        fiveHour: { usedMicroCents: 0.3141e8, limitMicroCents: 12e8, resetsAt: '2026-10-24T19:27:10Z' },
-        week: { usedMicroCents: 28.77e8, limitMicroCents: 30e8, resetsAt: '2026-10-26T00:00:00Z' },
-        month: { usedMicroCents: 32.8685e8, limitMicroCents: 60e8, resetsAt: '2026-11-17T10:29:32Z' },
+        fiveHour: { usedMicroCents: '31410000', limitMicroCents: '1200000000', resetsAt: '2026-10-24T19:27:10Z' },
+        week: { usedMicroCents: '2877000000', limitMicroCents: '3000000000', resetsAt: '2026-10-26T00:00:00Z' },
+        month: { usedMicroCents: '3286850000', limitMicroCents: '6000000000', resetsAt: '2026-11-17T10:29:32Z' },
       },
     },
     ...overrides,

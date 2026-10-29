@@ -51,6 +51,22 @@ function usd(microCents: number): number {
 }
 
 /**
+ * Parse a micro-cents field into a finite number, else undefined.
+ * The live go/status endpoint answers `usedMicroCents`/`limitMicroCents` as
+ * JSON **strings** (verified live 2026-10-30), so a bare `typeof` number
+ * check silently drops every window and the controller never fires; mirror
+ * the dsh-usage adapter's `toNum` coercion so both shapes parse.
+ */
+function toNum(value: unknown): number | undefined {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : undefined
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+/**
  * Poll the Go meter endpoint once.
  * @param options - URL, bearer key, and test seams.
  * @returns every window the response described with a usable positive limit.
@@ -92,13 +108,15 @@ export async function fetchGoMeters(options: MeterSourceOptions): Promise<MeterR
     const entry = record[key]
     if (typeof entry !== 'object' || entry === null) continue
     const { usedMicroCents, limitMicroCents, resetsAt } = entry as { usedMicroCents?: unknown; limitMicroCents?: unknown; resetsAt?: unknown }
-    if (typeof usedMicroCents !== 'number' || !Number.isFinite(usedMicroCents)) continue
-    if (typeof limitMicroCents !== 'number' || !Number.isFinite(limitMicroCents) || limitMicroCents <= 0) continue
+    const used = toNum(usedMicroCents)
+    const limit = toNum(limitMicroCents)
+    if (used === undefined) continue
+    if (limit === undefined || limit <= 0) continue
     windows[key] = {
       key,
-      used: usd(usedMicroCents),
-      limit: usd(limitMicroCents),
-      ratio: usedMicroCents / limitMicroCents,
+      used: usd(used),
+      limit: usd(limit),
+      ratio: used / limit,
       ...(typeof resetsAt === 'string' ? { resetsAt } : {}),
     }
   }
