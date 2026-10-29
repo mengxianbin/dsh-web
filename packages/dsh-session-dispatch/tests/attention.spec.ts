@@ -66,7 +66,7 @@ describe('deserializeAttention', () => {
     const doc = deserializeAttention(JSON.stringify({
       version: 1,
       sessions: {
-        'session-ok': { class: 'bot', defaultApplied: true, source: 'dispatch', updatedAt: 'now' },
+        'session-ok': { class: 'bot-boss', defaultApplied: true, source: 'dispatch', updatedAt: 'now' },
         'session-bad-class': { class: 'machine', defaultApplied: true, source: 'dispatch', updatedAt: 'now' },
         'session-bad-applied': { class: 'human', defaultApplied: 'yes', source: 'startup', updatedAt: 'now' },
         'session-bad-source': { class: 'human', defaultApplied: false, source: 'elsewhere', updatedAt: 'now' },
@@ -78,6 +78,20 @@ describe('deserializeAttention', () => {
     expect(Object.keys(doc?.sessions ?? {}).sort()).toEqual(['session-bad-source', 'session-ok'])
     // A foreign source falls back to startup rather than dropping the row.
     expect(doc?.sessions['session-bad-source']?.source).toBe('startup')
+  })
+
+  it('normalizes a legacy two-value bot row to bot-worker and keeps triclass rows', () => {
+    const doc = deserializeAttention(JSON.stringify({
+      version: 1,
+      sessions: {
+        'session-legacy': { class: 'bot', defaultApplied: true, source: 'dispatch', updatedAt: 'now' },
+        'session-boss': { class: 'bot-boss', defaultApplied: true, source: 'startup', updatedAt: 'now' },
+        'session-worker': { class: 'bot-worker', defaultApplied: false, source: 'dispatch', updatedAt: 'now' },
+      },
+    }))
+    expect(doc?.sessions['session-legacy']?.class).toBe('bot-worker')
+    expect(doc?.sessions['session-boss']?.class).toBe('bot-boss')
+    expect(doc?.sessions['session-worker']?.class).toBe('bot-worker')
   })
 
   it('answers undefined for corrupt or foreign documents', () => {
@@ -149,6 +163,25 @@ describe('AttentionLedger.startupPass', () => {
     expect((await readSessions(path))['session-bot']?.defaultApplied).toBe(true)
   })
 
+  it('retries a pending bot-boss record by pinning it, never by downgrading its class', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-duty'])
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      sessions: { 'session-duty': { class: 'bot-boss', defaultApplied: false, source: 'dispatch', updatedAt: 'earlier' } },
+    }), 'utf8')
+
+    await ledgerFor(registry, path).startupPass()
+
+    expect(registry.pinCalls).toEqual(['session-duty'])
+    expect(registry.unpinCalls).toEqual([])
+    const record = (await readSessions(path))['session-duty']
+    expect(record?.class).toBe('bot-boss')
+    expect(record?.defaultApplied).toBe(true)
+  })
+
   it('keeps a failed pin pending instead of recording it as applied', async () => {
     const dir = await tempDir()
     const path = join(dir, 'session-attention.json')
@@ -207,19 +240,32 @@ describe('AttentionLedger.declare', () => {
     expect((await readSessions(path))['session-x']).toEqual({ class: 'human', defaultApplied: true, source: 'dispatch', updatedAt: '2026-10-29T00:00:00.000Z' })
   })
 
-  it('records a bot declaration without pinning, and startup leaves it unpinned', async () => {
+  it('records a bot-worker declaration without pinning, and startup leaves it unpinned', async () => {
     const dir = await tempDir()
     const path = join(dir, 'session-attention.json')
     const registry = new FakeRegistry()
     registry.members.push(['session-x'])
 
-    await ledgerFor(registry, path).declare('session-x', 'bot')
+    await ledgerFor(registry, path).declare('session-x', 'bot-worker')
     expect(registry.pinCalls).toEqual([])
     expect(registry.unpinCalls).toEqual(['session-x'])
 
     await ledgerFor(registry, path).startupPass()
     expect(registry.pinCalls).toEqual([])
-    expect((await readSessions(path))['session-x']?.class).toBe('bot')
+    expect((await readSessions(path))['session-x']?.class).toBe('bot-worker')
+  })
+
+  it('records a bot-boss declaration and pins it like a human session', async () => {
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-duty'])
+
+    await ledgerFor(registry, path).declare('session-duty', 'bot-boss')
+
+    expect(registry.pinCalls).toEqual(['session-duty'])
+    expect(registry.unpinCalls).toEqual([])
+    expect((await readSessions(path))['session-duty']?.class).toBe('bot-boss')
   })
 
   it('rejects when the ledger itself cannot be written (route reports attentionRecorded:false)', async () => {
@@ -230,7 +276,7 @@ describe('AttentionLedger.declare', () => {
     const registry = new FakeRegistry()
     registry.members.push(['session-x'])
 
-    await expect(ledgerFor(registry, join(blocker, 'session-attention.json')).declare('session-x', 'bot')).rejects.toThrow()
+    await expect(ledgerFor(registry, join(blocker, 'session-attention.json')).declare('session-x', 'bot-worker')).rejects.toThrow()
   })
 })
 

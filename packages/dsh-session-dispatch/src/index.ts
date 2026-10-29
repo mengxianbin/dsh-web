@@ -35,12 +35,14 @@ export const Config: z<Config> = z.object({
  * `POST /api/session-send` queues one prompt onto an existing Session with
  * the fixed queue semantic (the wire shape has no delivery-mode field, so no
  * caller input can steer). Every dispatch also declares its `sessionClass`
- * (`human` default, `bot` for bot-dispatched task work) into the attention
- * ledger (`$DSH_HOME/session-attention.json`), and the ledger applies each
- * Session's default pin state exactly once — startup pass over workspace
- * members, dispatch declaration at creation, first real user message as the
- * fallback; after that a manual pin/unpin is never overridden. Routes are
- * loopback-fenced; the browser roster is untouched (host-only package).
+ * (`human` default; `bot-boss` for bot duty sessions; `bot-worker` for
+ * bot-dispatched task work; the legacy `bot` spelling normalizes to
+ * `bot-worker`) into the attention ledger (`$DSH_HOME/session-attention.json`),
+ * and the ledger applies each Session's default pin state exactly once —
+ * startup pass over workspace members, dispatch declaration at creation,
+ * first real user message as the fallback; after that a manual pin/unpin is
+ * never overridden. Routes are loopback-fenced; the browser roster is
+ * untouched (host-only package).
  */
 export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: Config): void => {
   if (Config(config).enabled === false) return

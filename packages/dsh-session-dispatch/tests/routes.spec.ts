@@ -573,13 +573,20 @@ describe('session-send route', () => {
 })
 
 describe('dispatch sessionClass (attention ledger)', () => {
-  it('accepts human and bot, rejects anything else', () => {
+  it('accepts the three classes plus the legacy bot alias, rejects anything else', () => {
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'human' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'human' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-boss' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-boss' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' } })
+    // Legacy wire `bot` (pre-triclass callers) normalizes to bot-worker.
     expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot' }))
-      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot' } })
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' } })
     expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'ai' }))
-      .toMatchObject({ ok: false, error: 'sessionClass must be either human or bot' })
+      .toMatchObject({ ok: false, error: 'sessionClass must be one of human | bot-boss | bot-worker' })
     expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 1 }))
-      .toMatchObject({ ok: false, error: 'sessionClass must be either human or bot' })
+      .toMatchObject({ ok: false, error: 'sessionClass must be one of human | bot-boss | bot-worker' })
   })
 
   it('declares the wire default human when the field is absent', async () => {
@@ -597,7 +604,7 @@ describe('dispatch sessionClass (attention ledger)', () => {
     expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
   })
 
-  it('declares a bot dispatch as bot, before the prompt is queued', async () => {
+  it('declares a legacy bot dispatch as bot-worker, before the prompt is queued', async () => {
     const order: string[] = []
     const services = happyServices({
       attention: {
@@ -612,7 +619,25 @@ describe('dispatch sessionClass (attention ledger)', () => {
     const handler = makeDispatchRoutes(services)[0].handler!
     const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', sessionClass: 'bot' }))
     expect(captured.status).toBe(200)
-    expect(order).toEqual(['create', 'declare:bot', 'prompt'])
+    expect(order).toEqual(['create', 'declare:bot-worker', 'prompt'])
+  })
+
+  it('declares a bot-boss dispatch as bot-boss, before the prompt is queued', async () => {
+    const order: string[] = []
+    const services = happyServices({
+      attention: {
+        async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+      },
+      sessions: {
+        async create() { order.push('create'); return { sessionId: 'session-abc' } },
+        async rename() { return {} },
+        async prompt() { order.push('prompt'); return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', sessionClass: 'bot-boss' }))
+    expect(captured.status).toBe(200)
+    expect(order).toEqual(['create', 'declare:bot-boss', 'prompt'])
   })
 
   it('reports a ledger failure as attentionRecorded:false without failing the dispatch', async () => {

@@ -11,8 +11,9 @@ has a live session the same dispatch is refused with `409`, and
 `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
 `POST /api/session-send` queues one prompt onto an existing Session
 (queue-only delivery; the wire shape has no delivery-mode field). Every
-dispatch also declares a `sessionClass` (`human` by default, `bot` for
-bot-dispatched task work) into the attention ledger
+dispatch also declares a `sessionClass` (`human` by default; `bot-boss` for
+bot duty sessions; `bot-worker` for bot-dispatched task work; the legacy `bot`
+spelling normalizes to `bot-worker`) into the attention ledger
 (`$DSH_HOME/session-attention.json`), which applies each Session's default
 pin state exactly once. Host-only — the package declares no `dsh.client`
 face, so nothing appears in the browser roster.
@@ -53,7 +54,7 @@ Body (JSON, at most 1 MiB):
 | `mode` | string | no | Agent preset id passed to session create |
 | `permission` | string | no | One of `read-only`, `workspace-write`, `danger-full-access`; pinned with `/permission` before the prompt |
 | `taskRef` | string | no | Opaque caller-chosen task reference (recommended shape `<board path>#<item anchor>`); records a binding and gates re-dispatch |
-| `sessionClass` | string | no | `human` or `bot` (default `human`): the Session's attention class — `human` takes the default pin (human-dispatched work, bot duty sessions), `bot` stays unpinned (bot-dispatched task work) |
+| `sessionClass` | string | no | `human`, `bot-boss`, or `bot-worker` (default `human` when absent; legacy `bot` accepted as `bot-worker`): the Session's attention class — `human` and `bot-boss` take the default pin (human-dispatched work, bot duty sessions), `bot-worker` stays unpinned (bot-dispatched task work) |
 
 Responses: `200 { ok, sessionId }`, `400` invalid body or rejected Host
 command, `403` non-loopback, `404` unknown workspace, `405` wrong method,
@@ -70,7 +71,8 @@ The attention ledger classifies Sessions and applies a **one-time** default
 pin: the Host startup pass pins every current workspace member that has no
 record yet (undeclared Sessions predate the ledger and count as `human`),
 the dispatch declaration applies at creation, and the first real user
-message covers anything both missed. `human` pins, `bot` leaves the pin set
+message covers anything both missed. `human` and `bot-boss` pin, `bot-worker`
+leaves the pin set
 alone. Once a Session's default has been applied (`defaultApplied: true`),
 no later pass ever changes that pin — a manual pin/unpin survives every
 restart, and subagent children, side threads, and forks (never workspace

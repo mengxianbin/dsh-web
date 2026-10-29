@@ -27,13 +27,25 @@ const PROMPT_MAX_CHARS = 900_000
 export const DISPATCH_PERMISSIONS = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
 /**
- * The attention class of a dispatched Session: `human` sessions take the
- * default pin (human-dispatched work, bot duty sessions), `bot` sessions
- * stay unpinned (bot-dispatched task work). Absent on the wire means `human`
- * — a caller that forgets the field fails toward attention, not toward
- * burying the session.
+ * The attention class of a dispatched Session (triclass, user ruling
+ * 2026-10-29): `human` sessions take the default pin (human-dispatched
+ * work), `bot-boss` sessions take it as well (bot duty: rotation shifts,
+ * watchdog takeovers), and `bot-worker` sessions stay unpinned
+ * (bot-dispatched task work). Absent on the wire means `human` — a caller
+ * that forgets the field fails toward attention, not toward burying the
+ * session. The pre-triclass value `bot` is still accepted on the wire and
+ * normalizes to `bot-worker`, so in-flight callers dispatching under the
+ * old two-value SKILL text keep working across the restart window.
  */
-export type SessionClass = 'human' | 'bot'
+export type SessionClass = 'human' | 'bot-boss' | 'bot-worker'
+
+/** Every accepted wire spelling, including the legacy `bot` alias. */
+const SESSION_CLASS_WIRE = ['human', 'bot-boss', 'bot-worker', 'bot'] as const
+
+/** Narrow a raw wire value to the accepted sessionClass spellings. */
+function isWireSessionClass(value: unknown): value is SessionClass | 'bot' {
+  return (SESSION_CLASS_WIRE as readonly unknown[]).includes(value)
+}
 
 /** One validated dispatch request. */
 export interface DispatchRequest {
@@ -166,8 +178,8 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       return { ok: false, error: 'taskRef must be a non-empty string of at most 2000 characters' }
     }
   }
-  if (sessionClass !== undefined && sessionClass !== 'human' && sessionClass !== 'bot') {
-    return { ok: false, error: 'sessionClass must be either human or bot' }
+  if (sessionClass !== undefined && !isWireSessionClass(sessionClass)) {
+    return { ok: false, error: `sessionClass must be one of ${SESSION_CLASS_WIRE.slice(0, 3).join(' | ')}` }
   }
   return {
     ok: true,
@@ -178,7 +190,9 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       ...(mode === undefined ? {} : { mode: mode.trim() }),
       ...(permission === undefined ? {} : { permission }),
       ...(taskRef === undefined ? {} : { taskRef: taskRef.trim() }),
-      ...(sessionClass === undefined ? {} : { sessionClass }),
+      // Legacy `bot` collapses to `bot-worker` so the ledger only ever holds
+      // triclass values; `sessionClass ?? 'human'` below is the wire default.
+      ...(sessionClass === undefined ? {} : { sessionClass: sessionClass === 'bot' ? 'bot-worker' : sessionClass }),
     },
   }
 }

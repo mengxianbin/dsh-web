@@ -1,15 +1,17 @@
 /**
- * Session attention classification ("human" vs "bot" origin) plus the
- * once-per-Session default-pin pass that consumes it.
+ * Session attention classification (triclass origin: "human", "bot-boss",
+ * "bot-worker") plus the once-per-Session default-pin pass that consumes it.
  *
  * The class answers who a Session serves, not who typed first:
- * human-dispatched task Sessions are `human`, bot duty Sessions (rotation,
- * watchdog takeover) are `human`, bot-dispatched task Sessions are `bot`
- * (user ruling, 2026-10-29). Callers declare the class on
- * `POST /api/session-dispatch`; anything undeclared — a Session created in
- * the UI, or a Session that predates this ledger — is classified `human`,
- * which fails toward attention: an unwanted pin is one click away, while a
- * buried human Session is the problem this ledger exists to solve.
+ * human-dispatched task Sessions are `human`, bot duty Sessions (rotation
+ * shifts, watchdog takeovers) are `bot-boss`, bot-dispatched task Sessions
+ * are `bot-worker` (user ruling, 2026-10-29, superseding the earlier
+ * two-value human|bot split that labeled duty Sessions `human`). Callers
+ * declare the class on `POST /api/session-dispatch`; anything undeclared —
+ * a Session created in the UI, or a Session that predates this ledger — is
+ * classified `human`, which fails toward attention: an unwanted pin is one
+ * click away, while a buried human Session is the problem this ledger exists
+ * to solve. Pin default: `human` and `bot-boss` pin, `bot-worker` unpins.
  *
  * The default applies at most once per Session (`defaultApplied`). Three
  * triggers race for that single application — the startup pass over every
@@ -28,7 +30,10 @@
  * Losing records degrades to `human` on the next startup pass (fail toward
  * pinning), never to a crash, and a rejected pin keeps
  * `defaultApplied: false` so the next trigger retries instead of pretending
- * the default landed.
+ * the default landed. The same file is the archive channel's identity
+ * table: the dsh-session-archive plugin reads it to apply the archive
+ * decision table (worker archived by boss, boss by successor boss, human
+ * by a human).
  * @module dsh-session-dispatch/host/attention
  */
 
@@ -84,11 +89,16 @@ export function deserializeAttention(raw: string): AttentionDocument | undefined
     if (id === '') continue
     if (typeof value !== 'object' || value === null) continue
     const row = value as { class?: unknown; defaultApplied?: unknown; source?: unknown; updatedAt?: unknown }
-    if (row.class !== 'human' && row.class !== 'bot') continue
+    // Legacy two-value rows (`bot`) normalize to `bot-worker`; anything else
+    // is dropped (it re-declares as `human` on the next startup pass — fail
+    // toward pinning).
+    const rowClass: SessionClass | 'bot' | undefined =
+      row.class === 'human' || row.class === 'bot-boss' || row.class === 'bot-worker' || row.class === 'bot' ? row.class : undefined
+    if (rowClass === undefined) continue
     if (typeof row.defaultApplied !== 'boolean') continue
     const source: AttentionSource = row.source === 'dispatch' || row.source === 'first-message' ? row.source : 'startup'
     sessions[id] = {
-      class: row.class,
+      class: rowClass === 'bot' ? 'bot-worker' : rowClass,
       defaultApplied: row.defaultApplied,
       source,
       updatedAt: typeof row.updatedAt === 'string' ? row.updatedAt : '',
@@ -200,15 +210,16 @@ export class AttentionLedger {
   }
 
   /**
-   * Apply one Session's default pin state: `human` pins, `bot` unpins.
+   * Apply one Session's default pin state: `human` and `bot-boss` pin,
+   * `bot-worker` unpins.
    * @returns false when the registry refused (session unknown right now, or
    * archived mid-race) so the caller keeps `defaultApplied` false and the
    * next trigger retries.
    */
   private async applyDefault(sessionClass: SessionClass, sessionId: string): Promise<boolean> {
     try {
-      if (sessionClass === 'human') await this.registry.pinSession(sessionId)
-      else await this.registry.unpinSession(sessionId)
+      if (sessionClass === 'bot-worker') await this.registry.unpinSession(sessionId)
+      else await this.registry.pinSession(sessionId)
       return true
     } catch {
       return false
