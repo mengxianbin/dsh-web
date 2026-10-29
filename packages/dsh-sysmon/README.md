@@ -12,8 +12,11 @@ or an unhealthy network is visible without leaving the chat.
 
 - Seats a compact chip into `conversation.session.header.actions`, right of
   the agent-preset label: four tabular-numeral read-outs (CPU busy %, memory
-  used %, disk busy %, network) plus a hover tooltip with disk throughput,
-  memory absolutes, and the network detail line.
+  used %, disk busy %, network) plus a trailing local wall clock
+  (`MM-DD HH:MM`, 2026-10-29 ruling — fullscreen work hides the OS taskbar
+  clock) and a hover tooltip with disk throughput, memory absolutes, and the
+  network detail line. The clock ticks on its own 1s timer, never on the host
+  payload: a stalled host freezes the metric read-outs but never the time.
 - Mirrors the same chip into `conversation.header.leading`, the one header
   cell that renders with no Session and stays visible while a blank Session
   hides the actions row. A module-level mount signal keeps the two seats

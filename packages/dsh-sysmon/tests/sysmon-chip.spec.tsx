@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /** Sysmon header chip: values, warn coloring, the 404 hide contract, the A-case net reading. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SysmonChip, chipTitle, formatGB, netLine } from '../src/client/SysmonChip.tsx'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { SysmonChip, chipTitle, formatDayTime, formatGB, netLine } from '../src/client/SysmonChip.tsx'
 import { zh } from '../src/client/locales.ts'
 import type { SysmonKey } from '../src/client/locales.ts'
 import type { SysmonNet, SysmonPayload } from '../src/core/types.ts'
@@ -45,6 +45,7 @@ function payload(
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('SysmonChip', () => {
@@ -179,6 +180,63 @@ describe('SysmonChip', () => {
   })
 })
 
+describe('clock cell', () => {
+  it('renders the local MM-DD HH:MM read-out as the trailing cell', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 0))
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => payload(),
+    })))
+    render(<SysmonChip t={makeTranslate()} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('10-29 20:33')).toBeTruthy()
+    // The clock cell carries no unit label: MM-DD HH:MM reads unambiguously
+    // and the cell keeps its width when the container query strips labels.
+    const cell = screen.getByText('10-29 20:33').parentElement
+    expect(cell?.querySelector('span + span')).toBeNull()
+  })
+
+  it('keeps the clock walking while the host stops answering', async () => {
+    // 2026-10-29 ruling: the clock is a taskbar replacement, so it must tick
+    // on its own clock — a transport failure freezes the payload read-outs but
+    // must never freeze the time (a stale clock lies worse than a dash).
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 55))
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('transport down') }))
+    render(<SysmonChip t={makeTranslate()} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('10-29 20:33')).toBeTruthy()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
+    expect(screen.getByText('10-29 20:34')).toBeTruthy()
+    // Payload read-outs stay degraded while the clock does not.
+    expect(screen.getAllByText('—')).toHaveLength(4)
+  })
+
+  it('re-syncs on the visibility edge so a backgrounded tab never paints a stale minute', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 0))
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => payload(),
+    })))
+    render(<SysmonChip t={makeTranslate()} />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(screen.getByText('10-29 20:33')).toBeTruthy()
+    // Jump the wall clock while the tab is hidden: intervals do not run for a
+    // hidden document, so only the visibility edge can catch this up.
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
+    vi.setSystemTime(new Date(2026, 9, 29, 21, 5, 0))
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000) })
+    expect(screen.getByText('10-29 20:33')).toBeTruthy()
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true })
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    expect(screen.getByText('10-29 21:05')).toBeTruthy()
+  })
+})
+
 describe('chipTitle', () => {
   it('joins header, disk, memory and stamp lines with GB and MB/s read-outs', () => {
     const title = chipTitle(payload(), makeTranslate())
@@ -256,5 +314,12 @@ describe('formatGB', () => {
   it('formats bytes as one-decimal gigabytes', () => {
     expect(formatGB(16 * 1024 ** 3)).toBe('16.0')
     expect(formatGB(0)).toBe('0.0')
+  })
+})
+
+describe('formatDayTime', () => {
+  it('formats a local timestamp as zero-padded MM-DD HH:MM', () => {
+    expect(formatDayTime(new Date(2026, 0, 5, 7, 4, 9).getTime())).toBe('01-05 07:04')
+    expect(formatDayTime(new Date(2026, 11, 31, 23, 59, 59).getTime())).toBe('12-31 23:59')
   })
 })

@@ -8,8 +8,10 @@
  * host marks as warned (sustained-streak at threshold — the net reading never
  * reddens: its failure count left the display on 2026-10-28), and shows disk
  * throughput, memory absolutes, and the probe round-trip line in its tooltip.
- * The seats coordinate through {@link ./presence.ts} so exactly one copy
- * paints at a time.
+ * The trailing cell is the local wall clock (`MM-DD HH:MM`, 2026-10-29 ruling:
+ * fullscreen work hides the OS taskbar clock), fed by its own 1s timer rather
+ * than the payload so it keeps walking while the host is unreachable. The seats
+ * coordinate through {@link ./presence.ts} so exactly one copy paints at a time.
  *
  * Tooltip stability: the payload ticks every second, and mutating a native
  * `title` attribute under the pointer dismisses the browser tooltip (the
@@ -51,6 +53,20 @@ function formatClock(at: number): string {
   const date = new Date(at)
   const pad = (value: number): string => String(value).padStart(2, '0')
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+/**
+ * Format the local wall clock as `MM-DD HH:MM` for the trailing clock cell.
+ * Deliberately minute-precision (2026-10-29 ask, format ruling): the cell is a
+ * glance replacement for the OS taskbar clock, so seconds would only add
+ * per-second motion to a value nobody reads.
+ * @param at - epoch milliseconds (local timezone, matching the OS clock).
+ * @returns the `MM-DD HH:MM` string.
+ */
+export function formatDayTime(at: number): string {
+  const date = new Date(at)
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 /** Format whole gigabytes with one decimal for the tooltip read-outs. */
@@ -127,6 +143,15 @@ function SysmonBody({ t }: SysmonChipProps) {
   const [payload, setPayload] = useState<SysmonPayload | null>(null)
   const [hostOff, setHostOff] = useState(false)
 
+  // The trailing wall clock (2026-10-29 ruling: fullscreen work hides the OS
+  // taskbar clock). Its own 1s timer, never the payload: a transport failure
+  // stops payload updates, and a frozen clock is worse than none — it lies.
+  // The state holds the minute-precision string, so the per-second tick that
+  // finds the minute unchanged bails out of the render (Object.is) and the
+  // cell only repaints when it actually reads differently. (Hooks live above
+  // the 404 early-return — hook order must not depend on hostOff.)
+  const [dayTime, setDayTime] = useState(() => formatDayTime(Date.now()))
+
   // Freeze the native title while hovered (2026-10-28 flicker fix): the
   // payload re-renders the chip every second, and rewriting `title` under the
   // pointer dismisses the browser tooltip, so it blinked once per second and
@@ -175,6 +200,25 @@ function SysmonBody({ t }: SysmonChipProps) {
     window.document.addEventListener('visibilitychange', onVisibility)
     return () => {
       alive = false
+      window.clearInterval(timer)
+      window.document.removeEventListener('visibilitychange', onVisibility)
+    }
+  }, [])
+
+  // Clock tick: independent of the fetch loop above (a dead host must not
+  // stop time), paused while the tab is hidden like every other 1s cadence in
+  // this chip and re-synced on return so a backgrounded tab never paints a
+  // stale minute.
+  useEffect(() => {
+    const tick = (): void => { setDayTime(formatDayTime(Date.now())) }
+    const timer = window.setInterval(() => {
+      if (window.document.visibilityState === 'visible') tick()
+    }, POLL_MS)
+    const onVisibility = (): void => {
+      if (window.document.visibilityState === 'visible') tick()
+    }
+    window.document.addEventListener('visibilitychange', onVisibility)
+    return () => {
       window.clearInterval(timer)
       window.document.removeEventListener('visibilitychange', onVisibility)
     }
@@ -229,6 +273,14 @@ function SysmonBody({ t }: SysmonChipProps) {
         {/* Never warns: the net red state left the display with the failure
             count (2026-10-28 ruling); only the probe round trip renders. */}
         <span className={css.v}>{net === null ? dash : formatNetValue(net)}</span>
+      </span>
+      <span className={css.sep} aria-hidden="true" />
+      {/* Trailing wall clock (2026-10-29 ruling): the F11-fullscreen work mode
+          hides the OS taskbar, so the glance clock lives here. No key label —
+          `MM-DD HH:MM` reads unambiguously and the cell keeps its width when
+          the container query strips the unit labels at narrow row widths. */}
+      <span className={css.metric}>
+        <span className={css.v}>{dayTime}</span>
       </span>
     </span>
   )
