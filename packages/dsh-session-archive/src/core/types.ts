@@ -23,6 +23,7 @@ export type OpReason =
   | 'unreadable'
   | 'missing-seam'
   | 'busy'
+  | 'identity-denied'
   | 'error'
 
 /** One per-session result inside a batch operation response. */
@@ -131,6 +132,15 @@ export interface BatchRequestBody {
   readonly ids: readonly string[]
   /** Client-declared current session; the host protects it defensively too. */
   readonly currentSessionId?: string
+  /**
+   * Who ordered this archive: the deciding session id (`session-…`) or a
+   * human channel name (`manual`, …). Required by `POST /archive` (400
+   * without it); the host resolves it against the attention identity table
+   * and refuses ids the actor's class may not archive (triclass decision
+   * table, 2026-10-29 ruling). It is also persisted into the archive ledger
+   * entry as `actor`.
+   */
+  readonly actor?: string
   /**
    * Client-computed expected delete total (direct + descendants). When the
    * host plan disagrees the route answers 409 with the host plan so the UI

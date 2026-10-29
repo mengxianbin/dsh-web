@@ -28,6 +28,15 @@ export interface LedgerEntry {
   /** Epoch ms of the archive action (manual, automatic) or of the observation. */
   archivedAt: number
   source: LedgerSource
+  /**
+   * Who ordered this archive: the deciding session id (`session-…`, resolved
+   * against the attention identity table) or a channel name (`manual`, …) for
+   * a human-driven REST call. Present on plugin-performed archives that
+   * carried an actor; native-UI `observed` backfills and pre-triclass
+   * entries have none (2026-10-29 triclass ruling: attribution moves from
+   * transcript archaeology to ledger reconciliation).
+   */
+  actor?: string
 }
 
 export interface LedgerDocument {
@@ -61,12 +70,18 @@ export function deserializeLedger(raw: string): LedgerDocument {
   const entries: Record<string, LedgerEntry> = {}
   for (const [id, value] of Object.entries(doc.entries as Record<string, unknown>)) {
     if (typeof value !== 'object' || value === null) continue
-    const entry = value as { archivedAt?: unknown; source?: unknown }
+    const entry = value as { archivedAt?: unknown; source?: unknown; actor?: unknown }
     if (typeof entry.archivedAt !== 'number' || !Number.isFinite(entry.archivedAt)) continue
     // Documents written before `observed` existed carry only manual/auto and
     // keep deserializing unchanged; an unknown source is still dropped.
     if (entry.source !== 'manual' && entry.source !== 'auto' && entry.source !== 'observed') continue
-    entries[id] = { archivedAt: entry.archivedAt, source: entry.source }
+    entries[id] = {
+      archivedAt: entry.archivedAt,
+      source: entry.source,
+      // `actor` (added with the triclass gate) survives a reload when it is a
+      // bounded string; a foreign type is dropped without dropping the entry.
+      ...(typeof entry.actor === 'string' && entry.actor.length > 0 ? { actor: entry.actor.slice(0, 200) } : {}),
+    }
   }
   return { version: 1, entries }
 }

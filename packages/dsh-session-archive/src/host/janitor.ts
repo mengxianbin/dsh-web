@@ -39,6 +39,7 @@ import {
   type AutoStateDocument,
   type LedgerDocument,
 } from './ledger.ts'
+import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { TtlMemo } from './ttl-memo.ts'
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
@@ -398,16 +399,45 @@ export class ArchiveService {
     return run
   }
 
-  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string): Promise<BatchResponse> {
+  /**
+   * Archive a batch of sessions. Every call passes the triclass identity
+   * gate first (user ruling, 2026-10-29): the actor resolves against the
+   * attention ledger and each target decides on its own — a denied id gets
+   * `skipped / identity-denied` with both classes in `detail`, the rest of
+   * the batch proceeds (no taint). The actor is persisted into every ledger
+   * entry it archives, so attribution reads from the ledger instead of
+   * transcript archaeology.
+   * @param ids - canonical session ids.
+   * @param source - ledger source tag (`manual` from the REST route).
+   * @param currentSessionId - caller's currently open session (auto path protection).
+   * @param actor - who ordered this archive (deciding session id or channel
+   * name); absent resolves to no identity, which the gate always refuses —
+   * the route 400s before this can happen.
+   */
+  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
       const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
+      // Identity gate, resolved once per batch from the dispatch plugin's
+      // attention ledger ($DSH_HOME/session-attention.json).
+      const identity = await readIdentityTable(this.dshHome)
+      const actorClass = resolveActorClass(actor, identity)
       for (const id of ids) {
         const row = byId.get(id)
         if (row === undefined) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
+          continue
+        }
+        const targetClass: IdentityClass = identity.get(id) ?? 'human'
+        if (!mayArchive(actorClass, targetClass)) {
+          results.push({
+            id,
+            status: 'skipped',
+            reason: 'identity-denied',
+            detail: `actor ${actorClass ?? 'unclassified'} cannot archive ${targetClass} session`,
+          })
           continue
         }
         if (row.archived) {
@@ -427,7 +457,7 @@ export class ArchiveService {
           // The registry records the harness's native id spelling; rows and
           // ledger keys stay canonical.
           await archiveSession(this.ctx, built.nativeIds[id] ?? id)
-          this.ledger.entries[id] = { archivedAt: now, source }
+          this.ledger.entries[id] = { archivedAt: now, source, ...(actor !== undefined ? { actor } : {}) }
           results.push({ id, status: 'ok' })
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })

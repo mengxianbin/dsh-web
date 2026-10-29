@@ -152,14 +152,28 @@ describe('route fencing and contracts', () => {
     const service = new ArchiveService(ctx as never, { dshHome: host.home })
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const first = service.archive(['session-a'], 'manual')
+    const first = service.archive(['session-a'], 'manual', undefined, 'manual-test')
     try {
-      const busy = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'] })
+      const busy = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'], actor: 'manual-test' })
       expect(busy.status).toBe(409)
     } finally {
       release?.()
       await first
     }
+  })
+
+  it('requires an actor on POST /archive and archives with a declared one', async () => {
+    const service = makeService()
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const missing = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'] })
+    expect(missing.status).toBe(400)
+    expect((missing.body as { error: string }).error).toContain('actor is required')
+
+    const declared = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'], actor: 'manual-test' })
+    expect(declared.status).toBe(200)
+    const body = declared.body as { results: { id: string; status: string }[] }
+    expect(body.results).toEqual([{ id: 'session-a', status: 'ok' }])
   })
 
   it('serves the inventory document', async () => {

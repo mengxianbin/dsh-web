@@ -63,10 +63,11 @@ dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 - **`recordManualArchive` 是默认关闭的补记开关。** 开启后，本插件首次观测到某个已归档但台账无条目的会话时，按观测时刻补记一条 `observed` 条目，使该会话从此开始保留期倒计时，到期后可能被自动删除。观测时刻是真实归档时刻的下界而非真实值，列表会在该时间后标注"（补记）"以便区分。补记与删除不会发生在同一轮：既有规则忽略不早于本轮启动时刻的归档时间，因此刚补记的会话不会在本轮被删除。关闭时不会写入任何台账，行为与开启前完全一致。
 - **从现在开始倒计时是刻意的取舍。** 很久以前归档的会话，倒计时从观测时刻重新起算而不是按真实年龄；因此补记不可能删除归档时间比保留期更近的会话。
 - **受保护会话无论手动还是自动都不会被删除**：运行中的会话、当前正在查看的会话、有运行中子会话的会话，以及正在执行其他归档操作的会话。绝不会通过强制停止会话来完成删除。
+- **归档按身份裁决（三值裁决表）。** `POST /archive` 必须带 `actor`——裁决会话 id 或 `manual` 这类人工通道名——缺失即 400。宿主拿它对照 dispatch 插件的注意力账本（`$DSH_HOME/session-attention.json`）逐 id 裁决，批内不连坐：`bot-boss` 可归 `bot-worker` 与 `bot-boss` 会话但绝不归 `human`，`bot-worker` 什么都不归，查无记录的会话 actor 什么都不归，查无记录的**目标**按 `human` 计。放行归档的 `actor` 会写进对应台账条目，"谁归的档"从台账对账即可，不再需要转录考古。
 
 ## 安全模型
 
-全部 HTTP 路由（`/api/dsh-session-archive/*`）要求回环套接字 + 回环 Host 头 + 浏览器同源标记；永不信任 `X-Forwarded-For`。删除只通过插件自己的会话根目录索引解析存储路径，移除前再次校验 realpath，并拒绝任何位于 `$DSH_HOME/sessions` 之外的路径。客户端只提交会话 ID，从不提交文件路径。session-rdb（SQLite）在删除前校验存储指纹。
+全部 HTTP 路由（`/api/dsh-session-archive/*`）要求回环套接字 + 回环 Host 头 + 浏览器同源标记；永不信任 `X-Forwarded-For`。删除只通过插件自己的会话根目录索引解析存储路径，移除前再次校验 realpath，并拒绝任何位于 `$DSH_HOME/sessions` 之外的路径。客户端只提交会话 ID，从不提交文件路径。session-rdb（SQLite）在删除前校验存储指纹。归档请求另须声明 `actor` 并通过三值身份闸（见「语义说明」）；actor 为回环 REST 自报字段——与 `recordManualArchive` 同一信任模型，拦的是出错的自动化，不是蓄意伪造者。
 
 ## 已知限制
 

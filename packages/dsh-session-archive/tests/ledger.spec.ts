@@ -57,6 +57,26 @@ describe('ledger source whitelist', () => {
     })
   })
 
+  it('keeps an actor string through a reload and drops a foreign-typed one without dropping the entry', () => {
+    // Given entries written by the triclass gate, one with a valid actor and
+    // one with a corrupted (non-string) actor
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-boss': { archivedAt: 1, source: 'manual', actor: 'session-successor' },
+        'session-bad': { archivedAt: 2, source: 'manual', actor: 42 },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the actor round-trips on one entry; the other keeps its archive
+    // time but loses only the foreign field
+    expect(restored.entries['session-boss']).toEqual({ archivedAt: 1, source: 'manual', actor: 'session-successor' })
+    expect(restored.entries['session-bad']).toEqual({ archivedAt: 2, source: 'manual' })
+  })
+
   it('operator gets an unknown source dropped instead of trusted', () => {
     // Given a document whose entry carries a source this plugin never writes
     const raw = JSON.stringify({ version: 1, entries: { 'session-x': { archivedAt: 7, source: 'imported' } } })
