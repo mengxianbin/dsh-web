@@ -26,6 +26,15 @@ const PROMPT_MAX_CHARS = 900_000
 /** Permission presets composed by the web profile's permission row. */
 export const DISPATCH_PERMISSIONS = ['read-only', 'workspace-write', 'danger-full-access'] as const
 
+/**
+ * The attention class of a dispatched Session: `human` sessions take the
+ * default pin (human-dispatched work, bot duty sessions), `bot` sessions
+ * stay unpinned (bot-dispatched task work). Absent on the wire means `human`
+ * — a caller that forgets the field fails toward attention, not toward
+ * burying the session.
+ */
+export type SessionClass = 'human' | 'bot'
+
 /** One validated dispatch request. */
 export interface DispatchRequest {
   readonly workspaceId: string
@@ -34,6 +43,7 @@ export interface DispatchRequest {
   readonly mode?: string
   readonly permission?: string
   readonly taskRef?: string
+  readonly sessionClass?: SessionClass
 }
 
 /**
@@ -87,6 +97,18 @@ export interface DispatchAgentRegistry {
   get(sessionId: string): unknown
 }
 
+/** Neutral attention-classification surface consumed by the dispatch route. */
+export interface DispatchAttentionApi {
+  /**
+   * Record the declared class for a freshly created Session and apply its
+   * default pin state; a rejection is reported as `attentionRecorded: false`
+   * and never fails the dispatch itself.
+   * @param sessionId - id returned by the session create call.
+   * @param sessionClass - declared class (wire default applied by the route).
+   */
+  declare(sessionId: string, sessionClass: SessionClass): Promise<void>
+}
+
 /** Neutral slash-command executor consumed by the optional permission pin. */
 export interface DispatchCommandExecutor {
   execute(agent: unknown, line: string, attachments: readonly never[], signal: AbortSignal): Promise<{ result?: { kind?: string; text?: string } } | undefined>
@@ -100,6 +122,8 @@ export interface DispatchServices {
   readonly commands?: DispatchCommandExecutor
   /** Quick-ledger binding store; when absent, taskRef dispatches record nothing and never 409. */
   readonly bindings?: DispatchBindingStore
+  /** Attention ledger; when absent, dispatches record no class and apply no pin default. */
+  readonly attention?: DispatchAttentionApi
 }
 
 /** Body-parse verdict. */
@@ -116,7 +140,7 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
     return { ok: false, error: 'body must be a JSON object' }
   }
   const record = body as Record<string, unknown>
-  const { workspaceId, prompt, title, mode, permission, taskRef } = record
+  const { workspaceId, prompt, title, mode, permission, taskRef, sessionClass } = record
   if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
     return { ok: false, error: 'workspaceId must be a non-empty string' }
   }
@@ -142,6 +166,9 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       return { ok: false, error: 'taskRef must be a non-empty string of at most 2000 characters' }
     }
   }
+  if (sessionClass !== undefined && sessionClass !== 'human' && sessionClass !== 'bot') {
+    return { ok: false, error: 'sessionClass must be either human or bot' }
+  }
   return {
     ok: true,
     value: {
@@ -151,6 +178,7 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       ...(mode === undefined ? {} : { mode: mode.trim() }),
       ...(permission === undefined ? {} : { permission }),
       ...(taskRef === undefined ? {} : { taskRef: taskRef.trim() }),
+      ...(sessionClass === undefined ? {} : { sessionClass }),
     },
   }
 }
@@ -199,7 +227,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, 400, { ok: false, error: parsed.error })
         return
       }
-      const { workspaceId, prompt, title, mode, permission, taskRef } = parsed.value
+      const { workspaceId, prompt, title, mode, permission, taskRef, sessionClass } = parsed.value
       if (services.workspaces.get(workspaceId) === undefined) {
         writeJson(res, 404, { ok: false, error: `workspace not found: ${workspaceId}` })
         return
@@ -226,12 +254,22 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
       }
       const signal = new AbortController().signal
       let sessionId: string
+      let attentionError: string | undefined
       try {
         const created = await services.sessions.create({
           workspaceId,
           ...(mode === undefined ? {} : { agentPreset: mode }),
         })
         sessionId = created.sessionId
+        if (services.attention !== undefined) {
+          try {
+            await services.attention.declare(sessionId, sessionClass ?? 'human')
+          } catch (error) {
+            // Attention is a classification side effect: a ledger failure is
+            // reported alongside the binding's, never as a dispatch failure.
+            attentionError = errorDetail(error)
+          }
+        }
         if (title !== undefined) {
           await services.sessions.rename({ sessionId, title })
         }
@@ -272,11 +310,21 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         } catch (error) {
           // The session is live and prompting; a ledger write failure is
           // reported but does not turn a successful dispatch into a 5xx.
-          writeJson(res, 200, { ok: true, sessionId, bindingRecorded: false, bindingError: errorDetail(error) }, { 'cache-control': 'no-store' })
+          writeJson(res, 200, {
+            ok: true,
+            sessionId,
+            bindingRecorded: false,
+            bindingError: errorDetail(error),
+            ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+          }, { 'cache-control': 'no-store' })
           return
         }
       }
-      writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
+      writeJson(res, 200, {
+        ok: true,
+        sessionId,
+        ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+      }, { 'cache-control': 'no-store' })
     },
   }
 }

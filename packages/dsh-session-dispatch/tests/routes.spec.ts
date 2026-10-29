@@ -571,3 +571,71 @@ describe('session-send route', () => {
     expect(captured.status).toBe(500)
   })
 })
+
+describe('dispatch sessionClass (attention ledger)', () => {
+  it('accepts human and bot, rejects anything else', () => {
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'ai' }))
+      .toMatchObject({ ok: false, error: 'sessionClass must be either human or bot' })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 1 }))
+      .toMatchObject({ ok: false, error: 'sessionClass must be either human or bot' })
+  })
+
+  it('declares the wire default human when the field is absent', async () => {
+    const declared: [string, string][] = []
+    const services = happyServices({
+      attention: {
+        async declare(sessionId, sessionClass) { declared.push([sessionId, sessionClass]) },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(declared).toEqual([['session-abc', 'human']])
+    // Success shape stays clean: no attention fields when nothing failed.
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+  })
+
+  it('declares a bot dispatch as bot, before the prompt is queued', async () => {
+    const order: string[] = []
+    const services = happyServices({
+      attention: {
+        async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+      },
+      sessions: {
+        async create() { order.push('create'); return { sessionId: 'session-abc' } },
+        async rename() { return {} },
+        async prompt() { order.push('prompt'); return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', sessionClass: 'bot' }))
+    expect(captured.status).toBe(200)
+    expect(order).toEqual(['create', 'declare:bot', 'prompt'])
+  })
+
+  it('reports a ledger failure as attentionRecorded:false without failing the dispatch', async () => {
+    const services = happyServices({
+      attention: {
+        async declare() { throw new Error('ledger disk full') },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toMatchObject({
+      ok: true,
+      sessionId: 'session-abc',
+      attentionRecorded: false,
+      attentionError: expect.stringContaining('ledger disk full'),
+    })
+  })
+
+  it('touches no attention service when the profile mounts none', async () => {
+    const handler = makeDispatchRoutes(happyServices())[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+  })
+})
