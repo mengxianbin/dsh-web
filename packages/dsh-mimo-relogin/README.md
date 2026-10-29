@@ -13,6 +13,8 @@ Host-only kit that keeps the dsh-usage MiMo balance probe fed with a fresh `MIMO
 
 Every route passes the shared loopback fence first; cookie values never reach logs or responses (names and lengths only). After a successful store the kit pokes dsh-usage's `/api/dsh-usage/refresh` so the sidebar glance shows the new balance within seconds.
 
+A resident **auto-renew** loop (FORK mimo-relogin-l3, 2026-10-29) replays the same silent renewal on a timer: the first attempt lands 60s after apply (so every restart leaves a first-run log in `dsh-web.log`), then at most once per 24 hours (the configured interval is clamped to a 24-hour floor). While the 30-day `passToken` lives this is fully unattended; on `verdict: interactive` the loop pauses — no automatic retry, the page stays the entry point — and re-arms after the next successful manual renew / capture / account paste. Every outcome logs with a `[dsh-mimo-relogin] auto-renew:` prefix; the schedule is per-process, so a restart re-arms it.
+
 The kit writes two managed credentials (provider-managed store, which outranks the environment layer, so no restart is needed): `MIMO_PLATFORM_COOKIE` (probe fuel for the dsh-usage MiMo adapter) and `MIMO_ACCOUNT_COOKIES` (renewal fuel — contains the account-domain SSO cookies including `passToken`; treat it with the same care as any sign-in secret).
 
 ## Configuration
@@ -24,6 +26,8 @@ The kit writes two managed credentials (provider-managed store, which outranks t
 | `chromeProfile` | `D:\tech\m-note\.local\chrome-profile` | Dedicated debug profile (chrome-debug's by convention; keep it separate from the daily browser). |
 | `cdpPort` | `9224` | Debug port (chrome-debug's convention). |
 | `platformUrl` | `https://platform.xiaomimimo.com/` | Platform origin the kit logs in to and probes. |
+| `autoRenew` | `true` | Run the resident auto-renew loop (pauses on `verdict: interactive`). |
+| `autoRenewIntervalHours` | `24` | Hours between automatic renewals; clamped to a 24-hour floor. |
 
 ## Install
 
@@ -49,4 +53,5 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-mimo-relogin
 - The renewal chain depends on the platform's internal `genLoginUrl`/`serviceLogin`/`/sts` shapes; a platform-side change surfaces as `verdict: failed` with a hop list on the page rather than a silent breakage.
 - The debug profile path default points at this machine's chrome-debug convention; override `chromeProfile` per machine.
 - Cookie values are stored in the managed credentials file in plaintext (as every credential in that store is); the account jar carries a 30-day SSO root and should be rotated by re-login whenever the chain reports `interactive`.
+- The auto-renew schedule is per-process: a restart resets the 24h cadence, and an `interactive` pause lasts until a successful manual store or the next restart.
 - The page copy is Chinese (host-half strings are audit warnings by design); the i18n audit reports host-half CJK as warnings only.
