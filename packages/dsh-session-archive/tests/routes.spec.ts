@@ -186,6 +186,39 @@ describe('route fencing and contracts', () => {
     expect(Array.isArray(body.rows)).toBe(true)
     expect(body.auto.cycleRunning).toBe(false)
   })
+
+  it('serves the inventory through the response cache with observable headers', async () => {
+    const service = makeService()
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+
+    // When the first read builds the document
+    const first = await fetch(url + '/api/dsh-session-archive/inventory')
+
+    // Then it reports a miss, keeps the wire no-store, and carries a body
+    expect(first.headers.get('x-dsh-inventory-cache')).toBe('miss')
+    expect(first.headers.get('cache-control')).toBe('no-store')
+    const firstBody = await first.text()
+
+    // When the next read lands inside the window
+    const second = await fetch(url + '/api/dsh-session-archive/inventory')
+
+    // Then the very same bytes are served from the cache, with an age
+    expect(second.headers.get('x-dsh-inventory-cache')).toBe('hit')
+    expect(second.headers.get('cache-control')).toBe('no-store')
+    expect(Number(second.headers.get('age'))).toBeGreaterThanOrEqual(0)
+    expect(await second.text()).toBe(firstBody)
+
+    // When the plugin itself archives a session
+    const archived = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'], actor: 'manual-test' })
+    expect(archived.status).toBe(200)
+
+    // Then the mutation is visible on the next read: the window dropped
+    const third = await fetch(url + '/api/dsh-session-archive/inventory')
+    expect(third.headers.get('x-dsh-inventory-cache')).toBe('miss')
+    const thirdBody = JSON.parse(await third.text()) as { rows: { archived: boolean }[] }
+    expect(thirdBody.rows[0]?.archived).toBe(true)
+  })
 })
 
 describe('PlanMismatchError carries the plan', () => {

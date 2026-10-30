@@ -6,7 +6,7 @@
  * @module @linxin666/dsh-session-archive/host/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { BatchRequestBody } from '../core/types.ts'
 import { BusyError, PlanMismatchError, type ArchiveService } from './janitor.ts'
@@ -64,6 +64,21 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 300) : String(error)
 }
 
+/**
+ * Write one pre-serialized JSON body with the family default headers. The
+ * cached inventory route serves bytes it serialized once at rebuild time;
+ * re-stringifying them per request would defeat the cache on the response
+ * side (the stringify is a measured cost of a full pass).
+ */
+function writeRawJson(res: ServerResponse, status: number, payload: string, headers: OutgoingHttpHeaders): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'referrer-policy': 'no-referrer',
+    ...headers,
+  })
+  res.end(payload)
+}
+
 export function makeInventoryRoute(service: ArchiveService): WebRoute {
   return {
     kind: 'exact',
@@ -71,8 +86,22 @@ export function makeInventoryRoute(service: ArchiveService): WebRoute {
     handler: async (req, res) => {
       if (!fenced(req, res)) return
       try {
-        const inventory = await service.inventory()
-        writeJson(res, 200, inventory, { 'cache-control': 'no-store' })
+        // Whole-response TTL cache (task #inventory-perf-1030): one rebuild
+        // is serialized once and served verbatim inside the window, and a
+        // cold burst coalesces into a single rebuild. The wire stays
+        // `no-store` — the browser must always ask this server, and the
+        // server-side cache is the single freshness authority (the plugin
+        // invalidates it after every archive/restore/delete it performs).
+        // `x-dsh-inventory-cache` and `age` make the window observable
+        // without parsing the body.
+        const served = await service.inventoryCached()
+        writeRawJson(res, 200, served.payload, {
+          'cache-control': 'no-store',
+          'x-dsh-inventory-cache': served.hit ? 'hit' : 'miss',
+          // Whole seconds, per the HTTP `age` header convention (typed as a
+          // string by @types/node, which the wire agrees with).
+          age: String(Math.floor(served.ageMs / 1000)),
+        })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })
       }

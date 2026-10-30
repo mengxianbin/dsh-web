@@ -15,7 +15,10 @@
  * service-level case therefore rests on the action's passes landing inside the
  * production window (they are milliseconds apart); each window rule itself
  * (lapse, invalidation, a clock that steps back) is pinned with an injected
- * clock, so no case asks a measured duration to say anything.
+ * clock, so no case asks a measured duration to say anything. Since the read
+ * went async (task #inventory-perf-1030) the memo is an `AsyncTtlMemo`: the
+ * same window rules plus single-flight coalescing and an invalidation that
+ * wins over a parse already in flight.
  */
 import { describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -24,7 +27,7 @@ import { join } from 'node:path'
 import { ArchiveService } from '../src/host/janitor.ts'
 import { buildInventory, readProjcacheIndex, type ProjcacheIndex } from '../src/host/inventory.ts'
 import { writeJsonAtomic } from '../src/host/ledger.ts'
-import { TtlMemo } from '../src/host/ttl-memo.ts'
+import { AsyncTtlMemo } from '../src/host/ttl-memo.ts'
 import { createFakeHost, fakeContext, writeProjcache } from './fixtures.ts'
 
 const INDEX_SUFFIX = join('storages', 'session_projcache.json')
@@ -161,17 +164,17 @@ describe('Given the same fixture read with and without the memo', () => {
 })
 
 describe('Given the memo that serves the projection-cache index', () => {
-  it('operator pays for one parse inside the window and a fresh one after it lapses', () => {
+  it('operator pays for one parse inside the window and a fresh one after it lapses', async () => {
     // Given an index and a memo with an injected clock
     const home = makeHome()
     writeProjcache(home, { 'session-a': { title: 'Alpha', createdAt: 1 } })
     let clock = 1_000
-    const memo = new TtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
 
     // When two reads land inside the window
-    const first = memo.get()
+    const first = await memo.get()
     clock += 1_500
-    const second = memo.get()
+    const second = await memo.get()
 
     // Then one parse served them both, and the harness file only lands once
     expect(memo.loads).toBe(1)
@@ -181,71 +184,140 @@ describe('Given the memo that serves the projection-cache index', () => {
     // When the window lapses and the file changed underneath
     clock += 600
     writeProjcache(home, { 'session-b': { title: 'Beta', createdAt: 2 } })
-    const refreshed = memo.get()
+    const refreshed = await memo.get()
 
     // Then the new content is parsed, not the retained one
     expect(memo.loads).toBe(2)
     expect(Object.keys(refreshed.sessions)).toEqual(['session-b'])
   })
 
-  it('operator sees an explicit invalidation force the next parse', () => {
+  it('operator sees an explicit invalidation force the next parse', async () => {
     // Given a memo that already served a read
     const home = makeHome()
     writeProjcache(home, { 'session-a': { title: 'Alpha', createdAt: 1 } })
-    const memo = new TtlMemo<ProjcacheIndex>({ ttlMs: 60_000, load: () => readProjcacheIndex(home), now: () => 1_000 })
-    memo.get()
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({ ttlMs: 60_000, load: () => readProjcacheIndex(home), now: () => 1_000 })
+    await memo.get()
 
     // When the owner invalidates it
     memo.invalidate()
-    memo.get()
+    await memo.get()
 
     // Then the index was parsed again
     expect(memo.loads).toBe(2)
   })
 
-  it('operator gets a parse, never a stale value, when the clock steps backwards', () => {
+  it('operator gets a parse, never a stale value, when the clock steps backwards', async () => {
     // Given a memo holding a value
     const home = makeHome()
     writeProjcache(home, { 'session-a': { title: 'Alpha', createdAt: 1 } })
     let clock = 5_000
-    const memo = new TtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
-    memo.get()
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
+    await memo.get()
 
     // When the clock jumps back inside the nominal window
     clock = 4_000
-    memo.get()
+    await memo.get()
 
     // Then the value is not trusted as fresh
     expect(memo.loads).toBe(2)
   })
 
-  it('operator gets an empty table when the index is unparseable, never the last good parse', () => {
+  it('operator gets an empty table when the index is unparseable, never the last good parse', async () => {
     // Given a parse that succeeded once
     const home = makeHome()
     writeProjcache(home, { 'session-a': { title: 'Alpha', createdAt: 1 } })
     let clock = 1_000
-    const memo = new TtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
-    expect(Object.keys(memo.get().sessions)).toEqual(['session-a'])
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => clock })
+    expect(Object.keys((await memo.get()).sessions)).toEqual(['session-a'])
 
     // When the file is corrupted and the window lapses
     writeFileSync(join(home, INDEX_SUFFIX), '{ truncated')
     clock += 2_001
-    const degraded = memo.get()
+    const degraded = await memo.get()
 
     // Then the pass degrades to an empty index rather than the stale one
     expect(degraded.sessions).toEqual({})
     clock += 1
-    expect(memo.get().sessions).toEqual({})
+    expect((await memo.get()).sessions).toEqual({})
   })
 
-  it('operator gets an empty table from a missing index file as well', () => {
+  it('operator gets an empty table from a missing index file as well', async () => {
     // Given a home with no index file at all
     const home = makeHome()
 
     // When a memo reads it
-    const memo = new TtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => 1_000 })
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({ ttlMs: 2_000, load: () => readProjcacheIndex(home), now: () => 1_000 })
 
     // Then the pass sees an empty table
-    expect(memo.get().sessions).toEqual({})
+    expect((await memo.get()).sessions).toEqual({})
+  })
+
+  it('operator never gets a pre-invalidation parse retained when invalidation lands mid-parse', async () => {
+    // Given a memo whose parse is held mid-flight over the content it read
+    // (the delete pipeline invalidates the memo before it rewrites the index,
+    // which can overlap a pass that is still reading the old content)
+    const home = makeHome()
+    writeProjcache(home, { 'session-a': { title: 'Doomed', createdAt: 1 } })
+    let signalRead: (() => void) | undefined
+    const readDone = new Promise<void>((resolve) => { signalRead = resolve })
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({
+      ttlMs: 60_000,
+      load: async () => {
+        // Parse the file first, then hold mid-flight: the value awaiting is
+        // the pre-invalidation content, exactly what a real overlap reads.
+        const parsed = await readProjcacheIndex(home)
+        signalRead?.()
+        await gate
+        return parsed
+      },
+      now: () => 1_000,
+    })
+
+    // When the parse holds the old content and the owner invalidates, then
+    // rewrites the index, before the parse lands
+    const inFlight = memo.get()
+    await readDone
+    memo.invalidate()
+    writeProjcache(home, {})
+    release?.()
+    const abandoned = await inFlight
+
+    // Then the pre-invalidation parse is served to its own reader but never
+    // retained: the next read parses the rewritten file
+    expect(Object.keys(abandoned.sessions)).toEqual(['session-a'])
+    expect(memo.loads).toBe(1)
+    const next = await memo.get()
+    expect(memo.loads).toBe(2)
+    expect(next.sessions).toEqual({})
+  })
+
+  it('operator readers arriving during one parse join it instead of starting their own', async () => {
+    // Given a memo whose parse is gated
+    const home = makeHome()
+    writeProjcache(home, { 'session-a': { title: 'Alpha', createdAt: 1 } })
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const memo = new AsyncTtlMemo<ProjcacheIndex>({
+      ttlMs: 60_000,
+      load: async () => {
+        await gate
+        return readProjcacheIndex(home)
+      },
+      now: () => 1_000,
+    })
+
+    // When three readers arrive while the first parse runs
+    const first = memo.get()
+    const second = memo.get()
+    const third = memo.get()
+    release?.()
+    const results = await Promise.all([first, second, third])
+
+    // Then one parse served all three
+    expect(memo.loads).toBe(1)
+    expect(results[1]).toBe(results[0])
+    expect(results[2]).toBe(results[0])
   })
 })

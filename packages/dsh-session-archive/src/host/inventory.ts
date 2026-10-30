@@ -10,7 +10,6 @@
  * @module @linxin666/dsh-session-archive/host/inventory
  */
 
-import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ArchiveIssueCode, ArchiveSessionRow, WorkspaceView } from '../core/types.ts'
@@ -84,14 +83,17 @@ export interface ProjcacheIndex {
 /**
  * Read and parse the aggregate projection-cache index. A missing or
  * unparseable file degrades to an empty index rather than failing the pass.
+ * Asynchronous since 0.4.12 (inventory-perf): the index is a multi-megabyte
+ * document, and the synchronous read it replaced held the host event loop
+ * for its whole read+parse — every remaining pass-visible cost now yields.
  */
-export function readProjcacheIndex(dshHome: string): ProjcacheIndex {
+export async function readProjcacheIndex(dshHome: string): Promise<ProjcacheIndex> {
   const path = join(dshHome, 'storages', 'session_projcache.json')
-  if (!existsSync(path)) return { sessions: {} }
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as { tables?: { sessions?: ProjcacheIndex['sessions'] } }
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as { tables?: { sessions?: ProjcacheIndex['sessions'] } }
     return { sessions: parsed.tables?.sessions ?? {} }
   } catch {
+    // Missing file (ENOENT) and parse failure land in the same degradation.
     return { sessions: {} }
   }
 }
@@ -251,7 +253,7 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
   const dirIndex = sources.dirIndex ?? indexSessionDirs(join(sources.dshHome, 'sessions'))
   for (const id of dirIndex.byId.keys()) add(id).hasDir = true
 
-  const projcache = sources.projcacheIndex ?? readProjcacheIndex(sources.dshHome)
+  const projcache = sources.projcacheIndex ?? await readProjcacheIndex(sources.dshHome)
   for (const [id, entry] of Object.entries(projcache.sessions)) {
     const draft = drafts.get(id)
     if (draft === undefined) continue
