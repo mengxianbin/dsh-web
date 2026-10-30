@@ -1,6 +1,6 @@
 /**
- * The kit's loopback route family: page, status and the four actions (renew /
- * capture / open / paste). Every handler passes the shared loopback fence
+ * The kit's loopback route family: page, status and the five actions (renew /
+ * capture / watch / open / paste). Every handler passes the shared loopback fence
  * first; every write path runs the balance probe BEFORE the credential store
  * touches a value (the account paste has no probe — its proof is the renew
  * that consumes it). After a successful store the kit pokes dsh-usage's
@@ -26,6 +26,16 @@ import { PAGE_HTML, PAGE_PATH } from './page.ts'
 const REFRESH_POKE_TIMEOUT_MS = 30_000
 /** Paste cap: a full multi-domain Cookie header stays far below this. */
 const PASTE_MAX_CHARS = 16_384
+/** One watch tick: CDP jar read + balance probe cadence while waiting for the login. */
+const WATCH_POLL_MS = 2_000
+/** Default watch budget — a password plus an SMS code fits comfortably. */
+const WATCH_DEFAULT_TIMEOUT_MS = 300_000
+/** Watch clamp floor (also the test-friendly minimum). */
+const WATCH_MIN_TIMEOUT_MS = 5_000
+/** Watch clamp ceiling — waiting longer than this teaches nobody anything. */
+const WATCH_MAX_TIMEOUT_MS = 900_000
+/** Consecutive unreadable-CDP ticks before the watch gives up early (window closed). */
+const WATCH_MAX_CDP_MISSES = 5
 
 /** Plugin options resolved from Config at apply time (restart to change). */
 export interface ReloginOptions {
@@ -55,6 +65,8 @@ export interface ReloginDeps {
    * mimo-relogin-l3). Absent in tests that do not run the loop.
    */
   autoRenew?: { rearm(): void }
+  /** Watch-loop timer seam (tests run ticks instantly). */
+  sleep?: (ms: number) => Promise<void>
 }
 
 /** The Host header of a fence-passed request (validated loopback by isLoopbackRequest). */
@@ -107,6 +119,7 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
   const readJarsFn = deps.readJars ?? readJars
   const aliveFn = deps.alive ?? cdpAlive
   const ensureWindowFn = deps.ensureWindow ?? ensurePlatformWindow
+  const sleepFn = deps.sleep ?? ((ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms) }))
 
   const page: WebRoute = {
     kind: 'exact',
@@ -159,7 +172,7 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
         return
       }
       if (result.status === 'no-account') {
-        writeJson(res, 409, { ok: false, error: '账号凭据未入库——先「打开登录窗」完成登录后点「抓取登录态」（或在下方粘贴账号 Cookie）' })
+        writeJson(res, 409, { ok: false, error: '账号凭据未入库——点「登录并等待」，在弹出的窗口里登录一次即可（或在下方粘贴账号 Cookie）' })
         return
       }
       if (result.status === 'chain') {
@@ -233,6 +246,103 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
     },
   }
 
+  /**
+   * The one-click login flow (FORK mimo-relogin-watch): open (or attach) the
+   * debug window, then watch its cookies over CDP until a login lands —
+   * the probe-gated store of the capture route, run on a poll loop so the
+   * operator only types the password and never clicks again. The watch is
+   * fail-closed exactly like capture: an unproven jar never reaches the
+   * store. One watch runs at a time; a concurrent call gets 409.
+   */
+  let watching = false
+  const watch: WebRoute = {
+    kind: 'exact',
+    path: '/api/mimo-relogin/watch',
+    handler: async (req, res): Promise<void> => {
+      if (refused(req, res, 'POST')) return
+      const creds = credentialsOf(ctx)
+      if (creds === undefined) {
+        writeJson(res, 503, { ok: false, error: 'credentials service unavailable' })
+        return
+      }
+      const body = await readJsonBody(req, { objectOnly: true }) as { timeoutMs?: unknown } | null
+      const requested = typeof body?.timeoutMs === 'number' ? body.timeoutMs : WATCH_DEFAULT_TIMEOUT_MS
+      const budgetMs = Math.min(WATCH_MAX_TIMEOUT_MS, Math.max(WATCH_MIN_TIMEOUT_MS, requested))
+      if (watching) {
+        writeJson(res, 409, { ok: false, error: '已有一个登录等待在进行中——等它结束或超时后再试' })
+        return
+      }
+      watching = true
+      try {
+        // The window is part of the one-click flow: attach when it already
+        // runs, launch otherwise. A spawn failure is terminal for the watch.
+        const outcome = await ensureWindowFn({ chromePath: options.chromePath, profile: options.profile, port: options.port, platformUrl: options.platformUrl })
+        if (outcome.mode === 'failed') {
+          writeJson(res, 500, { ok: false, error: `登录窗打开失败: ${outcome.error ?? 'unknown'}` })
+          return
+        }
+        // The budget converts to poll ticks (>= 1), so a 300s ask waits out
+        // ~150 ticks of CDP read + probe-on-change; tests inject an instant
+        // sleep and a small budget for the same path.
+        const maxTicks = Math.max(1, Math.ceil(budgetMs / WATCH_POLL_MS))
+        let cdpMisses = 0
+        let lastProbed: string | undefined
+        for (let tick = 0; tick < maxTicks; tick++) {
+          await sleepFn(WATCH_POLL_MS)
+          let jars: BrowserJars | undefined
+          try {
+            jars = await readJarsFn(options.port)
+          } catch {
+            jars = undefined
+          }
+          if (jars === undefined) {
+            // The window may still be warming after a cold launch; only a
+            // run of consecutive misses means it is really gone. A miss is
+            // either a throw or an undefined read — both count, none reset.
+            if (++cdpMisses >= WATCH_MAX_CDP_MISSES) {
+              writeJson(res, 503, { ok: false, error: '调试窗口不可读（可能已关闭）——重新点「登录并等待」' })
+              return
+            }
+          } else {
+            cdpMisses = 0
+            // Fail closed: the same probe gate as capture; a stale token in
+            // the profile keeps the watch waiting for the fresh login. Only
+            // a CHANGED token is re-probed, so a never-logged-in window does
+            // not hammer the balance endpoint once per tick.
+            const token = jars.platform.get('api-platform_serviceToken')
+            if (token !== lastProbed) {
+              lastProbed = token
+              const probe = await probeBalance(options.platformUrl, jars.platform, fetchImpl)
+              if (probe.status === 200 && probe.balance !== undefined) {
+                try {
+                  await creds.set(PLATFORM_REF, assembleHeader(jars.platform))
+                  await creds.set(ACCOUNT_REF, assembleHeader(jars.account))
+                } catch (error) {
+                  writeJson(res, 500, { ok: false, error: `credential store write failed: ${String(error)}` })
+                  return
+                }
+                deps.autoRenew?.rearm()
+                const mimo = await refreshMimoRow(hostOf(req), fetchImpl)
+                const names = (jar: Jar): string[] => [...jar.keys()]
+                writeJson(res, 200, {
+                  ok: true,
+                  balance: { status: probe.status, balance: probe.balance, ...(probe.currency === undefined ? {} : { currency: probe.currency }) },
+                  cookies: { platform: names(jars.platform), account: names(jars.account) },
+                  ...(mimo === undefined ? {} : { mimo }),
+                })
+                return
+              }
+            }
+          }
+        }
+        writeJson(res, 408, { ok: false, error: `等待登录超时（${String(Math.round(budgetMs / 60_000))} 分钟）——窗口里完成登录后可再点一次，或用「抓取登录态」手动抓` })
+        return
+      } finally {
+        watching = false
+      }
+    },
+  }
+
   const open: WebRoute = {
     kind: 'exact',
     path: '/api/mimo-relogin/open',
@@ -290,5 +400,5 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
     },
   }
 
-  return [page, status, renew, capture, open, paste]
+  return [page, status, renew, capture, watch, open, paste]
 }

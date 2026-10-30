@@ -1,10 +1,13 @@
 /**
  * The re-login page served at GET /api/mimo-relogin/page: one loopback-only
- * HTML document with the three actions (silent renewal, open the login
- * window, capture) plus the paste fallback, a 15s status/balance poll, and a
- * hop list for renewal diagnostics. Everything inline (CSP-restricted, no
- * external assets); copy is Chinese because the operator is — the i18n audit
- * reports host-half CJK as a warning only.
+ * HTML document whose primary action is the one-click watch (open the debug
+ * window, wait over CDP for the login to land, store through the probe gate —
+ * the operator only types the password). Silent renewal stays the zero-touch
+ * path while the 30-day passToken lives; capture and paste remain as manual
+ * floors. A 15s status/balance poll and a hop list for renewal diagnostics;
+ * everything inline (CSP-restricted, no external assets); copy is Chinese
+ * because the operator is — the i18n audit reports host-half CJK as a
+ * warning only.
  * @module dsh-mimo-relogin/host/page
  */
 
@@ -40,13 +43,14 @@ export const PAGE_HTML = `<!doctype html>
   #result.err { color: #e03131; }
   #result.good { color: #2f9e44; }
   details { margin-top: 8px; font-size: 12px; color: #7a7f87; }
+  details summary { cursor: pointer; }
   code { font: 12px/1.5 Consolas, monospace; }
   hr { border: none; border-top: 1px solid rgba(128,128,128,.25); margin: 14px 0; }
 </style>
 </head>
 <body>
 <h1>MiMo 平台凭据重登</h1>
-<div class="sub">给 dsh 的 MiMo 余额探测换新 cookie。三个动作按需选择；粘贴只作兜底。余额入库后侧栏最多一分钟内刷新。</div>
+<div class="sub">给 dsh 的 MiMo 余额探测换新 cookie。日常不用管（后台每 24 小时静默续期）；只有账号凭据过期时才需要点一次「登录并等待」，在弹出的窗口里输个密码，剩下的全自动。余额入库后侧栏最多一分钟内刷新。</div>
 
 <div class="card">
   <div class="chips">
@@ -60,29 +64,34 @@ export const PAGE_HTML = `<!doctype html>
 
 <div class="card">
   <div class="row">
-    <button class="primary" id="btn-renew">免登录续期</button>
-    <span class="sub" style="margin:0">用已存账号凭据静默换新会话，不用打开浏览器（凭据在档时通常直接成功）</span>
+    <button class="primary" id="btn-watch">登录并等待</button>
+    <span class="sub" style="margin:0">一键到底：自动开登录窗 → 你在窗口里完成登录 → 自动抓取入库（等 5 分钟，期间不用管这页）</span>
   </div>
   <div class="row">
-    <button id="btn-open">打开登录窗</button>
-    <span class="sub" style="margin:0">专用调试 Chrome 打开平台（已在运行则新开标签页），在窗口里完成登录</span>
+    <button id="btn-renew">免登录续期</button>
+    <span class="sub" style="margin:0">不开浏览器，用已存账号凭据静默换新会话（凭据在档时通常直接成功）</span>
   </div>
   <div class="row">
     <button id="btn-capture">抓取登录态</button>
-    <span class="sub" style="margin:0">从调试窗口读取最新 cookie 并入库（登录完成后点它）</span>
+    <span class="sub" style="margin:0">从调试窗口立即读一次 cookie 并入库（窗口里刚登录完、想手动补抓时用）</span>
   </div>
-  <hr>
-  <div class="row">
-    <select id="paste-slot">
-      <option value="platform">粘贴：平台 Cookie（MIMO_PLATFORM_COOKIE）</option>
-      <option value="account">粘贴：账号 Cookie（MIMO_ACCOUNT_COOKIES，续期燃料）</option>
-    </select>
-  </div>
-  <textarea id="paste-cookie" placeholder="从浏览器 DevTools 复制的整行 Cookie 头，形如 api-platform_serviceToken=…; userId=…"></textarea>
-  <div class="row" style="margin-top:8px">
-    <button id="btn-paste">保存粘贴</button>
-    <span class="sub" style="margin:0">兜底通道：保存前会先用它探测一次余额，不通过则不入库</span>
-  </div>
+  <details id="fallback"><summary>兜底通道（调试窗口用不了时才需要）：手动开窗 / 粘贴 Cookie</summary>
+    <div class="row" style="margin-top:10px">
+      <button id="btn-open">手动打开登录窗</button>
+      <span class="sub" style="margin:0">专用调试 Chrome 打开平台（已在运行则新开标签页）</span>
+    </div>
+    <div class="row">
+      <select id="paste-slot">
+        <option value="platform">粘贴：平台 Cookie（MIMO_PLATFORM_COOKIE）</option>
+        <option value="account">粘贴：账号 Cookie（MIMO_ACCOUNT_COOKIES，续期燃料）</option>
+      </select>
+    </div>
+    <textarea id="paste-cookie" placeholder="从浏览器 DevTools 复制的整行 Cookie 头，形如 api-platform_serviceToken=…; userId=…"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="btn-paste">保存粘贴</button>
+      <span class="sub" style="margin:0">保存前会先用它探测一次余额，不通过则不入库</span>
+    </div>
+  </details>
 </div>
 
 <div id="result"></div>
@@ -114,7 +123,7 @@ const act = async (path, body, label) => {
       setResult(label + '：完成' + (data.balance && data.balance.balance ? '，余额 ' + data.balance.balance + ' ' + (data.balance.currency || '') : ''), 'good')
       if (data.hops) showHops(data.hops)
     } else {
-      setResult(label + '：失败 HTTP ' + status + ' — ' + ((data && (data.error || data.note)) || '无详情' + (data && data.hops ? '' : '')), 'err')
+      setResult(label + '：失败 HTTP ' + status + ' — ' + ((data && (data.error || data.note)) || '无详情'), 'err')
       if (data && data.hops) showHops(data.hops)
     }
   } catch (e) { setResult(label + '：请求异常 ' + e, 'err') }
@@ -126,6 +135,54 @@ const showHops = (hops) => {
   const box = $('hops'), list = $('hop-list')
   list.textContent = hops.map((h) => h.host + h.path + ' → ' + h.status + (h.setCookies ? '  [' + h.setCookies.join(', ') + ']' : '')).join('\\n')
   box.hidden = hops.length === 0
+}
+// The one-click watch: the server holds the request open while it waits for
+// the login to land, so this call legitimately takes minutes.
+const watch = async () => {
+  if (busy) return
+  busy = true
+  for (const b of document.querySelectorAll('button')) b.disabled = true
+  setResult('登录并等待：已打开登录窗——请在弹出的窗口里完成登录（最长等 5 分钟，期间可以不管这页）…')
+  try {
+    const { status, data } = await api('/api/mimo-relogin/watch', { timeoutMs: 300000 })
+    if (data && data.ok) {
+      setResult('登录并等待：登录完成，已自动入库' + (data.balance && data.balance.balance ? '，余额 ' + data.balance.balance + ' ' + (data.balance.currency || '') : ''), 'good')
+    } else {
+      setResult('登录并等待：未完成 HTTP ' + status + ' — ' + ((data && data.error) || '无详情'), 'err')
+    }
+  } catch (e) { setResult('登录并等待：请求异常 ' + e + '（若已在窗口完成登录，点「抓取登录态」补抓）', 'err') }
+  await load()
+  busy = false
+  for (const b of document.querySelectorAll('button')) b.disabled = false
+}
+// Renew that lands on the interactive verdict (passToken gone) hands over to
+// the watch flow automatically — one click either way.
+const renewThenMaybeWatch = async () => {
+  if (busy) return
+  busy = true
+  for (const b of document.querySelectorAll('button')) b.disabled = true
+  setResult('免登录续期 …')
+  try {
+    const { status, data } = await api('/api/mimo-relogin/renew')
+    if (data && data.ok) {
+      setResult('免登录续期：完成' + (data.balance && data.balance.balance ? '，余额 ' + data.balance.balance + ' ' + (data.balance.currency || '') : ''), 'good')
+      if (data.hops) showHops(data.hops)
+      await load()
+    } else if (status === 409) {
+      if (data && data.hops) showHops(data.hops)
+      await load()
+      busy = false
+      for (const b of document.querySelectorAll('button')) b.disabled = false
+      setResult('免登录续期：账号凭据已过期，需要人工登录一次——已转「登录并等待」，请在弹出的窗口里完成登录…')
+      await watch()
+    } else {
+      setResult('免登录续期：失败 HTTP ' + status + ' — ' + ((data && (data.error || data.note)) || '无详情'), 'err')
+      if (data && data.hops) showHops(data.hops)
+      await load()
+    }
+  } catch (e) { setResult('免登录续期：请求异常 ' + e, 'err') }
+  busy = false
+  for (const b of document.querySelectorAll('button')) b.disabled = false
 }
 const load = async () => {
   const [statusRes, overviewRes] = await Promise.all([
@@ -159,9 +216,10 @@ const load = async () => {
     el.innerHTML = '— <small>无余额数据</small>'
   }
 }
-$('btn-renew').onclick = () => act('/api/mimo-relogin/renew', undefined, '免登录续期')
-$('btn-open').onclick = () => act('/api/mimo-relogin/open', undefined, '打开登录窗')
+$('btn-watch').onclick = watch
+$('btn-renew').onclick = renewThenMaybeWatch
 $('btn-capture').onclick = () => act('/api/mimo-relogin/capture', undefined, '抓取登录态')
+$('btn-open').onclick = () => act('/api/mimo-relogin/open', undefined, '打开登录窗')
 $('btn-paste').onclick = () => act('/api/mimo-relogin/paste', { slot: $('paste-slot').value, cookie: $('paste-cookie').value }, '保存粘贴')
 load()
 setInterval(load, 15000)

@@ -4,12 +4,13 @@
 
 ## 概述
 
-纯 host 端套件，负责给 dsh-usage 的 MiMo 余额探测补给新鲜的 `MIMO_PLATFORM_COOKIE`。它提供一个 loopback 页面（`GET /api/mimo-relogin/page`），含三个动作与一个粘贴兜底：
+纯 host 端套件，负责给 dsh-usage 的 MiMo 余额探测补给新鲜的 `MIMO_PLATFORM_COOKIE`。它提供一个 loopback 页面（`GET /api/mimo-relogin/page`），主按钮是**一键登录**，另有三个备用动作与一个粘贴兜底：
 
-- **免登录续期**（`POST /api/mimo-relogin/renew`）无人值守地重放平台自身的票据链——`genLoginUrl` → `account.xiaomi.com/pass/serviceLogin` → 平台 `/sts`——用已存的 `MIMO_ACCOUNT_COOKIES` 换发新的 `api-platform_serviceToken`，全程不开浏览器。2026-10-27 实测：只要 30 天的 `passToken` 还在，链条无表单直接走通；`passToken` 失效后落到凭证表单（HTTP 409，`verdict: interactive`）。这让人工重登的频率上限约等于 `passToken` 的寿命（约 30 天一次）。
-- **抓取**（`POST /api/mimo-relogin/capture`）经 CDP 从 chrome-debug 实例（约定端口 9224）读取两个 Cookie jar 并入库——**仅当**抓到的平台 jar 通过 `GET /api/v1/balance` 探测之后。
-- **打开登录窗**（`POST /api/mimo-relogin/open`）：已运行则附加开新标签页，否则以专用调试 Chrome 启动并直达平台。
-- **粘贴**（`POST /api/mimo-relogin/paste`）是手工地板通道：`slot=platform|account` 加单行 Cookie 头；平台半区与抓取同款余额探测门（不通过探测的值永不入库）。
+- **登录并等待**（`POST /api/mimo-relogin/watch`）一键到底：自动打开（或附着）调试 Chrome，然后经 CDP 轮询两个 Cookie jar，登录一落地即过余额探测门并入库——操作者只需要在弹出的窗口里完成登录（密码/验证码），此后无需再碰页面。默认等 5 分钟（可传 `timeoutMs`，钳到 5s–15min）；探测门与抓取同款：**只有变化过的 serviceToken 才会被探测**，旧 token 不会每 tick 轰炸余额接口，未通过探测的值永不入库。同时只允许一个 watch 在跑，第二个请求得到 409。
+- **免登录续期**（`POST /api/mimo-relogin/renew`）无人值守地重放平台自身的票据链——`genLoginUrl` → `account.xiaomi.com/pass/serviceLogin` → 平台 `/sts`——用已存的 `MIMO_ACCOUNT_COOKIES` 换发新的 `api-platform_serviceToken`，全程不开浏览器。2026-10-27 实测：只要 30 天的 `passToken` 还在，链条无表单直接走通；`passToken` 失效后账号主机会用一个**登录页**应答链条（经典表单，或 2026-10-30 起的 JS 渲染 SPA 外壳——原始 HTML 无任何表单标记，旧的标记检测认不出它），此时返回 `verdict: interactive`（HTTP 409）。页面上的「免登录续期」遇到 409 会**自动转「登录并等待」**，所以人工重登仍然只是"点一下、输个密码"。这让人工重登的频率上限约等于 `passToken` 的寿命（约 30 天一次）。
+- **抓取**（`POST /api/mimo-relogin/capture`）经 CDP 从 chrome-debug 实例（约定端口 9224）读取两个 Cookie jar 并入库——**仅当**抓到的平台 jar 通过 `GET /api/v1/balance` 探测之后。留作窗口里刚登录完、想立即补抓的手动档。
+- **打开登录窗**（`POST /api/mimo-relogin/open`）：已运行则附加开新标签页，否则以专用调试 Chrome 启动并直达平台。已降级进页面的「兜底通道」折叠区。
+- **粘贴**（`POST /api/mimo-relogin/paste`）是手工地板通道：`slot=platform|account` 加单行 Cookie 头；平台半区与抓取同款余额探测门（不通过探测的值永不入库）。同在「兜底通道」折叠区。
 
 所有路由先过共享 loopback 围栏；Cookie 值不进日志、不进响应（只报名字与长度）。写入成功后套件会向 dsh-usage 的 `/api/dsh-usage/refresh` 发起探测催促，侧栏余额数秒内刷新。
 
@@ -45,13 +46,15 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-mimo-relogin
 | `/api/mimo-relogin/status` | 任意 | loopback | 调试端口存活与凭据入库标志（仅布尔）。 |
 | `/api/mimo-relogin/renew` | POST | loopback | 无人值守票据链续期；链条要表单或账号凭据缺失返回 409，链条或余额探测失败返回 502。 |
 | `/api/mimo-relogin/capture` | POST | loopback | CDP 抓取 + 余额探测门；调试窗口未运行返回 503，窗口未登录返回 409。 |
+| `/api/mimo-relogin/watch` | POST | loopback | 一键登录：开窗 + CDP 盯梢至登录落地 + 探测门入库；窗口打不开返回 500，窗口消失返回 503，等待超时返回 408，已有 watch 在跑返回 409。 |
 | `/api/mimo-relogin/open` | POST | loopback | 附加或启动调试窗口直达平台。 |
 | `/api/mimo-relogin/paste` | POST | loopback | 手工写入凭据：槽位校验 + （`platform` 半区）探测门。 |
 
 ## 已知限制与遗留工作
 
-- 续期链依赖平台内部 `genLoginUrl`/`serviceLogin`/`/sts` 的形态；平台侧变更会以 `verdict: failed` 加页面上的链路明细呈现，而非静默失效。
+- 续期链依赖平台内部 `genLoginUrl`/`serviceLogin`/`/sts` 的形态；平台侧变更会以 `verdict: failed` 加页面上的链路明细呈现，而非静默失效。`passToken` 失效的信号是"账号主页应答一个登录页"（2026-10-30 起为 JS SPA 外壳），链条对"账号主机返回 HTML 而非重定向"一律判 `interactive`——若平台未来在非登录场景也这么做，会得到偏保守的 409（人工看一眼即可，无害）。
 - 调试 profile 路径默认指向本机 chrome-debug 约定位置；按机器覆盖 `chromeProfile`。
 - Cookie 值以明文存于托管凭据文件（该存储内所有凭据皆如此）；账号 jar 携带约 30 天的 SSO 根凭据，链条报 `interactive` 时应通过重新登录轮换。
+- watch 用一个进程内闩锁防并发；多个 dsh web 实例（不支持的拓扑）间不互斥。watch 期间关掉调试窗口会在连续 5 次 CDP 读不到后返回 503。
 - auto-renew 调度按进程计：重启会重置 24h 节奏，`interactive` 暂停会持续到一次成功的人工入库或下一次重启。
 - 页面文案为中文（host 侧字符串在审计中仅计为警告）；i18n 审计对 host 侧 CJK 只告警不拦截。

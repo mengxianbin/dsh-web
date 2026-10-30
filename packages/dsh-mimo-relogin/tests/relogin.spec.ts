@@ -92,6 +92,12 @@ function renewFetch(overrides: { serviceLogin?: () => Response, balanceStatus?: 
       if (overrides.serviceLogin) return overrides.serviceLogin()
       return new Response(null, { status: 302, headers: { location: `${PLATFORM}/sts?ticket=one-time` } })
     }
+    if (url.includes('/fe/service/login')) {
+      // The JS-rendered login SPA the platform switched to (~2026-10-30):
+      // a bare app shell — no type=password, no login-form, nothing the old
+      // marker check keyed on. Regression fixture for the 2026-10-30 502.
+      return new Response('<!doctype html><html><head><script src="/static/js/app.js"></script></head><body><div id="root"></div></body></html>', { status: 200, headers: { 'content-type': 'text/html' } })
+    }
     if (url.includes('/sts')) {
       const headers = new Headers({ location: `${PLATFORM}/console/balance` })
       headers.append('set-cookie', 'api-platform_serviceToken=new-token; Path=/; HttpOnly')
@@ -169,13 +175,36 @@ describe('mimo-relogin routes', () => {
     expect(store.get(PLATFORM_REF)).toBe(STORED_PLATFORM)
   }, 20_000)
 
-  it('renew without stored account cookies points at the capture flow', async () => {
+  it('answers 409 interactive for the JS login SPA too (2026-10-30 regression: was 502 failed)', async () => {
+    const { seam, store } = fakeCredentials({ [PLATFORM_REF]: STORED_PLATFORM, [ACCOUNT_REF]: STORED_ACCOUNT })
+    // The live failure shape: passToken gone, serviceLogin 302s to the
+    // account host's SPA shell — an app bootstrap page with no form markers.
+    const fetchImpl = renewFetch({
+      serviceLogin: () => new Response(null, { status: 302, headers: { location: `${ACCOUNT}/fe/service/login?sid=oauth2` } }),
+    })
+    const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, { fetchImpl, alive: async () => false })
+    const res = fakeRes()
+    await routeOf(routes, '/api/mimo-relogin/renew').handler(fakeReq(), res.res)
+    expect(res.status).toBe(409)
+    const body = JSON.parse(res.body ?? '{}')
+    expect(body.ok).toBe(false)
+    expect(body.verdict).toBe('interactive')
+    // The walk stops AT the login page: two hops, not a nine-hop spin on the
+    // same URL followed by a stale-jar balance probe.
+    expect(body.hops.map((hop: { path: string }) => hop.path)).toEqual(['/pass/serviceLogin', '/fe/service/login'])
+    // Nothing was stored, and the stale jar never re-probed the balance.
+    expect(store.get(PLATFORM_REF)).toBe(STORED_PLATFORM)
+    const balanceCalls = fetchImpl.mock.calls.filter(([input]: [unknown]) => String(input).includes('/api/v1/balance'))
+    expect(balanceCalls).toHaveLength(0)
+  }, 20_000)
+
+  it('renew without stored account cookies points at the one-click login flow', async () => {
     const { seam } = fakeCredentials({ [PLATFORM_REF]: STORED_PLATFORM })
     const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, { alive: async () => false })
     const res = fakeRes()
     await routeOf(routes, '/api/mimo-relogin/renew').handler(fakeReq(), res.res)
     expect(res.status).toBe(409)
-    expect(JSON.parse(res.body ?? '{}').error).toContain('抓取')
+    expect(JSON.parse(res.body ?? '{}').error).toContain('登录并等待')
   })
 
   it('capture stores both jars only after the balance probe passes', async () => {
@@ -217,6 +246,124 @@ describe('mimo-relogin routes', () => {
     await routeOf(routes, '/api/mimo-relogin/capture').handler(fakeReq(), res.res)
     expect(res.status).toBe(409)
     expect(store.size).toBe(0)
+  })
+
+  describe('watch (one-click login flow)', () => {
+    const instantSleep = async (): Promise<void> => {}
+    const notIn = { platform: new Map([['userId', '42']]), account: new Map() }
+    const signedIn = {
+      platform: new Map([['api-platform_serviceToken', 'fresh'], ['userId', '42']]),
+      account: new Map([['passToken', 'pass-value']]),
+    }
+
+    it('opens the window, waits for the login to land, then stores through the probe gate', async () => {
+      const { seam, store } = fakeCredentials({ [PLATFORM_REF]: STORED_PLATFORM })
+      const ensureWindow = vi.fn(async (): Promise<{ mode: 'tab' | 'launched' | 'failed', ready: boolean }> => ({ mode: 'launched', ready: true }))
+      // Two ticks of "not signed in yet", then the fresh login appears.
+      const reads = [notIn, notIn, signedIn]
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        fetchImpl: renewFetch(),
+        alive: async () => true,
+        ensureWindow,
+        readJars: async () => reads.shift() ?? signedIn,
+        sleep: instantSleep,
+      })
+      const res = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 30_000 } }), res.res)
+      expect(res.status).toBe(200)
+      const body = JSON.parse(res.body ?? '{}')
+      expect(body.ok).toBe(true)
+      expect(body.balance).toMatchObject({ balance: '1.23' })
+      // The window was part of the one-click flow, not a separate step.
+      expect(ensureWindow).toHaveBeenCalledTimes(1)
+      expect(store.get(PLATFORM_REF)).toContain('api-platform_serviceToken=fresh')
+      expect(store.get(ACCOUNT_REF)).toContain('passToken=pass-value')
+    }, 20_000)
+
+    it('keeps waiting on a stale token (probe gate holds), re-probing only when the token changes', async () => {
+      const { seam, store } = fakeCredentials()
+      const stale = { platform: new Map([['api-platform_serviceToken', 'stale']]), account: new Map() }
+      const fetchImpl = renewFetch({ balanceStatus: 401 })
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        fetchImpl,
+        alive: async () => true,
+        ensureWindow: async () => ({ mode: 'tab', ready: true }),
+        // The profile keeps answering with the same stale token: the watch
+        // must neither store it nor re-probe the balance on every tick.
+        readJars: async () => stale,
+        sleep: instantSleep,
+      })
+      const res = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 6_000 } }), res.res)
+      expect(res.status).toBe(408)
+      expect(store.size).toBe(0)
+      const balanceCalls = fetchImpl.mock.calls.filter(([input]: [unknown]) => String(input).includes('/api/v1/balance'))
+      expect(balanceCalls).toHaveLength(1)
+    }, 20_000)
+
+    it('times out with 408 when nobody signs in, storing nothing', async () => {
+      const { seam, store } = fakeCredentials()
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        alive: async () => true,
+        ensureWindow: async () => ({ mode: 'tab', ready: true }),
+        readJars: async () => notIn,
+        sleep: instantSleep,
+      })
+      const res = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 5_000 } }), res.res)
+      expect(res.status).toBe(408)
+      expect(JSON.parse(res.body ?? '{}').ok).toBe(false)
+      expect(store.size).toBe(0)
+    }, 20_000)
+
+    it('gives up early with 503 when the debug window disappears mid-wait', async () => {
+      const { seam, store } = fakeCredentials()
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        alive: async () => true,
+        ensureWindow: async () => ({ mode: 'tab', ready: true }),
+        readJars: async () => undefined,
+        sleep: instantSleep,
+      })
+      const res = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 300_000 } }), res.res)
+      expect(res.status).toBe(503)
+      expect(store.size).toBe(0)
+    }, 20_000)
+
+    it('refuses a second concurrent watch with 409', async () => {
+      const { seam } = fakeCredentials()
+      let release: () => void = () => {}
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        alive: async () => true,
+        ensureWindow: async () => ({ mode: 'tab', ready: true }),
+        readJars: async () => notIn,
+        // Hold the first watch inside its first tick.
+        sleep: async () => { await gate },
+      })
+      const first = fakeRes()
+      const pending = routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 5_000 } }), first.res)
+      const second = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 5_000 } }), second.res)
+      expect(second.status).toBe(409)
+      release()
+      await pending
+      expect(first.status).toBe(408)
+    }, 20_000)
+
+    it('fails with 500 when the login window cannot be opened', async () => {
+      const { seam, store } = fakeCredentials()
+      const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, {
+        alive: async () => false,
+        ensureWindow: async () => ({ mode: 'failed', ready: false, error: 'spawn refused' }),
+        readJars: async () => notIn,
+        sleep: instantSleep,
+      })
+      const res = fakeRes()
+      await routeOf(routes, '/api/mimo-relogin/watch').handler(fakeReq({ body: { timeoutMs: 5_000 } }), res.res)
+      expect(res.status).toBe(500)
+      expect(store.size).toBe(0)
+    }, 20_000)
   })
 
   it('paste validates the slot and the single-line cookie, and gates the platform half on the probe', async () => {

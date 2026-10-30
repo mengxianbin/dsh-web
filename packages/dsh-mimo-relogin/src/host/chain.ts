@@ -9,9 +9,11 @@
  *   GET /api/v1/balance                       → 200?
  *
  * Fully headless: cookies only, no browser, no interaction. The account jar
- * is the 30-day root credential (passToken); when IT expires the chain lands
- * on the credential form instead and the verdict says `interactive` — that is
- * the once-a-month (or sooner) manual re-login the kit's capture flow covers.
+ * is the 30-day root credential (passToken); when IT expires the account
+ * host answers the walk with a login PAGE (the classic form, or the
+ * JS-rendered SPA shell since ~2026-10-30) instead of a redirect, and the
+ * verdict says `interactive` — that is the once-a-month (or sooner) manual
+ * re-login the kit's capture flow covers.
  * All fetches route through the injected fetchImpl so tests replay the chain.
  * @module dsh-mimo-relogin/host/chain
  */
@@ -32,7 +34,7 @@ export interface ChainHop {
 
 /** Result of one renewal attempt. */
 export interface ChainOutcome {
-  /** `ok` = balance answers with the rotated jar; `interactive` = the account host wants a form; `failed`/`no-url` = chain broke (see note). */
+  /** `ok` = balance answers with the rotated jar; `interactive` = the account host serves a login page; `failed`/`no-url` = chain broke (see note). */
   verdict: 'ok' | 'interactive' | 'failed' | 'no-url'
   /** Every hop walked, for the page's debug list. */
   hops: ChainHop[]
@@ -54,7 +56,6 @@ export function redactUrl(raw: string): string {
   )
 }
 
-const LOGIN_FORM_MARKERS = /type=["']password|login-form|serviceLogin/i
 const MAX_HOPS = 9
 
 interface RenewOptions {
@@ -155,12 +156,18 @@ export async function renewChain(options: RenewOptions): Promise<ChainOutcome> {
     }
     const contentType = response.headers.get('content-type') ?? ''
     if (contentType.includes('text/html')) {
-      const body = await response.text()
+      await response.text() // consume the body; the host alone decides
       if (target.hostname === PLATFORM_HOST) break // landed on the console
-      if (LOGIN_FORM_MARKERS.test(body)) {
-        return { verdict: 'interactive', hops, platformJar, accountJar, note: 'the account host asks for credentials — passToken is gone; log in once through the capture window' }
-      }
-      continue // intermediate account page — keep walking
+      // The account host answered with a PAGE instead of a redirect. A
+      // headless walk cannot advance it (no Location to follow; JS/meta
+      // redirects do not execute), so this is the credential step and the
+      // verdict is interactive. Both shapes land here: the classic form
+      // (2026-10-27 proven chain) and the JS-rendered login SPA the
+      // platform switched to (~2026-10-30, /fe/service/login serves an app
+      // shell whose raw HTML carries no form markers — marker-based
+      // detection alone missed it and the walk spun on the same URL until
+      // MAX_HOPS, then misreported `failed` + a 401 balance probe).
+      return { verdict: 'interactive', hops, platformJar, accountJar, note: 'the account host serves a login page (passToken is gone) — log in once through the capture window' }
     }
     await response.text() // consume non-html bodies
     if (target.hostname === PLATFORM_HOST) break
