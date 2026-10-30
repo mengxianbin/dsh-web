@@ -10,7 +10,7 @@
  * @module @linxin666/dsh-session-archive/host/janitor
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -46,7 +46,8 @@ import {
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
 import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
-import { TtlMemo } from './ttl-memo.ts'
+import { AsyncTtlMemo } from './ttl-memo.ts'
+import { InventoryResponseCache, type InventoryResponseServe } from './inventory-response-cache.ts'
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
@@ -166,6 +167,24 @@ const DIR_INDEX_TTL_MS = 2_000
  */
 const PROJCACHE_INDEX_TTL_MS = 2_000
 
+/**
+ * How long one whole inventory response may be served as fresh before a
+ * background refresh runs (stale reads keep answering verbatim — see
+ * `inventory-response-cache.ts`).
+ *
+ * Sized by the taskbot cadence, not the panel's: `archive-janitor` polls
+ * every 10 minutes behind a 10-second HTTP timeout, and one rebuild costs
+ * 11–21 s warm (up to 35 s, 500 at the 30 s route timeout — forensics
+ * `archive-lag-forensics-1110.md` §八), so a window shorter than the poll
+ * interval makes every other janitor round pay a rebuild it cannot survive.
+ * 15 minutes covers two full janitor intervals with margin; mutations still
+ * invalidate explicitly, so this plugin's own archive/restore/delete results
+ * are refreshed behind the very next read. State changed by anything other
+ * than this plugin (feed activity, another client) surfaces on GET within
+ * the window plus one rebuild; mutating routes never read this cache.
+ */
+const INVENTORY_RESPONSE_TTL_MS = 15 * 60_000
+
 export class ArchiveService {
   private readonly ctx: Context
   private readonly dshHome: string
@@ -192,11 +211,26 @@ export class ArchiveService {
    * harness file only changes when another writer touches it, while every pass
    * re-reads and re-parses the whole document; the delete pipeline invalidates
    * the memo after it rewrites the index, so a removed session's facts cannot
-   * resurface from memory.
+   * resurface from memory. Async since 0.4.12: the read+parse yields the event
+   * loop instead of holding it, and concurrent passes coalesce into one parse.
    */
-  private readonly projcacheIndex = new TtlMemo<ProjcacheIndex>({
+  private readonly projcacheIndex = new AsyncTtlMemo<ProjcacheIndex>({
     ttlMs: PROJCACHE_INDEX_TTL_MS,
     load: () => readProjcacheIndex(this.dshHome),
+  })
+  /**
+   * The cached whole inventory response the route serves. Mutating operations
+   * invalidate it when they release the operation lock (every one of them
+   * changes archive state, or may have changed it partially before failing),
+   * so the next GET rebuilds; reads that start during an operation serve the
+   * pre-operation snapshot until it ends.
+   */
+  private readonly responseCache = new InventoryResponseCache({
+    ttlMs: INVENTORY_RESPONSE_TTL_MS,
+    build: async () => {
+      const inventory = await this.inventory()
+      return { payload: JSON.stringify(inventory), generatedAt: Date.now() }
+    },
   })
 
   private loaded = false
@@ -321,7 +355,9 @@ export class ArchiveService {
       ledger: this.ledger,
       projcacheFiles: this.projcacheFiles,
       dirIndex: await this.dirIndex.get(),
-      projcacheIndex: this.projcacheIndex.get(),
+      // Awaited here (not in buildInventory): the memo's derivation is async
+      // since the projection-cache index stopped being read synchronously.
+      projcacheIndex: await this.projcacheIndex.get(),
     }
   }
 
@@ -403,6 +439,17 @@ export class ArchiveService {
     }
   }
 
+  /**
+   * The inventory document as the route serves it: one rebuild serialized
+   * once, then the same bytes served verbatim inside the TTL window
+   * ({@link InventoryResponseCache}). Mutating operations invalidate the
+   * window; `hit`/`ageMs` travel to the wire as `x-dsh-inventory-cache` and
+   * `age` so a cache hit is observable without parsing the body.
+   */
+  inventoryCached(): Promise<InventoryResponseServe> {
+    return this.responseCache.serve()
+  }
+
   autoView(): AutoStateView {
     return {
       ...(this.autoState.lastArchiveRun !== undefined ? { lastArchiveRun: this.autoState.lastArchiveRun } : {}),
@@ -438,6 +485,11 @@ export class ArchiveService {
     const run = (async () => fn())()
     const release = (): void => {
       this.lockHeld = false
+      // Every locked operation changes archive state (or changed it partially
+      // before failing), so the cached whole response is dropped here, once,
+      // and the next inventory GET rebuilds. Reads that started during the
+      // operation keep serving the pre-operation snapshot until it ends.
+      this.responseCache.invalidate()
     }
     run.then(release, release)
     return run
@@ -776,9 +828,14 @@ export class ArchiveService {
     // first, so a pass that follows a physical delete cannot answer with the
     // removed sessions' facts even while the window is still open.
     if (ids.size > 0) this.projcacheIndex.invalidate()
-    try {
-      if (existsSync(indexPath)) {
-        const parsed = JSON.parse(this.readSync(indexPath)) as { tables?: { sessions?: Record<string, unknown> } }
+    // The index read is async since 0.4.12: the document is multi-megabyte,
+    // and this scrub runs inside the delete pipeline on the shared event
+    // loop — a synchronous read+parse here stalled every request while a
+    // batch deleted. Missing (undefined) and corrupt both leave it alone.
+    const raw = await this.readFile(indexPath)
+    if (raw !== undefined) {
+      try {
+        const parsed = JSON.parse(raw) as { tables?: { sessions?: Record<string, unknown> } }
         const sessions = parsed.tables?.sessions
         if (sessions !== undefined) {
           for (const id of ids) {
@@ -790,9 +847,9 @@ export class ArchiveService {
           // success; a fire-and-forget write raced the caller's readers.
           await writeJsonAtomic(indexPath, parsed)
         }
+      } catch {
+        // A corrupt index is left alone; the harness owns it.
       }
-    } catch {
-      // A corrupt index is left alone; the harness owns it.
     }
     const perSessionDir = join(this.dshHome, 'storages', 'session_projcache', 'sessions')
     try {
@@ -806,11 +863,6 @@ export class ArchiveService {
     } catch {
       // Same best-effort contract.
     }
-  }
-
-  private readSync(path: string): string {
-    // Small synchronous read for the scrub; failure paths are guarded.
-    return readFileSync(path, 'utf8')
   }
 
   // ------------------------------------------------------------------
