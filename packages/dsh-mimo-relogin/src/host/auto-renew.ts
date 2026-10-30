@@ -81,10 +81,10 @@ const defaultSchedule = (fn: () => void, ms: number): (() => void) => {
   return () => { clearTimeout(handle) }
 }
 
-/** Human units for the arming line (`60000ms` → `60s`, `86400000ms` → `24h`). */
+/** Human units for the arming line (`60000ms` → `1m`, `86400000ms` → `24h`). */
 function humanDelay(ms: number): string {
   if (ms % 3_600_000 === 0) return `${String(ms / 3_600_000)}h`
-  if (ms % 60_000 === 0) return `${String(ms / 60_000)}s`
+  if (ms % 60_000 === 0) return `${String(ms / 60_000)}m`
   if (ms % 1_000 === 0) return `${String(ms / 1_000)}s`
   return `${String(ms)}ms`
 }
