@@ -5,6 +5,8 @@
  * stub, and the log is captured. The rules under test:
  * - first attempt fires after the startup grace, then one per interval,
  *   clamped to a 24h floor whatever Config asks for;
+ * - the arming line renders delays in the largest whole human unit
+ *   (`5s` the seconds tier, `1m` the minutes tier, `24h` the hours tier);
  * - `ok` rotates and stores both jars (the shared renew core, fail-closed);
  * - `interactive` (passToken gone) PAUSES the loop — no further attempt is
  *   scheduled — until `rearm()` after a manual store;
@@ -126,6 +128,22 @@ describe('startAutoRenew', () => {
     // Exactly one follow-up attempt, one full interval out.
     expect(timers.scheduled).toHaveLength(2)
     expect(timers.scheduled[1]?.ms).toBe(86_400_000)
+  })
+
+  it('renders a 60s startup grace as 1m on the arming line (minute tier, not seconds)', () => {
+    const { seam } = fakeCredentials({ [PLATFORM_REF]: STORED_PLATFORM, [ACCOUNT_REF]: STORED_ACCOUNT })
+    const timers = fakeTimers()
+    const logger = fakeLog()
+    const fetchImpl = renewFetch()
+    startAutoRenew(ctxWith(seam), { ...OPTIONS, startupDelayMs: 60_000 }, { fetchImpl, ...timers, ...logger })
+
+    // The default grace (STARTUP_GRACE_MS = 60000) reads as one minute —
+    // the minute tier used to divide by 60_000 and then mislabel the
+    // result as seconds ("1s" in the 2026-10-30 restart log).
+    expect(logger.lines[0]?.level).toBe('info')
+    expect(logger.lines[0]?.message).toContain('first attempt in 1m')
+    // The schedule itself honours the same value (display-only fix).
+    expect(timers.scheduled[0]?.ms).toBe(60_000)
   })
 
   it('clamps the cadence to a 24h floor whatever the config asks for', async () => {
