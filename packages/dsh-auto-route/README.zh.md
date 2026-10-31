@@ -11,6 +11,10 @@ Bearer key 只进进程内存），以**两条上沿 + 一条共用下沿**决�
 - 任一 `>= 0.99` → 额外对**活跃会话集**（运行中 ∪ 近 30 分钟有请求）逐个
   `selectModel` 批切；
 - 三窗**全部** `< 0.95` → 双腿一起切回 `opencode-go`。
+- **每次成功的 hold 轮询**额外跑一趟稳态对账（2026-11-01 裁定 A）：把两条腿
+  与现实对齐——活跃会话中观察到偏离活目标的切回（人工锁与启动后从未观察到的
+  会话跳过），被 harness `selectModel` 副作用改写的部署默认也写回——一次性边
+  永远看不到的「边后漂移」由此闭环。`reconcile: false` 可退回纯边行为。
 
 策略状态在 loopback 围栏内的 `GET /api/auto-route/status` 只读可查——侧栏
 「当前生效源」徽标的唯一权威。host-only 包：无 `dsh.client` 面，浏览器插件
@@ -54,6 +58,7 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
 | `meterUrl` | `https://opencode.ai/console/api/go/status` | 计量源 |
 | `meterKeyEnv` | `OC_GO_CC_API_KEY` | Bearer key 所在环境变量名（只进内存、绝不入日志） |
 | `balanceGuardrail` | `enabled: false` | mimo 余额护栏——按 2026-10-27 裁定关闭（不设现金闸，烧到余额为止） |
+| `reconcile` | `true` | 稳态对账腿（2026-11-01 裁定 A）；`false` 退回纯边行为 |
 
 目标模型不在实况目录里时**整条边阻断**（不半切），并在状态端点可见；下一次
 轮询在目录可用后自动重试。
@@ -75,8 +80,13 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
   `readingAt`、`lastPoll`
 - `lastDefaultSwitch` / `lastTrigger` / `lastRestore`（边读数 +
   `switched`/`skipped`/`failed`/`defaultSaved`）、`lastOutcome`（逐会话结果）、
-  `targetProblem`（阻断诊断）
-- `activeSet`（跟踪中的会话：运行标记与请求新鲜度；子代理会话会标注且永不切）
+  `targetProblem`（阻断诊断；`action` 为 `reconcile` 表示对账腿发现目标不可路由）
+- `lastReconcile`（最近一趟对账：`checked`/`switched`/`aligned`/
+  `skippedLocked`/`skippedUnknown`/`failed`、`defaultRestored`/`defaultError`，
+  以及 `sessionLegPaused`——95–99 死区内会话腿有意暂停时为 true；`reconcile:
+  false` 或首次 hold 轮询之前不出现）
+- `activeSet`（跟踪中的会话：运行标记、请求新鲜度，以及对账折叠观察到的
+  最后路由 `selection`；子代理会话会标注且永不切）
 - `manualLocks`（被人工碰过的会话：发散的 `provider/model` 值 + 加锁时刻——
   两条沿都跳过它们直到值重新对齐；A 案 2026-10-27）
 - `balanceGuardrail`（`enabled` + 指名使其关闭的裁定说明）
@@ -96,11 +106,23 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
   执行，默认腿单独回落绝不踩动策略从未挪过的会话。
 - **人工锁定（A 案，2026-10-27 人工锁定优先）**：每条耐久 `model/selection`
   事件都做自动/人工判别（写入期望 + 台账 + 活目标对账——共享 `selectModel`
-  通道无来源元数据）；人工碰过即锁，**两条沿**都记 `skipped` / `manual-lock`
-  跳过，直到值与台账或活目标重新对齐。锁与台账为内存态（重启即清）；同值
-  触碰与仅 effort 变更不可见（已披露盲区）。
-- **坏数据不决策**：计量轮询失败只记 `lastPoll.ok: false`、状态分毫不动；
-  下一次好读数照常决策。
+  通道无来源元数据）；人工碰过即锁，**两条沿与对账腿**都记 `skipped` /
+  `manual-lock` 跳过，直到值与台账或活目标重新对齐。**锁条目持久化**到
+  `<dsh-home>/auto-route-locks.json`（2026-11-01 裁定 A 锁持久化）——重启再也不能
+  把刻意停靠的会话拉走。锁文件缺失或损坏一律 fail-open（冷启动 / 告警后冷启动），
+  写失败仅告警：内存锁始终是本生命周期的权威。控制器自有写入台账**有意保持内存态**
+  （重启后由事件重建，且丢失台账只会让判别更严、不会更松）。同值触碰与仅 effort
+  变更不可见（已披露盲区）。
+- **稳态对账腿（A 案，2026-11-01 稳态对账）**：边只触发一次，所以**边之后**的
+  漂移——观察到停在错侧的会话、被人工会话切换的副作用改写的默认——在下一条边
+  之前会一直错着。每次成功的 hold 轮询补上这个洞：折叠值（`pending ?? used`，
+  与 harness 投影同语义，只比 `provider/model`）偏离活目标的活跃会话，走同一套
+  人工锁定机器切回；漂移的部署默认写回。护栏：人工锁跳过；启动后从未观察到的
+  会话留给它的首次请求（绝不盲切）；95–99 死区内会话腿暂停（两条 latch 都不是
+  干净的在途目标——对赌必须活下来）；目标不可路由时整趟阻断（与边同语义）；
+  重复的同形默认写回失败只记一次日志，不逐轮刷屏。
+- **坏数据不决策**：计量轮询失败只记 `lastPoll.ok: false`、状态分毫不动
+  （对账同样停手）；下一次好读数照常决策。
 - 策略状态在内存中：宿主重启后回到 `baseline`，首次轮询即从实况读数重推相位。
 
 ## 目录
@@ -108,14 +130,19 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
 - `src/index.ts` — 插件入口：注入 `webServer`、`sessionController`；接事件、
   控制器与状态路由。
 - `src/policy.ts` — 纯相位逻辑（扳机/切回边、滞回、驻留、不完整读数保守不切）。
-- `src/controller.ts` — 轮询环、目录预检、切换批、默认保存、状态视图。
+- `src/controller.ts` — 轮询环、目录预检、切换批、默认保存、稳态对账腿、
+  状态视图。
 - `src/meters.ts` — go/status 抓取（未取整比值；秘密永不入日志）。
-- `src/active-set.ts` — 运行/新鲜/子代理活动台账。
-- `src/manual-lock.ts` — 人工锁定台账（A 案）：写入期望、所有权值、两沿共守
-  的锁。
+- `src/active-set.ts` — 运行/新鲜/子代理活动台账，加对账腿所依赖的选择折叠
+  （`pending`/`used`）。
+- `src/manual-lock.ts` — 人工锁定台账（A 案）：写入期望、所有权值、两条沿与
+  对账共守的锁；可选 `LockStore` 持久化锁条目。
+- `src/lock-store.ts` — `FileLockStore`：锁条目的原子、版本化、fail-open JSON
+  持久化（`<dsh-home>/auto-route-locks.json`）。
 - `src/host/routes.ts` — loopback 围栏状态路由。
-- `src/host/loopback.ts`、`src/host/http.ts`、`src/mount-once.ts` — 仓内共享
-  host 模块的生成副本（改 `shared/host/*` 后跑 `node scripts/sync-shared.mjs`）。
+- `src/host/loopback.ts`、`src/host/http.ts`、`src/mount-once.ts`、
+  `src/dsh-home.ts` — 仓内共享 host 模块的生成副本（改 `shared/host/*` 后跑
+  `node scripts/sync-shared.mjs`）。
 
 ## 许可
 

@@ -264,7 +264,7 @@ describe('auto-route guards', () => {
   it('serves the ruling lines, targets, and the disabled balance guardrail on the status payload', async () => {
     const env = rig()
     const { policy } = env.rig.status()
-    expect(policy.lines).toEqual({ triggerRatio: 0.99, defaultRatio: 0.95, restoreRatio: 0.95, minDwellMs: 0, pollIntervalMs: 45_000, activeWindowMs: WINDOW })
+    expect(policy.lines).toEqual({ triggerRatio: 0.99, defaultRatio: 0.95, restoreRatio: 0.95, minDwellMs: 0, pollIntervalMs: 45_000, activeWindowMs: WINDOW, reconcile: true })
     expect(policy.targets).toEqual({ switchTo: MIMO, restoreTo: BACK })
     expect(policy.defaultsSource).toBe('opencode-go')
     expect(policy.balanceGuardrail.enabled).toBe(false)

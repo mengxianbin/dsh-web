@@ -14,6 +14,12 @@ process memory only) with two up-edges and one shared down-edge:
   through `sessionController.selectModel`;
 - when **all three** windows read `< 0.95`, both legs return to
   `opencode-go`.
+- on **every successful hold poll** a steady-state reconcile pass re-asserts
+  both legs against reality (2026-11-01 ruling A): active sessions observed
+  off the live target are pulled back (manual locks and never-observed folds
+  are skipped) and a deployment default drifted by the harness's `selectModel`
+  side effect is restored — the post-edge drift a one-shot edge can never see.
+  `reconcile: false` opts out (edge-only behavior).
 
 The policy state is served read-only at the loopback-fenced
 `GET /api/auto-route/status` — the authority for the sidebar's current-source
@@ -62,6 +68,7 @@ Every ruling parameter is configurable on the plugin row; defaults are the
 | `meterUrl` | `https://opencode.ai/console/api/go/status` | Go meter source |
 | `meterKeyEnv` | `OC_GO_CC_API_KEY` | Env var holding the bearer key (memory only, never logged) |
 | `balanceGuardrail` | `enabled: false` | MiMo balance guardrail — disabled by the 2026-10-27 ruling (no cash gate, burn to balance) |
+| `reconcile` | `true` | Steady-state reconcile leg (2026-11-01 ruling A); `false` restores edge-only behavior |
 
 A target that is missing from the live model catalog **blocks the edge**
 (nothing half-switches) and stays visible on the status endpoint; the next
@@ -86,9 +93,16 @@ same-origin markers); remote sockets answer `403`.
   `resetsAt`), `readingAt`, `lastPoll`
 - `lastDefaultSwitch` / `lastTrigger` / `lastRestore` (edge ratios plus
   `switched`/`skipped`/`failed`/`defaultSaved`), `lastOutcome` (per-session
-  results), `targetProblem` (blocked-edge diagnostics)
-- `activeSet` (tracked sessions with running flag and request recency;
-  subagent sessions are marked and never switched)
+  results), `targetProblem` (blocked-edge diagnostics; `action` may be
+  `reconcile` when the reconcile leg found the target unroutable)
+- `lastReconcile` (the latest reconcile pass: `checked`/`switched`/`aligned`/
+  `skippedLocked`/`skippedUnknown`/`failed`, `defaultRestored`/
+  `defaultError`, and `sessionLegPaused` — true in the 95–99 dead zone where
+  the session leg deliberately holds; absent while `reconcile: false` or
+  before the first hold poll)
+- `activeSet` (tracked sessions with running flag, request recency, and the
+  last-known route (`selection`) the reconcile fold observed; subagent
+  sessions are marked and never switched)
 - `manualLocks` (sessions a human touched: divergent `provider/model` value +
   lock time — both edges skip them until realigned; A case, 2026-10-27)
 - `balanceGuardrail` (`enabled` plus a note naming the ruling that keeps it
@@ -113,12 +127,32 @@ same-origin markers); remote sockets answer `403`.
 - **Manual locks (A case, 2026-10-27 人工锁定优先)**: every durable
   `model/selection` event is classified auto vs human (write expectation +
   ledger + live-target comparison — the shared `selectModel` channel carries
-  no origin metadata); a human touch locks the session so **both edges** report
-  `skipped` / `manual-lock` until its value realigns with the ledger or the
-  live target. Locks and ledger are in-memory (a restart clears them);
-  same-value and effort-only touches stay invisible (disclosed blind spots).
+  no origin metadata); a human touch locks the session so **both edges and the
+  reconcile leg** skip it (`skipped` / `manual-lock`) until its value realigns
+  with the ledger or the live target. **Lock entries persist** to
+  `<dsh-home>/auto-route-locks.json` (2026-11-01 ruling A 锁持久化) — a
+  restart can no longer drag a deliberately parked session back. A corrupt or
+  missing lock file fails open (warn / cold start), and write failures are
+  best-effort: in-memory locks stay authoritative. The own-write ledger
+  remains in-memory by design (it rebuilds from post-boot events, and a lost
+  ledger only ever locks MORE, never less). Same-value and effort-only touches
+  stay invisible (disclosed blind spots).
+- **Reconcile leg (A case, 2026-11-01 稳态对账)**: an edge fires once, so
+  anything that drifts *after* the edge — a session observed on the wrong
+  side, a default rewritten as the side effect of a human session switch —
+  stayed wrong until the next edge. Every successful hold poll closes that
+  gap: sessions whose fold (`pending ?? used`, mirroring the harness
+  projection, `provider/model` only) diverges from the live target are
+  switched back through the same manual-lock machinery, and a drifted
+  deployment default is re-saved. Guards: manual locks skip; sessions never
+  observed since boot are left for their first request (never switched
+  blind); the session leg pauses in the 95–99 dead zone (neither latch is
+  unambiguously the in-flight target there — the hedge must survive); an
+  unroutable target blocks the pass like an edge does; identical repeated
+  default-restore failures log once, not every poll.
 - **No decision on bad data**: a failed meter poll records `lastPoll.ok:
-  false` and touches nothing; recovery resumes on the next good reading.
+  false` and touches nothing (reconcile included); recovery resumes on the
+  next good reading.
 - Policy state is in-memory: a Host restart boots back to `baseline`, and the
   first poll re-derives the phase from live meters.
 
@@ -129,16 +163,20 @@ same-origin markers); remote sockets answer `403`.
 - `src/policy.ts` — pure phase logic (trigger/restore edges, hysteresis,
   dwell, incomplete-reading fail-safe).
 - `src/controller.ts` — poll loop, catalog pre-flight, switch pass, default
-  save, status view.
+  save, the steady-state reconcile leg, status view.
 - `src/meters.ts` — go/status fetch (unrounded ratios, no secret ever
   logged).
-- `src/active-set.ts` — running/recent/subagent activity ledger.
+- `src/active-set.ts` — running/recent/subagent activity ledger, plus the
+  selection fold (`pending`/`used`) the reconcile leg judges against.
 - `src/manual-lock.ts` — manual-lock ledger (A case): write expectations,
-  ownership values, and the locks both edges honor.
+  ownership values, and the locks both edges and reconcile honor; optional
+  `LockStore` persists the lock entries.
+- `src/lock-store.ts` — `FileLockStore`: atomic, versioned, fail-open JSON
+  persistence for the lock entries (`<dsh-home>/auto-route-locks.json`).
 - `src/host/routes.ts` — the loopback-fenced status route.
-- `src/host/loopback.ts`, `src/host/http.ts`, `src/mount-once.ts` — generated
-  copies of the repository-shared host modules (edit `shared/host/*` and run
-  `node scripts/sync-shared.mjs`).
+- `src/host/loopback.ts`, `src/host/http.ts`, `src/mount-once.ts`,
+  `src/dsh-home.ts` — generated copies of the repository-shared host modules
+  (edit `shared/host/*` and run `node scripts/sync-shared.mjs`).
 
 ## License
 

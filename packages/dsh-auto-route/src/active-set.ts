@@ -1,11 +1,19 @@
 /**
  * The active set: sessions the policy is allowed to switch. Two event
- * sources feed it — `session/event` (request headers stamp recency; a
- * `subagent` origin marks the session as never directly selectable) and
- * `agent/status` (running flag). A session qualifies while it is running or
- * made a request within `activeWindowMs`; entries age out on their own, so
- * cold sessions are never batch-resumed by omission rather than by rule.
- * @module dsh-auto-route/active-set
+ * sources feed it — `session/event` (request headers stamp recency and fold
+ * the route a request actually used; a `subagent` origin marks the session
+ * as never directly selectable) and `agent/status` (running flag). A session
+ * qualifies while it is running or made a request within `activeWindowMs`;
+ * entries age out on their own, so cold sessions are never batch-resumed by
+ * omission rather than by rule.
+ *
+ * Each entry also carries the session's last-known route so the reconcile
+ * leg (2026-11-01 ruling A) can judge drift without a Host read API: a
+ * `model/selection` event records `pending`, a `request/header` event records
+ * `used` (retiring a matching pending) — the same `pending ?? used` fold the
+ * harness's model-selection projection applies, restricted to
+ * `provider/model` (effort is the disclosed manual-lock blind spot and is
+ * not reconciled). @module dsh-auto-route/active-set
  */
 
 /** One tracked session's activity. */
@@ -16,6 +24,10 @@ export interface ActiveEntry {
   readonly lastRequestAt: number
   /** Subagent-owned sessions are excluded from switching (resolveAgent refuses them). */
   readonly subagent: boolean
+  /** Recorded `model/selection` route (`provider/model`) not yet used by a request. */
+  readonly pending?: string
+  /** Route (`provider/model`) the newest request header actually used. */
+  readonly used?: string
 }
 
 /** Activity view served by the status endpoint (bounded by the caller). */
@@ -24,6 +36,8 @@ export interface ActiveEntryView {
   readonly running: boolean
   readonly lastRequestAt?: number
   readonly subagent?: boolean
+  /** Last-known route (`provider/model`); absent before the first event. */
+  readonly selection?: string
 }
 
 /** In-memory activity ledger for one Host process. */
@@ -35,16 +49,48 @@ export class ActiveSetTracker {
    * @param sessionId - session identity.
    * @param at - epoch ms of the request.
    * @param origin - session header origin; `'subagent'` marks it unselectable.
+   * @param usedRoute - `provider/model` the request header actually used; when
+   *   it matches a pending selection the pending retires (projection fold).
    */
-  recordRequest(sessionId: string, at: number, origin?: string): void {
+  recordRequest(sessionId: string, at: number, origin?: string, usedRoute?: string): void {
     const previous = this.entries.get(sessionId)
+    const pending = previous?.pending
+    // A header without a route keeps the last one it knew.
+    const used = usedRoute ?? previous?.used
     this.entries.set(sessionId, {
       sessionId,
       running: previous?.running ?? false,
       // Recency is monotonic per session: a replayed older stamp never rewinds it.
       lastRequestAt: previous === undefined ? at : Math.max(at, previous.lastRequestAt),
       subagent: previous?.subagent === true || origin === 'subagent',
+      ...(used === undefined ? {} : { used }),
+      // A request that USES the recorded selection retires it; a request on
+      // another route leaves it pending (the next request still uses it).
+      ...(pending === undefined ? {} : { pending: pending === usedRoute ? undefined : pending }),
     })
+  }
+
+  /**
+   * Fold one durable `model/selection` event as the session's pending route.
+   * @param sessionId - session identity.
+   * @param route - `provider/model` selected.
+   */
+  recordSelection(sessionId: string, route: string): void {
+    const previous = this.entries.get(sessionId)
+    this.entries.set(sessionId, previous === undefined
+      ? { sessionId, running: false, lastRequestAt: 0, subagent: false, pending: route }
+      : { ...previous, pending: route })
+  }
+
+  /**
+   * The route the next request will use (`pending ?? used`), mirroring the
+   * harness's model-selection projection restricted to `provider/model`.
+   * @param sessionId - session identity.
+   * @returns the folded route, or undefined before the first selection or request event.
+   */
+  effectiveRoute(sessionId: string): string | undefined {
+    const entry = this.entries.get(sessionId)
+    return entry === undefined ? undefined : entry.pending ?? entry.used
   }
 
   /**
@@ -114,12 +160,16 @@ export class ActiveSetTracker {
     return [...this.entries.values()]
       .sort((a, b) => b.lastRequestAt - a.lastRequestAt)
       .slice(0, limit)
-      .map(entry => ({
-        sessionId: entry.sessionId,
-        running: entry.running,
-        ...(entry.lastRequestAt === 0 ? {} : { lastRequestAt: entry.lastRequestAt }),
-        ...(entry.subagent ? { subagent: true } : {}),
-      }))
+      .map(entry => {
+        const selection = entry.pending ?? entry.used
+        return {
+          sessionId: entry.sessionId,
+          running: entry.running,
+          ...(entry.lastRequestAt === 0 ? {} : { lastRequestAt: entry.lastRequestAt }),
+          ...(entry.subagent ? { subagent: true } : {}),
+          ...(selection === undefined ? {} : { selection }),
+        }
+      })
   }
 
   /** Entries tracked right now (status payload size hint). */

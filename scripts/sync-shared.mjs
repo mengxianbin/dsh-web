@@ -81,6 +81,7 @@ const MANIFEST = [
       'packages/dsh-usage/src/dsh-home.ts',
       'packages/dsh-session-archive/src/dsh-home.ts',
       'packages/dsh-session-dispatch/src/dsh-home.ts',
+      'packages/dsh-auto-route/src/dsh-home.ts',
     ],
   },
   {

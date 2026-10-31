@@ -4,9 +4,15 @@
  * wrote per session; a durable `model/selection` event whose value matches
  * neither that ledger nor the policy's current target is a human touch — the
  * session locks and BOTH edges skip it until the selection realigns (with the
- * ledger or with the live target). Unlocking is automatic on realignment; the
- * lock itself is in-memory (a Host restart clears ledger and locks, and the
- * first events after boot rebuild both).
+ * ledger or with the live target). Unlocking is automatic on realignment.
+ *
+ * Since ruling A (2026-11-01 锁持久化), lock ENTRIES persist through an
+ * optional `LockStore`: a Host restart no longer drops them, so the first
+ * reconcile pass after boot cannot drag a deliberately parked session back.
+ * The controller's own-write ledger stays in-memory — it rebuilds from the
+ * first events after boot, and a lost ledger only ever makes the classifier
+ * MORE cautious (a would-be `aligned` becomes a `manual-lock`, which skips
+ * edges rather than switching anything).
  *
  * Detection rides the shared `selectModel` channel via expectation + value
  * comparison because that channel carries no origin metadata (2026-10-24
@@ -14,6 +20,8 @@
  * touch is invisible (nothing diverges), as is an effort-only change (value
  * keys on provider/model only). @module dsh-auto-route/manual-lock
  */
+
+import type { LockStore } from './lock-store.ts'
 
 /** One locked session as served on the status endpoint. */
 export interface ManualLockEntry {
@@ -37,7 +45,7 @@ export type ObserveVerdict =
   /** Another divergent touch while already locked — lock value refreshed. */
   | 'manual-relock'
 
-/** Tracks ledger, pending expectations, and locks for one Host lifetime. */
+/** Tracks ledger, pending expectations, and locks; locks optionally persist across Host lifetimes. */
 export class ManualLockTracker {
   /** sessionId → value the controller last wrote (its claim of ownership). */
   private readonly ledger = new Map<string, string>()
@@ -45,6 +53,38 @@ export class ManualLockTracker {
   private readonly expected = new Map<string, string>()
   /** sessionId → lock entry while a human value diverges. */
   private readonly locks = new Map<string, ManualLockEntry>()
+  /** Durability for the LOCKS only; undefined = the previous in-memory behavior. */
+  private readonly store: LockStore | undefined
+
+  /**
+   * @param store - optional persistence; restored locks load here, and every
+   *   lock change is written back. The own-write ledger deliberately does NOT
+   *   persist (rebuilds from post-boot events; a lost ledger only locks MORE).
+   */
+  constructor(store?: LockStore) {
+    this.store = store
+    if (store === undefined) return
+    let restored: ManualLockEntry[] | undefined
+    try {
+      restored = store.load()
+    } catch (error) {
+      // A throwing store must never block the tracker — same fail-open rule
+      // as an unreadable file: warn-through, start cold.
+      restored = undefined
+    }
+    for (const entry of restored ?? []) this.locks.set(entry.sessionId, entry)
+  }
+
+  /** Write the lock set back; best-effort (the store swallows its own I/O errors). */
+  private persist(): void {
+    if (this.store === undefined) return
+    try {
+      this.store.save([...this.locks.values()])
+    } catch {
+      // LockStore implementations warn internally; an in-memory tracker must
+      // never fail an observation because persistence did.
+    }
+  }
 
   /** Declare an upcoming controller write so its event is not read as human. */
   expect(sessionId: string, value: string): void {
@@ -89,11 +129,15 @@ export class ManualLockTracker {
     }
     if (value === policyTarget || value === this.ledger.get(sessionId)) {
       this.ledger.set(sessionId, value)
-      if (this.locks.delete(sessionId)) return 'aligned-unlock'
+      if (this.locks.delete(sessionId)) {
+        this.persist()
+        return 'aligned-unlock'
+      }
       return 'aligned'
     }
     const prior = this.locks.get(sessionId)
     this.locks.set(sessionId, { sessionId, value, lockedAt: now })
+    this.persist()
     return prior === undefined ? 'manual-lock' : 'manual-relock'
   }
 

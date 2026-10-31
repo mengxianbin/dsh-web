@@ -58,6 +58,14 @@ export interface Config {
   readonly meterKeyEnv?: string
   /** Balance guardrail policy; disabled by the 2026-10-27 ruling (no cash gate). */
   readonly balanceGuardrail?: { readonly enabled?: boolean; readonly minBalance?: number }
+  /**
+   * Steady-state reconciliation leg (2026-11-01 ruling A): every successful
+   * hold poll re-asserts the live policy targets — active sessions off-target
+   * are switched back (manual locks skipped) and a drifted deployment default
+   * is re-saved. On by default; `false` keeps edge-only behavior as the
+   * escape hatch short of disabling the whole controller.
+   */
+  readonly reconcile?: boolean
 }
 
 /**
@@ -90,6 +98,7 @@ export const Config: z<Config> = z.object({
     enabled: z.boolean(),
     minBalance: z.number(),
   }),
+  reconcile: z.boolean(),
 })
 
 /** Fully-resolved policy (defaults applied, ranges enforced). */
@@ -106,6 +115,7 @@ export interface ResolvedConfig {
   readonly meterUrl: string
   readonly meterKeyEnv: string
   readonly balanceGuardrail: BalanceGuardrailConfig
+  readonly reconcile: boolean
 }
 
 /** Lower poll bound: 30 s (2026-10-24 ruling). */
@@ -167,5 +177,6 @@ export function resolveConfig(config: Config, clampPoll?: (raw: number, clamped:
     meterUrl: config.meterUrl ?? 'https://opencode.ai/console/api/go/status',
     meterKeyEnv: config.meterKeyEnv ?? 'OC_GO_CC_API_KEY',
     balanceGuardrail: { enabled: config.balanceGuardrail?.enabled ?? false, ...config.balanceGuardrail?.minBalance === undefined ? {} : { minBalance: config.balanceGuardrail.minBalance } },
+    reconcile: config.reconcile ?? true,
   }
 }

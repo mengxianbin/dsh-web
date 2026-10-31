@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ManualLockTracker } from '../src/manual-lock.ts'
+import { ManualLockTracker, type ManualLockEntry } from '../src/manual-lock.ts'
 
 const GO = 'opencode-go/mimo-v2.6-flash' // live target at baseline (restoreTo)
 const MIMO = 'mimo/mimo-v2.6-flash' // live target when triggered (switchTo)
@@ -94,5 +94,79 @@ describe('ManualLockTracker (A case, 2026-10-27 人工锁定优先)', () => {
     const tracker = new ManualLockTracker()
     expect(tracker.snapshot()).toEqual([])
     expect(tracker.isLocked('s1')).toBe(false)
+  })
+})
+
+describe('ManualLockTracker — lock persistence (2026-11-01 ruling A 锁持久化)', () => {
+  /** Capturing store: returns what was last saved; optionally replays a load. */
+  function fakeStore(initial?: ManualLockEntry[]) {
+    const saves: ManualLockEntry[][] = []
+    let current = initial
+    return {
+      saves,
+      store: {
+        load: () => current,
+        save: (locks: readonly ManualLockEntry[]) => { current = [...locks]; saves.push([...locks]) },
+      },
+      clearInitial: () => { current = undefined },
+    }
+  }
+
+  it('restores persisted locks on construction — a restart cannot drag a parked session back', () => {
+    const parked: ManualLockEntry = { sessionId: 's1', value: MIMO, lockedAt: 10 }
+    const tracker = new ManualLockTracker(fakeStore([parked]).store)
+    expect(tracker.isLocked('s1')).toBe(true)
+    expect(tracker.snapshot()).toEqual([parked])
+    // And the restored lock skips edges exactly like a same-lifetime one.
+    expect(tracker.observe('s2', MIMO, 20, GO)).toBe('manual-lock')
+  })
+
+  it('persists every lock change: lock, relock (value refresh), and unlock', () => {
+    const rig = fakeStore()
+    const tracker = new ManualLockTracker(rig.store)
+    tracker.observe('s1', OTHER, 10, GO)                 // manual-lock
+    expect(rig.saves.at(-1)).toEqual([{ sessionId: 's1', value: OTHER, lockedAt: 10 }])
+    tracker.observe('s1', 'deepseek-official/x', 20, GO) // manual-relock
+    expect(rig.saves.at(-1)).toEqual([{ sessionId: 's1', value: 'deepseek-official/x', lockedAt: 20 }])
+    tracker.observe('s1', GO, 30, GO)                    // aligned-unlock
+    expect(rig.saves.at(-1)).toEqual([])
+    expect(rig.saves).toHaveLength(3)
+  })
+
+  it('does not write on observations that leave the lock set unchanged', () => {
+    const rig = fakeStore()
+    const tracker = new ManualLockTracker(rig.store)
+    tracker.observe('s1', GO, 10, GO)  // aligned, never locked
+    tracker.expect('s2', MIMO)
+    tracker.observe('s2', MIMO, 20, MIMO) // auto (controller's own write)
+    tracker.confirm('s2', MIMO)
+    expect(rig.saves).toEqual([])
+  })
+
+  it('a throwing store never breaks the tracker (persistence is best-effort)', () => {
+    const tracker = new ManualLockTracker({
+      load: () => { throw new Error('storage down') },
+      save: () => { throw new Error('disk full') },
+    })
+    // Load failure → cold start, no throw.
+    expect(tracker.snapshot()).toEqual([])
+    // Save failure → the lock still takes effect in memory.
+    expect(tracker.observe('s1', OTHER, 10, GO)).toBe('manual-lock')
+    expect(tracker.isLocked('s1')).toBe(true)
+  })
+
+  it('the own-write ledger deliberately does NOT persist (a lost ledger only locks more)', () => {
+    const rig = fakeStore()
+    const first = new ManualLockTracker(rig.store)
+    first.expect('s1', MIMO)
+    first.confirm('s1', MIMO) // controller owns mimo for s1
+    expect(rig.saves).toEqual([]) // ledger writes are not lock changes
+
+    // "Restart": ledger gone, locks empty.
+    rig.clearInitial()
+    const second = new ManualLockTracker(rig.store)
+    // The same value arriving with no ledger and a divergent target now locks:
+    // strictly more cautious than before the restart, never less.
+    expect(second.observe('s1', MIMO, 10, GO)).toBe('manual-lock')
   })
 })

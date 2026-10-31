@@ -16,6 +16,10 @@ describe('resolveConfig — ruling defaults (2026-10-24 参数包 · 2026-10-27 
     expect(config.meterUrl).toBe('https://opencode.ai/console/api/go/status')
     expect(config.meterKeyEnv).toBe('OC_GO_CC_API_KEY')
     expect(config.balanceGuardrail).toEqual({ enabled: false })
+    // Steady-state reconcile leg is ON by ruling default (2026-11-01 A); the
+    // field exists as the escape hatch short of disabling the controller.
+    expect(config.reconcile).toBe(true)
+    expect(resolveConfig({ reconcile: false }).reconcile).toBe(false)
   })
 })
 

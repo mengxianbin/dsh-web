@@ -84,3 +84,64 @@ describe('ActiveSetTracker — prune and view', () => {
     expect(tracker.view(1)).toHaveLength(1)
   })
 })
+
+describe('ActiveSetTracker — selection fold for the reconcile leg (2026-11-01 ruling A)', () => {
+  it('folds pending ?? used exactly like the harness model-selection projection', () => {
+    const tracker = new ActiveSetTracker()
+    // Nothing observed yet: the fold cannot judge (reconcile skips unknown).
+    expect(tracker.effectiveRoute('s1')).toBeUndefined()
+
+    // A request header is the first observation: used only.
+    tracker.recordRequest('s1', T0, undefined, 'mimo/mimo-v2.6-flash')
+    expect(tracker.effectiveRoute('s1')).toBe('mimo/mimo-v2.6-flash')
+
+    // A model/selection event becomes pending and outranks the used route —
+    // the NEXT request will use it, which is what reconcile judges.
+    tracker.recordSelection('s1', 'opencode-go/mimo-v2.6-flash')
+    expect(tracker.effectiveRoute('s1')).toBe('opencode-go/mimo-v2.6-flash')
+
+    // A request that USES the pending route retires it; the route stands as used.
+    tracker.recordRequest('s1', T0 + 1000, undefined, 'opencode-go/mimo-v2.6-flash')
+    expect(tracker.effectiveRoute('s1')).toBe('opencode-go/mimo-v2.6-flash')
+  })
+
+  it('keeps pending alive when a request uses a different route (stale in-flight header)', () => {
+    const tracker = new ActiveSetTracker()
+    tracker.recordSelection('s1', 'mimo/mimo-v2.6-flash')
+    // An in-flight request dispatched on the OLD route lands after the selection.
+    tracker.recordRequest('s1', T0, undefined, 'opencode-go/mimo-v2.6-flash')
+    // The selection is still pending: the next request uses mimo.
+    expect(tracker.effectiveRoute('s1')).toBe('mimo/mimo-v2.6-flash')
+  })
+
+  it('keeps the last known used route across a header without one', () => {
+    const tracker = new ActiveSetTracker()
+    tracker.recordRequest('s1', T0, undefined, 'opencode-go/mimo-v2.6-flash')
+    tracker.recordRequest('s1', T0 + 1000) // shape-guarded header: no config extracted
+    expect(tracker.effectiveRoute('s1')).toBe('opencode-go/mimo-v2.6-flash')
+  })
+
+  it('carries the fold through status updates and exposes it on the view', () => {
+    const tracker = new ActiveSetTracker()
+    tracker.recordSelection('s1', 'mimo/mimo-v2.6-flash')
+    tracker.recordStatus('s1', true)
+    expect(tracker.effectiveRoute('s1')).toBe('mimo/mimo-v2.6-flash')
+    expect(tracker.view(50).find(entry => entry.sessionId === 's1')).toMatchObject({ selection: 'mimo/mimo-v2.6-flash' })
+  })
+
+  it('prune drops the entry and its fold with it: the next use re-observes', () => {
+    const tracker = new ActiveSetTracker()
+    tracker.recordRequest('s1', T0, undefined, 'mimo/mimo-v2.6-flash')
+    expect(tracker.effectiveRoute('s1')).toBe('mimo/mimo-v2.6-flash')
+    tracker.prune(T0 + 60 * 60_000, WINDOW)
+    expect(tracker.effectiveRoute('s1')).toBeUndefined()
+  })
+
+  it('folds a selection for a session never seen before (born-on-wrong-side detection)', () => {
+    const tracker = new ActiveSetTracker()
+    tracker.recordSelection('fresh', 'mimo/mimo-v2.6-flash')
+    expect(tracker.effectiveRoute('fresh')).toBe('mimo/mimo-v2.6-flash')
+    // Not active yet (no request): outside the snapshot until it speaks.
+    expect(tracker.snapshot(T0, WINDOW)).toEqual([])
+  })
+})
