@@ -1,0 +1,120 @@
+import z from 'schemastery'
+
+/**
+ * Plugin config shape. Schemastery validates shape only (absent keys pass
+ * through); every default and clamp lives in {@link resolveConfig} so the
+ * ruled values have exactly one home.
+ */
+export interface Config {
+  /** Master switch for detection and logging (default true). */
+  enabled?: boolean
+  /** `shadow` logs decisions only; `live` also nudges (default shadow). */
+  mode?: 'shadow' | 'live'
+  /** Minimum spacing between planned revivals in ms (default and floor 10s). */
+  staggerMs?: number
+}
+
+export const Config: z<Config> = z.object({
+  enabled: z.boolean(),
+  mode: z.union([z.const('shadow'), z.const('live')]),
+  staggerMs: z.number(),
+})
+
+/** Fully resolved runtime config. */
+export interface ResolvedConfig {
+  enabled: boolean
+  mode: 'shadow' | 'live'
+  staggerMs: number
+}
+
+// ── Ruled parameters (design session-auto-revival-design-1102 §四; 实施不改值 —
+// changing any of these requires re-running the statistics scan and a new ruling).
+/** Rolling revival quota window: 4h per session chain (分罐不分池). */
+export const QUOTA_WINDOW_MS = 4 * 60 * 60 * 1000
+/** Revivals allowed per chain inside {@link QUOTA_WINDOW_MS}. */
+export const QUOTA_MAX = 4
+/** Revive -> die again within this window trips the session breaker. */
+export const BREAKER_WINDOW_MS = 10 * 60 * 1000
+/** Same-cause errors inside this window form one wave. */
+export const WAVE_WINDOW_MS = 15 * 60 * 1000
+/** No new same-cause error for this long releases the held sessions. */
+export const WAVE_COOLDOWN_MS = 5 * 60 * 1000
+/** Configurable stagger floor: below this a config value clamps up with a warn. */
+export const STAGGER_MIN_MS = 10_000
+/** Default revival stagger (design §四: 间隔可配，初值 10s). */
+export const STAGGER_DEFAULT_MS = 10_000
+/** Context watermark: at or above this many tokens a session parks, never nudges. */
+export const CONTEXT_LIMIT_TOKENS = 150_000
+
+/** Codes whose sessions are revived (design §4.2: 只计可复活类). */
+export const REVIVE_CODES: ReadonlySet<string> = new Set(['TRANSPORT', 'TIMEOUT'])
+
+/**
+ * Wall codes (design §4.2 撞墙类): zero quota consumption, no revival, the
+ * session suspends until `resetsAt`. The first seven entries are the design
+ * literal list; the following two blocks map its `AUTH` and `模型配置`
+ * categories onto the concrete codes the harness emits.
+ */
+export const WALL_CODES: ReadonlySet<string> = new Set([
+  // design §4.2 literal list
+  'QUOTA',
+  'AUTH',
+  'INVALID_REQUEST',
+  'MALFORMED_RESPONSE',
+  'NO_ADAPTER',
+  'UNKNOWN_MODEL',
+  'content_filter',
+  // design `模型配置` category -> harness model-configuration codes
+  'MODEL_UNSUPPORTED',
+  'INVALID_CONFIG',
+  'INVALID_MODEL_CONTEXT',
+  'INVALID_MODEL_INFO',
+  'INVALID_MODEL_MAX_TOKENS',
+  'INVALID_MODEL_REASONING',
+  // design `AUTH` category -> credential walls that carry their own codes
+  'INVALID_CREDENTIAL',
+  'MISSING_CREDENTIAL',
+  'ACCOUNT_SIGN_IN_REQUIRED',
+  'ACCOUNT_TOKEN_INVALID',
+])
+
+/** Failure classes of one `turn/end` error. */
+export type FailureClass = 'revive' | 'wall' | 'other'
+
+/**
+ * Classify an `LlmFailure.code`: revive-class enters the revival flow,
+ * wall-class records a zero-consumption suspension, everything else is
+ * observed and logged but never revived (design §4.2 enumeration).
+ */
+export function classifyFailure(code: string): FailureClass {
+  if (REVIVE_CODES.has(code)) return 'revive'
+  if (WALL_CODES.has(code)) return 'wall'
+  return 'other'
+}
+
+/** Nudge text a live revival queues into the session — the human continue. */
+export const NUDGE_TEXT = '继续'
+
+/**
+ * Apply defaults and clamps to one config validation pass.
+ * `mode` defaults to `shadow`: the plugin only writes structured logs until
+ * the turn-on switch is explicitly set to `live`.
+ * @param config - schema-validated config shape.
+ * @param warnStagger - called when `staggerMs` violates the ruled floor.
+ * @returns the resolved runtime config.
+ */
+export function resolveConfig(
+  config: Config,
+  warnStagger?: (raw: number, clamped: number) => void,
+): ResolvedConfig {
+  let staggerMs = config.staggerMs ?? STAGGER_DEFAULT_MS
+  if (!Number.isFinite(staggerMs) || staggerMs < STAGGER_MIN_MS) {
+    warnStagger?.(staggerMs, STAGGER_MIN_MS)
+    staggerMs = STAGGER_MIN_MS
+  }
+  return {
+    enabled: config.enabled ?? true,
+    mode: config.mode ?? 'shadow',
+    staggerMs,
+  }
+}
