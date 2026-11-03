@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { capEntries, deserializeAutoState, deserializeLedger, writeJsonAtomic } from '../src/host/ledger.ts'
+import { capEntries, deserializeAutoState, deserializeLedger, normalizeOverrideReason, OVERRIDE_NO_REASON, writeJsonAtomic } from '../src/host/ledger.ts'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -83,6 +83,46 @@ describe('ledger source whitelist', () => {
 
     // Then only the whitelisted entry is kept
     expect(Object.keys(restored.entries)).toEqual(['session-obs'])
+  })
+})
+
+describe('ledger override schema (contract C3)', () => {
+  it('operator keeps an override entry with reason and seal through a reload', () => {
+    // Given a document written by the seal gate: override + reason + seal
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-o': { archivedAt: 99, source: 'override', reason: '板行[x] 收口证据', seal: 'UNSEALED:sentinel-stale' },
+        'session-stale': { archivedAt: 100, source: 'manual', seal: 'stale' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the override source survives instead of being dropped (降级即丢账的同批修复)
+    expect(restored.entries).toEqual({
+      'session-o': { archivedAt: 99, source: 'override', reason: '板行[x] 收口证据', seal: 'UNSEALED:sentinel-stale' },
+      'session-stale': { archivedAt: 100, source: 'manual', seal: 'stale' },
+    })
+  })
+
+  it('operator gets malformed reason/seal fields dropped instead of trusted', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-x': { archivedAt: 1, source: 'override', reason: 42, seal: null },
+      },
+    })
+    expect(deserializeLedger(raw).entries).toEqual({ 'session-x': { archivedAt: 1, source: 'override' } })
+  })
+
+  it('every forced reason is normalized at the write layer', () => {
+    expect(normalizeOverrideReason(undefined)).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('')).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('   ')).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason(42)).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('  真实理由  ')).toBe('真实理由')
   })
 })
 describe('capEntries', () => {

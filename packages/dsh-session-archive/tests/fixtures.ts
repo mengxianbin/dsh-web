@@ -5,9 +5,10 @@
  * @module tests/fixtures.ts
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { zstdCompressSync } from 'node:zlib'
 import type { LedgerDocument } from '../src/host/ledger.ts'
 import type { InventorySources } from '../src/host/inventory.ts'
 
@@ -145,6 +146,59 @@ export function createFakeHost(options: {
     },
   }
   return host
+}
+
+/** One transcript message event in the shape the seal layer reads (`data.message.content`). */
+export function transcriptMessage(role: 'assistant' | 'user', text: string): Record<string, unknown> {
+  return { type: `${role}/message`, data: { message: { content: [{ type: 'text', text }] } } }
+}
+
+/** Shorthand for an assistant transcript message. */
+export function assistantMsg(text: string): Record<string, unknown> {
+  return transcriptMessage('assistant', text)
+}
+
+/** Shorthand for a user transcript message. */
+export function userMsg(text: string): Record<string, unknown> {
+  return transcriptMessage('user', text)
+}
+
+/**
+ * Write a real transcript for one session: the generation-named file
+ * (`session.vN.jsonl.zstd`), zstd-compressed, optionally split into two zstd
+ * frames (the append pattern real transcripts use) and optionally backdated
+ * (the LEGACY cut reads the file's mtime).
+ *
+ * @returns the transcript path.
+ */
+export function writeTranscript(
+  host: FakeHost,
+  id: string,
+  events: readonly Record<string, unknown>[],
+  options: { version?: number; frames?: number; mtimeMs?: number } = {},
+): string {
+  const project = join(host.home, 'sessions', '--Users-demo--')
+  mkdirSync(project, { recursive: true })
+  const dir = join(project, id.startsWith('session-') ? id.slice('session-'.length) : id)
+  mkdirSync(dir, { recursive: true })
+  const version = options.version ?? 0
+  const name = version === 0 ? 'session.jsonl.zstd' : `session.v${version}.jsonl.zstd`
+  const path = join(dir, name)
+  const lines = events.map((event) => JSON.stringify(event))
+  const frames: Buffer[] = []
+  const frameCount = options.frames ?? 1
+  if (frameCount > 1 && lines.length > 1) {
+    const mid = Math.ceil(lines.length / 2)
+    for (const part of [lines.slice(0, mid), lines.slice(mid)]) {
+      if (part.length === 0) continue
+      frames.push(zstdCompressSync(Buffer.from(`${part.join('\n')}\n`, 'utf8')))
+    }
+  } else {
+    frames.push(zstdCompressSync(Buffer.from(`${lines.join('\n')}\n`, 'utf8')))
+  }
+  writeFileSync(path, Buffer.concat(frames))
+  if (options.mtimeMs !== undefined) utimesSync(path, new Date(options.mtimeMs), new Date(options.mtimeMs))
+  return path
 }
 
 /** Write a projcache index file with the given session entries. */

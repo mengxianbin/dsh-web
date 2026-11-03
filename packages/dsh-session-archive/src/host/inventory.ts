@@ -176,7 +176,11 @@ export interface BuiltInventory {
 }
 
 /** Ledger entry for a session under either id spelling; canonical wins. */
-export function ledgerEntryFor(ledger: LedgerDocument, canonicalId: string, nativeId?: string): { archivedAt: number; source: LedgerSource } | undefined {
+export function ledgerEntryFor(
+  ledger: LedgerDocument,
+  canonicalId: string,
+  nativeId?: string,
+): { archivedAt: number; source: LedgerSource; reason?: string; seal?: string } | undefined {
   return ledger.entries[canonicalId] ?? (nativeId !== undefined && nativeId !== canonicalId ? ledger.entries[nativeId] : undefined)
 }
 
@@ -330,6 +334,10 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
     // The source only travels with a real archive time: a row without one has
     // nothing to attribute, and the UI keys the "backfilled" marker off it.
     const archivedAtSource = ledgerEntry?.source
+    // Forced-archive reason and seal marker ride the same way (contract C3):
+    // minimal inventory exposure, list-readable without any dedicated UI.
+    const reason = ledgerEntry?.reason
+    const seal = ledgerEntry?.seal
     if (archived && archivedAt === undefined) issues.push('no-archive-time')
     if (draft.fromFeed === false) issues.push('unreadable')
     if (draft.fromFeed === false && draft.hasDir === false) issues.push('no-data')
@@ -344,6 +352,8 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
       archived,
       ...(archivedAt !== undefined ? { archivedAt } : {}),
       ...(archivedAt !== undefined && archivedAtSource !== undefined ? { archivedAtSource } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(seal !== undefined ? { seal } : {}),
       ...(draft.lastActivityAt !== undefined ? { lastActivityAt: draft.lastActivityAt } : {}),
       lastActivityReliable: draft.lastActivityReliable,
       ...(sizeBytes !== undefined ? { sizeBytes } : {}),
