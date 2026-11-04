@@ -15,6 +15,7 @@ import { fetchGoMeters } from './meters.ts'
 import { makeStatusRoute } from './host/routes.ts'
 import { FileLockStore } from './lock-store.ts'
 import { dshHome } from './dsh-home.ts'
+import { removePollState, writePollState } from './poll-state.ts'
 
 export { Config } from './config.ts'
 export type { Config as AutoRouteConfig } from './config.ts'
@@ -24,6 +25,7 @@ export { decide, initialPolicyState, type PolicyState } from './policy.ts'
 export { fetchGoMeters, type MeterReading } from './meters.ts'
 export { FileLockStore } from './lock-store.ts'
 export type { LockStore } from './lock-store.ts'
+export { POLL_STATE_FILE, removePollState, writePollState, type PollStateSnapshot } from './poll-state.ts'
 export type { ReconcileRecord, TargetProblem } from './controller.ts'
 
 export const name = 'dsh-auto-route'
@@ -65,7 +67,12 @@ function routeOfRequestHeader(event: unknown): string | undefined {
  * Host-only package: no `dsh.client` face, nothing in the browser roster.
  */
 export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config): void => {
-  if (Config(config).enabled === false) return
+  if (Config(config).enabled === false) {
+    // Disabled = the plane must read as absent, never as a stale ledger the
+    // shield could mistake for a dead controller (2026-11-04 ruling).
+    removePollState()
+    return
+  }
   const resolved = resolveConfig(Config(config), (raw, clamped) => {
     ctx.logger.warn(`dsh-auto-route: pollIntervalMs ${raw} is outside the30–60 s ruling range; clamped to ${clamped}`)
   })
@@ -107,6 +114,9 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
       sessions: ctx.sessionController as unknown as SwitchApi,
       catalog: ctx.sessionController as unknown as CatalogApi,
       lockStore,
+      // Per-tick poll verdict → `<dsh-home>/auto-route-poll-state.json`
+      // (2026-11-04 ruling: the 安康盾 sustained-failure plane reads it).
+      onPoll: writePollState,
       ...(defaultModel === undefined ? {} : { defaultModel }),
     })
     // Durable model/selection events classify auto vs human (A case: a human
@@ -127,6 +137,9 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
     const disposeRoute = ctx.webServer.register(makeStatusRoute(controller))
     return () => {
       controller.stop()
+      // Unload removes the ledger too: an absent plane means "not attached",
+      // a lingering file would only age into the reader's stale bound.
+      removePollState()
       try { offRequest() } catch { /* listener already gone during shutdown */ }
       try { offStatus() } catch { /* listener already gone during shutdown */ }
       try { offSelection() } catch { /* listener already gone during shutdown */ }

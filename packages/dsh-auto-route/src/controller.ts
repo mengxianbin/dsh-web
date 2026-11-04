@@ -63,6 +63,13 @@ export interface AutoRouteDeps {
    * Omission keeps the pre-A in-memory behavior.
    */
   readonly lockStore?: LockStore
+  /**
+   * Publish every completed tick's poll verdict (2026-11-04 ruling: the
+   * 安康盾 sustained-failure plane rides this per-tick report — the harness
+   * reader judges both streak age and writer liveness from it). Omission
+   * keeps the status-endpoint-only behavior.
+   */
+  onPoll?(lastPoll: { at: number; ok: boolean; error?: string; failingSince?: number }): void
 }
 
 /** Per-session result of one switch pass. */
@@ -142,7 +149,13 @@ export interface AutoRouteStatusView {
     readonly targets: { readonly switchTo: ModelTarget; readonly restoreTo: ModelTarget }
     readonly readingAt?: number
     readonly windows?: readonly WindowMeter[]
-    readonly lastPoll?: { readonly at: number; readonly ok: boolean; readonly error?: string }
+    /**
+     * Last meter poll. On a failure streak `failingSince` stamps the FIRST
+     * consecutive failure (epoch ms) so a reader can tell a one-off blip from
+     * a sustained outage; it is absent while polls succeed (cleared on the
+     * first good read after a streak).
+     */
+    readonly lastPoll?: { readonly at: number; readonly ok: boolean; readonly error?: string; readonly failingSince?: number }
     readonly lastDefaultSwitch?: EdgeRecord
     readonly lastTrigger?: EdgeRecord
     readonly lastRestore?: EdgeRecord
@@ -180,7 +193,7 @@ export class AutoRouteController {
   private timer: ReturnType<typeof setTimeout> | undefined
   private inFlight = false
   private stopped = false
-  private lastPoll?: { at: number; ok: boolean; error?: string }
+  private lastPoll?: { at: number; ok: boolean; error?: string; failingSince?: number }
   private targetProblem?: TargetProblem
   private lastOutcome?: OutcomeRecord
   /** Latest reconcile pass (ruling A); absent until the first hold poll. */
@@ -266,10 +279,20 @@ export class AutoRouteController {
       }
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      this.lastPoll = { at: now, ok: false, error: detail.slice(0, 300) }
+      // Streak bookkeeping: the first consecutive failure stamps
+      // `failingSince`, later failures of the same streak keep it (a
+      // sustained-outage reader measures from the streak start, not the
+      // latest miss); a success above rewrites lastPoll without it.
+      const failingSince = this.lastPoll?.ok === false && this.lastPoll.failingSince !== undefined
+        ? this.lastPoll.failingSince
+        : now
+      this.lastPoll = { at: now, ok: false, error: detail.slice(0, 300), failingSince }
       this.deps.logger.warn(`dsh-auto-route: meter poll failed (state untouched): ${detail.slice(0, 300)}`)
     } finally {
       this.inFlight = false
+      // Report after every completed tick (success or failure): the reader
+      // treats a quiet writer as a dead loop, so the heartbeat must not skip.
+      if (this.lastPoll !== undefined) this.deps.onPoll?.(this.lastPoll)
     }
   }
 

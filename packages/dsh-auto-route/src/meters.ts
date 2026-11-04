@@ -51,6 +51,25 @@ function usd(microCents: number): number {
 }
 
 /**
+ * Flatten an error's `cause` chain into a bounded, secret-free suffix.
+ * Node's `fetch failed` is a wrapper whose reason lives in `cause` (and
+ * `cause.cause` for undici AggregateError); walk at most a few links and
+ * cap each message so one noisy socket error cannot bloat the status payload.
+ */
+function causeChain(error: unknown): string {
+  const parts: string[] = []
+  let current: unknown = (error as { cause?: unknown } | null)?.cause
+  let depth = 0
+  while (current !== undefined && current !== null && depth < 3) {
+    const text = current instanceof Error ? current.message : String(current)
+    if (text !== '') parts.push(text.slice(0, 160))
+    current = (current as { cause?: unknown }).cause
+    depth += 1
+  }
+  return parts.length === 0 ? '' : ` (cause: ${parts.join(' → ')})`
+}
+
+/**
  * Parse a micro-cents field into a finite number, else undefined.
  * The live go/status endpoint answers `usedMicroCents`/`limitMicroCents` as
  * JSON **strings** (verified live 2026-10-30), so a bare `typeof` number
@@ -87,7 +106,11 @@ export async function fetchGoMeters(options: MeterSourceOptions): Promise<MeterR
       signal: AbortSignal.timeout(15_000),
     })
   } catch (error) {
-    throw new MeterError(`meter source unreachable: ${error instanceof Error ? error.message : String(error)}`)
+    // `fetch failed` alone hides WHY (the observed 2026-11-04 blip): append
+    // the cause chain — connection refused / DNS / TLS — which carries no
+    // secret (the bearer key lives in headers, never in an error message).
+    const cause = causeChain(error)
+    throw new MeterError(`meter source unreachable: ${error instanceof Error ? error.message : String(error)}${cause}`)
   }
   if (!response.ok) {
     throw new MeterError(`meter source answered HTTP ${response.status}`)

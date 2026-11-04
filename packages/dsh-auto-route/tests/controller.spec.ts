@@ -13,6 +13,7 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
   let meterError: string | undefined
   const selects: { sessionId: string; provider: string; model: string; reasoningEffort?: string }[] = []
   const saves: { provider: string; model: string; reasoningEffort?: string }[] = []
+  const reported: { at: number; ok: boolean; error?: string; failingSince?: number }[] = []
   const failures = new Map<string, Error>()
   const logs: Record<'info' | 'warn' | 'error', string[]> = { info: [], warn: [], error: [] }
   const logger: ControllerLogger = {
@@ -50,9 +51,10 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
         [key, { key: key as WindowKey, used: ratio * 100, limit: 100, ratio }])) as MeterReading['windows']
       return { at: now, windows }
     },
+    onPoll: state => { reported.push({ ...state }) },
   })
   return {
-    rig: controller, tracker, selects, saves, logs, config,
+    rig: controller, tracker, selects, saves, logs, config, reported,
     advance: (ms: number) => { now += ms },
     setRatios: (next: Partial<Record<WindowKey, number>>) => { Object.assign(ratios, next) },
     failMetersWith: (message: string | undefined) => { meterError = message },
@@ -227,6 +229,52 @@ describe('auto-route guards', () => {
     env.setRatios({ week: 0.995 })
     await env.rig.tick()
     expect(env.phase()).toBe('triggered')
+  })
+
+  // 2026-11-04 ruling: the sustained-outage reader measures a failure streak
+  // from its FIRST miss — `failingSince` must survive consecutive failures
+  // and clear on the first good read.
+  it('stamps failingSince at the streak start, keeps it across misses, clears on recovery', async () => {
+    const env = rig()
+    env.failMetersWith('ECONNREFUSED')
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastPoll).toMatchObject({ ok: false, failingSince: 10_000_000 })
+
+    env.advance(45_000)
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastPoll).toMatchObject({ ok: false, at: 10_045_000, failingSince: 10_000_000 })
+
+    env.advance(45_000)
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastPoll).toMatchObject({ ok: false, at: 10_090_000, failingSince: 10_000_000 })
+
+    env.failMetersWith(undefined)
+    env.advance(45_000)
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastPoll).toMatchObject({ ok: true, at: 10_135_000 })
+    expect(env.rig.status().policy.lastPoll?.failingSince).toBeUndefined()
+
+    // A fresh streak after recovery starts a NEW stamp, not the old one.
+    env.advance(45_000)
+    env.failMetersWith('ECONNREFUSED')
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastPoll).toMatchObject({ ok: false, failingSince: 10_180_000 })
+  })
+
+  // 2026-11-04 ruling: the harness reader treats a quiet writer as a dead
+  // loop, so EVERY completed tick must report — success and failure alike.
+  it('reports every completed tick through onPoll (heartbeat must not skip)', async () => {
+    const env = rig()
+    await env.rig.tick()
+    expect(env.reported).toEqual([{ at: 10_000_000, ok: true }])
+    env.advance(45_000)
+    env.failMetersWith('ECONNREFUSED')
+    await env.rig.tick()
+    expect(env.reported).toHaveLength(2)
+    expect(env.reported[1]).toMatchObject({ at: 10_045_000, ok: false, failingSince: 10_045_000 })
+    env.advance(45_000)
+    await env.rig.tick() // a second consecutive miss keeps the streak stamp
+    expect(env.reported[2]).toMatchObject({ ok: false, failingSince: 10_045_000 })
   })
 
   it('classifies per-session failures: subagent rejections skip, others fail', async () => {

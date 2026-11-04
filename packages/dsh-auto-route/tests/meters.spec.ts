@@ -99,4 +99,26 @@ describe('fetchGoMeters — failures never read as zero usage', () => {
     await expect(fetchGoMeters({ url: 'u', key: KEY, meterKeyEnv: 'K', fetchImpl }))
       .rejects.toThrow('ECONNREFUSED')
   })
+
+  // 2026-11-04 ruling: a bare `fetch failed` hid the reason for the observed
+  // blip — the cause chain (refused/DNS/TLS) must survive into the message.
+  it('appends the cause chain when the fetch error is a wrapper', async () => {
+    const inner = new Error('connect ETIMEDOUT 127.0.0.1:7897')
+    const fetchImpl = (async () => { throw new TypeError('fetch failed', { cause: inner }) }) as unknown as typeof fetch
+    await expect(fetchGoMeters({ url: 'u', key: KEY, meterKeyEnv: 'K', fetchImpl }))
+      .rejects.toThrow(/fetch failed \(cause: connect ETIMEDOUT/)
+  })
+
+  it('bounds the cause chain and never emits the bearer key', async () => {
+    let deep: unknown = new Error('boom-1')
+    for (let i = 0; i < 6; i += 1) deep = new Error(`boom-${i + 2}`, { cause: deep })
+    const fetchImpl = (async () => { throw deep }) as unknown as typeof fetch
+    const error = await fetchGoMeters({ url: 'u', key: KEY, meterKeyEnv: 'K', fetchImpl }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(MeterError)
+    const message = (error as Error).message
+    expect(message).toContain('boom-7') // the top-level message survives
+    expect(message).toContain('boom-6 → boom-5 → boom-4') // exactly 3 cause links
+    expect(message).not.toContain('boom-3') // deeper links are dropped
+    expect(message).not.toContain(KEY)
+  })
 })
