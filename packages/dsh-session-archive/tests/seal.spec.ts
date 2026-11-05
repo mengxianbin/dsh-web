@@ -56,6 +56,17 @@ describe('seal grouping — green tier', () => {
     expect(result).toEqual({ id: 'session-a', verdict: 'NEUTRAL', detail: 'no-save-trace' })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
+
+  it('work traces without sentinel or save read UNSEALED work-trace-no-sentinel (补法 2026-11-05)', () => {
+    const host = createFakeHost()
+    withTranscript(host, 'session-a', [
+      userMsg('收口了吗'),
+      assistantMsg('落点头 = `03a153a0`（修 batch），任务回填进 tasks.md#some-anchor。'),
+    ])
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'work-trace-no-sentinel' })
+    expect(isGreenSeal(result.verdict)).toBe(false)
+  })
 })
 
 describe('seal grouping — unsealed tier', () => {

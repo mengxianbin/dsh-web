@@ -38,6 +38,17 @@ export const SENTINEL = /SAVE_STATUS=(DONE|PENDING\((\d+)\)|N_A)/
 /** Sentinel cut-in date; save sessions last touched before it read as LEGACY. */
 export const SENTINEL_ERA_START = Date.parse('2026-10-26T00:00:00+08:00')
 
+/**
+ * Work traces anywhere in the transcript (补法, decision-log 2026-11-04T16:27
+ * Effect(1), landed 2026-11-05): a backticked commit hash (same heuristic as
+ * the scanner's HASH_RE, board-row落点头 style — bare hex would collide with
+ * epoch-ms timestamps) or board-backfill features (taskRef / 随注 / 落点头 /
+ * tasks.md# anchor). Present with no sentinel and no save trace = real work
+ * without a save, so it must not fall into the default-pass NEUTRAL tier.
+ * Mirrors `WORK_TRACE` in scripts/dsh/session-sentinel-scan.mjs (contract C1).
+ */
+export const WORK_TRACE = /`[0-9a-f]{7,40}`|taskRef|随注|落点头|tasks\.md#/
+
 /** Detail code of the degraded pass-through tier (裁定① stale 分两档). */
 export const STALE_DETAIL = 'sentinel-stale'
 
@@ -50,6 +61,7 @@ const DETAIL = {
   saveTrace: 'save-trace-no-sentinel',
   stale: STALE_DETAIL,
   noSaveTrace: 'no-save-trace',
+  workTrace: 'work-trace-no-sentinel',
   legacy: 'legacy-save-no-sentinel',
   transcriptNotFound: 'transcript-not-found',
   decodeFail: 'decode-fail',
@@ -252,5 +264,9 @@ export function analyzeSeal(id: string, dir: string | undefined): SealCheckResul
     }
     return { id, verdict: 'UNSEALED', detail: DETAIL.saveTrace }
   }
+  // 补法闸 (2026-11-05): no sentinel, no save trace, but the transcript shows
+  // real work (commit hash / board backfill) — UNSEALED instead of the
+  // default-pass NEUTRAL, so the gate never silently swallows it.
+  if (WORK_TRACE.test(text)) return { id, verdict: 'UNSEALED', detail: DETAIL.workTrace }
   return { id, verdict: 'NEUTRAL', detail: DETAIL.noSaveTrace }
 }

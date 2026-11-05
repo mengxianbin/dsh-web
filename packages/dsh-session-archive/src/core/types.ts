@@ -37,7 +37,12 @@ export type OpReason =
 export type SealVerdict = 'DONE' | 'N_A' | 'UNSEALED' | 'NEUTRAL' | 'LEGACY' | 'UNKNOWN'
 
 /** Machine detail codes an `UNSEALED` verdict may carry (contract C1). */
-export type SealUnsealedDetail = 'sentinel-pending' | 'save-tail-no-sentinel' | 'save-trace-no-sentinel' | 'sentinel-stale'
+export type SealUnsealedDetail =
+  | 'sentinel-pending'
+  | 'save-tail-no-sentinel'
+  | 'save-trace-no-sentinel'
+  | 'sentinel-stale'
+  | 'work-trace-no-sentinel'
 
 /** One row served by `POST /seal-check` (contract C1). */
 export interface SealCheckResult {
