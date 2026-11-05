@@ -1,0 +1,42 @@
+# Agent Note: dsh-session-revive shadow-first session revival (4h x 4 quota, 10-minute breaker, same-cause wave probe, 150k watermark)
+
+Status: implemented
+
+## Problem
+
+Layer 1 of the three-layer session-continuity model (design doc `content/tech/ai/dsh/session-auto-revival-design-1102.md` in the m-note main tree) is mechanical revival: a session killed by a transport-class blip should wake back up on its own, within seconds, without a human. The statistics behind the ruling say both why it matters and why it needs brakes — 314 failed turns over 56 days across 1556 sessions, 68% revive-class (TRANSPORT 168 + TIMEOUT 45 = 213), and storms where 11 sessions died of the same network event inside one wave; naive per-error nudges would slam a flapping provider, burn the quota in a loop, and turn layer 1 into a revival storm of its own. What is needed is one account that decides every revival (quota, wall, breaker, wave, watermark), defaults to observing rather than acting, and writes a log good enough to tune the ruled parameters against before anyone flips a switch.
+
+## Decision
+
+- **Shadow-first host-only package `dsh-session-revive`** at `packages/dsh-session-revive` (no `dsh.client` face, link-install form like dsh-session-dispatch, no bundle-aggregate row). `mode: 'shadow'` is the default (`src/config.ts:117`) and the send gate is one line (`src/index.ts:106`): shadow runs the full decision account and withholds only the `prompt` call, so a night of shadow logs is exactly what live would have done.
+- **`src/policy.ts` is pure and time-explicit**: every entry point takes the event timestamp (tests drive a fake clock; the host passes `event.time` / `Date.now()`), timers live in the plugin shell only (`nextWakeAt` + one wake timer per wave cooldown), and state updates are mode-independent — shadow and live share one account.
+- **Classification per design §4.2**: revive-class is `TRANSPORT`/`TIMEOUT` (`src/config.ts:50`); wall-class is the design's literal list plus its `AUTH` and model-configuration category families (`src/config.ts:58`); everything else is observed and logged only. Wall deaths consume nothing and suspend until `resetsAt` — the stated `providerRetryAfterMs`, or unknown (held until a successful turn proves recovery), the conservative side of the 2026-11-01 "do not burn retries into a wall" ruling.
+- **Revival flow order**: breaker-trip check (permanent per-session stop with an evidence record) → wall suspension → 150k watermark → wave hold → chain quota → revive with a staggered `plannedAt`. The breaker fires on ANY re-death inside 10 minutes (design row 3 says "dies again" unqualified; a wall re-death is still a revival that failed to keep the session alive) and outranks the wave, so a loop candidate is stopped rather than deferred.
+- **Same-cause wave = same error code**: two or more identical codes inside 15 minutes open a wave; every later same-cause death holds at zero consumption until 5 quiet minutes pass, then releases through the full checks — the release leg bypasses re-holding because the quiet period itself is the release criterion (`src/policy.ts:299`) — with revives spaced by the global stagger slot (`plannedAt = max(now, lastPlanned + staggerMs)`, floor and default 10s, configurable upward).
+- **Ruled parameters are grep-assertable literals** in `src/config.ts`: 4h window `4 * 60 * 60 * 1000` (:33), `4` revivals per chain (:35), 10-minute breaker (:37), 15-minute wave window (:39), 5-minute cooldown (:41), `10_000` stagger floor (:43), `150_000` watermark (:47). The relay chain-count field exists in the quota structure only (`relayOf` + `bindRelay`, never called by v1).
+- **Watermark folds from `assistant/message` usage** as `inputTokens + cacheReadTokens` (the same context definition as the design's scan); latest observation wins; an unread watermark adds no boundary and is logged as `contextTokens: null`. At or above 150k both human and bot sessions park — the bot relay branch belongs to the relay line.
+- **Evidence surface**: one structured JSON line per record through the host logger, prefixed `dsh-session-revive ` and stamped with the active mode (detect / decision with quota, resets, watermark, wave and breaker fields / breaker trip / wave open and release / state clears), plus loopback-only `GET /api/session-revive/status` answering mode, counters, held/suspended/tripped state and per-chain quota for post-restart verification.
+
+## Ruled parameters and interpretations
+
+- Implemented verbatim from design §四 (实施不改值): all numbers above; the batch deliberately did NOT enable `live` — the turn-on switch exists in config only.
+- Interpretation recorded for design compliance: 同因 (same cause) means the error code — TRANSPORT and TIMEOUT wave independently, and mixed storms where neither code reaches two are bounded by the 4h x 4 quota instead; the first error of a forming wave is decided before the wave exists because a probe needs its second observation (bounded by breaker + quota, visible in the shadow account); suspension is monotonic (a later stated reset never shortens an earlier unknown hold); subagent children stay in scope (design covers all sessions) with `session.header.origin` logged as evidence; mid-turn silent deaths need the separate watchdog chain and stay out of scope.
+
+## Alternatives considered
+
+- Time-clustered waves as the statistics scan builds them (any error within 15 minutes = one wave): rejected for the runtime — the task book says same-cause, and per-cause holds stop a TIMEOUT blip from parking TRANSPORT sessions (or the reverse) while the quota still bounds the mixed-code case.
+- Holding every first error pending probe confirmation (the strictest reading of "probe first"): rejected — wave size p50 is 1, so the common lone error would always pay the 5-minute cooldown, breaking layer 1's seconds-to-minutes latency target.
+- Persisting the account under `$DSH_HOME` so it survives restarts and feeds the morning report directly: rejected for v1 — the design names structured logs as the evidence line, and an in-memory account keeps the plugin off the shared-file surface (no sync-shared dsh-home copy).
+- Suspending only when the provider states `providerRetryAfterMs`: rejected — credential and authorization walls typically state no retry-after, and those are exactly the walls an unguarded next TRANSPORT error would burn a revival into.
+- Omitting the status endpoint (logs only): rejected — the post-restart verification checklist needs a loopback answer proving `mode: shadow` and moving counters, mirroring dsh-session-dispatch's health surface.
+
+## Consequences
+
+- A Host restart wipes breaker, suspension, quota and wave state; the log stream is the only durable record, which makes the morning-report reader a real follow-up rather than a nicety (documented as a known limitation in the README).
+- Flipping `mode: 'live'` sends the `继续` nudge through a structural prompt API that unit tests only ever exercised against a fake session controller; the turn-on batch owns the verification checklist (status endpoint, decision lines, nudge outcome) before unattended trust.
+- Forgetting a disposed session also deletes its chain can: chains are session-scoped in v1, and the reserved `relayOf` map marks where the relay line must switch to origin-owned cleanup.
+- The sync-shared manifest gained three targets (mount-once, loopback, http) and its copy-count baseline moved 105 → 112 in this same change; the baseline was already stale at 109 on origin/dev, so the sweep is recorded here instead of left red.
+
+## Testing
+
+`tests/policy.spec.ts` (14 tests, explicit-timestamp fake clock) covers every mandated behavior — rolling 4h x 4 window with chain isolation, wall-class zero consumption plus suspension and unknown-reset clearing, breaker trip with evidence plus post-window non-trip, wave open/hold/cooldown-extension/staggered release with full re-checks, and the 150k watermark fold — plus relay-chain sharing, hold-dropped-on-success, forget, and detection edges. `tests/config.spec.ts` (5) locks the shadow default, the 10s clamp with warning, schema rejection, and the code classification table; `tests/routes.spec.ts` (3) locks the status endpoint's 200/403/405 contract. 22 tests total, with `pnpm typecheck`, `pnpm test`, `pnpm build`, `pnpm docs:check`, `pnpm i18n:check` and `node --test scripts/sync-shared.test.mjs` (4/4) all green. No test touches a real session lifecycle, so the sandbox rule was never engaged.

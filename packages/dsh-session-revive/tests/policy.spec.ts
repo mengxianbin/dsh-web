@@ -1,0 +1,354 @@
+import { describe, expect, it } from 'vitest'
+import {
+  BREAKER_WINDOW_MS,
+  QUOTA_WINDOW_MS,
+  STAGGER_MIN_MS,
+  WAVE_COOLDOWN_MS,
+} from '../src/config.ts'
+import { RevivalPolicy, type DecisionRecord, type PolicyRecord } from '../src/policy.ts'
+
+/** Fixed epoch so every arithmetic in the expectations is exact. */
+const T0 = 1_760_000_000_000
+const MIN = 60_000
+
+function policy(staggerMs: number = STAGGER_MIN_MS): RevivalPolicy {
+  return new RevivalPolicy({ staggerMs })
+}
+
+function decisions(records: PolicyRecord[]): DecisionRecord[] {
+  return records.filter((record): record is DecisionRecord => record.kind === 'decision')
+}
+
+function lastDecision(records: PolicyRecord[]): DecisionRecord {
+  const list = decisions(records)
+  expect(list.length).toBeGreaterThan(0)
+  return list[list.length - 1]
+}
+
+describe('rolling revival quota (4h x 4, per chain)', () => {
+  it('four revives inside the window exhaust the can, the window slides, and chains stay independent', () => {
+    const p = policy()
+    // Same-cause errors 16 min apart never form a wave, so each runs the full quota path.
+    const stamps = [0, 16, 32, 48, 64].map((min) => T0 + min * MIN)
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: stamps[0] }))).toMatchObject({
+      action: 'revive',
+      reason: 'ok',
+      chainId: 'A',
+      quotaUsed: 1,
+      quotaLimit: 4,
+      plannedAt: stamps[0],
+    })
+    for (const [index, at] of stamps.slice(1, 4).entries()) {
+      expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at }))).toMatchObject({
+        action: 'revive',
+        quotaUsed: index + 2,
+      })
+    }
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: stamps[4] }))).toMatchObject({
+      action: 'skip',
+      reason: 'quota-exhausted',
+      quotaUsed: 4,
+      quotaLimit: 4,
+    })
+    // The oldest stamp leaves the 4h window: one slot frees up again.
+    const slide = lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + QUOTA_WINDOW_MS + 1 }))
+    expect(slide).toMatchObject({ action: 'revive', quotaUsed: 4 })
+    // 分罐不分池: B's can is untouched by A's exhaustion (B errors after the
+    // slide, alone in the wave window once the last error aged out).
+    expect(
+      lastDecision(p.onError({ sessionId: 'B', code: 'TRANSPORT', at: T0 + QUOTA_WINDOW_MS + 17 * MIN })),
+    ).toMatchObject({
+      action: 'revive',
+      chainId: 'B',
+      quotaUsed: 1,
+    })
+  })
+})
+
+describe('wall-class codes (zero consumption + suspension)', () => {
+  it('records a zero-consumption suspension until resetsAt and releases after it', () => {
+    const p = policy()
+    const wall = lastDecision(p.onError({ sessionId: 'A', code: 'QUOTA', at: T0, providerRetryAfterMs: 60_000 }))
+    expect(wall).toMatchObject({
+      action: 'skip',
+      reason: 'wall-class',
+      quotaUsed: 0,
+      resetsAt: T0 + 60_000,
+    })
+    const duringHold = lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 30_000 }))
+    expect(duringHold).toMatchObject({
+      action: 'skip',
+      reason: 'wall-suspended',
+      quotaUsed: 0,
+      resetsAt: T0 + 60_000,
+    })
+    // Past resetsAt the wave window has aged the held-out error away, so the flow revives.
+    const after = lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 16 * MIN }))
+    expect(after).toMatchObject({ action: 'revive', quotaUsed: 1 })
+  })
+
+  it('treats an absent provider retry-after as an unknown reset and lets a success clear it', () => {
+    const p = policy()
+    expect(lastDecision(p.onError({ sessionId: 'B', code: 'AUTH', at: T0 }))).toMatchObject({
+      action: 'skip',
+      reason: 'wall-class',
+      resetsAt: null,
+      quotaUsed: 0,
+    })
+    expect(lastDecision(p.onError({ sessionId: 'B', code: 'TRANSPORT', at: T0 + 30_000 }))).toMatchObject({
+      reason: 'wall-suspended',
+      resetsAt: null,
+    })
+    // A stated reset never shortens an unknown hold (monotonic suspension).
+    lastDecision(p.onError({ sessionId: 'B', code: 'QUOTA', at: T0 + 40_000, providerRetryAfterMs: 5_000 }))
+    expect(p.snapshot(T0 + 50_000).suspended).toBe(1)
+    expect(p.onSuccess('B', T0 + 60_000)).toEqual([
+      { kind: 'state', at: T0 + 60_000, sessionId: 'B', event: 'clear', cleared: ['suspended'] },
+    ])
+    expect(p.snapshot(T0 + 60_000).suspended).toBe(0)
+  })
+})
+
+describe('10-minute breaker', () => {
+  it('trips with evidence when the session dies again inside the window and stops it for good', () => {
+    const p = policy()
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'revive',
+      plannedAt: T0,
+    })
+    const redeath = p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 9 * MIN })
+    expect(redeath.find((r) => r.kind === 'wave')).toMatchObject({ event: 'open', cause: 'TRANSPORT' })
+    expect(redeath.find((r) => r.kind === 'breaker')).toMatchObject({
+      event: 'trip',
+      sessionId: 'A',
+      revivedAt: T0,
+      diedAt: T0 + 9 * MIN,
+      gapMs: 9 * MIN,
+      code: 'TRANSPORT',
+    })
+    // The breaker outranks the wave: the opened wave does not get to hold this session.
+    expect(lastDecision(redeath)).toMatchObject({
+      action: 'skip',
+      reason: 'breaker-trip',
+      quotaUsed: 1,
+      breaker: { revivedAt: T0, diedAt: T0 + 9 * MIN, gapMs: 9 * MIN },
+    })
+    expect(
+      lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 30 * MIN })),
+    ).toMatchObject({ action: 'skip', reason: 'breaker-stopped' })
+    expect(p.snapshot(T0 + 30 * MIN).tripped).toEqual(['A'])
+    expect(p.snapshot(T0 + 30 * MIN).counters.breakerTrips).toBe(1)
+  })
+
+  it('does not trip when the re-death lands after the window', () => {
+    const p = policy()
+    p.onError({ sessionId: 'C', code: 'TRANSPORT', at: T0 })
+    // 16 min later: past the breaker window and past the 15 min wave window,
+    // so the error runs the plain quota path instead of a hold or a trip.
+    const later = lastDecision(p.onError({ sessionId: 'C', code: 'TRANSPORT', at: T0 + BREAKER_WINDOW_MS + 6 * MIN }))
+    expect(later).toMatchObject({ action: 'revive', quotaUsed: 2 })
+    expect(p.snapshot(later.at).counters.breakerTrips).toBe(0)
+  })
+})
+
+describe('same-cause wave probe', () => {
+  it('holds from the second same-cause error, extends on new errors, and releases a staggered batch after the quiet period', () => {
+    const p = policy()
+    // First error of the batch: no wave exists yet, so the fast path decides it.
+    expect(lastDecision(p.onError({ sessionId: 's1', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'revive',
+      quotaUsed: 1,
+    })
+    const open = p.onError({ sessionId: 's2', code: 'TRANSPORT', at: T0 + MIN })
+    expect(open.find((r) => r.kind === 'wave')).toMatchObject({
+      event: 'open',
+      cause: 'TRANSPORT',
+      count: 2,
+      releaseAt: T0 + MIN + WAVE_COOLDOWN_MS,
+    })
+    expect(lastDecision(open)).toMatchObject({
+      action: 'hold',
+      reason: 'wave-hold',
+      quotaUsed: 0,
+      wave: { cause: 'TRANSPORT', count: 2 },
+    })
+    expect(lastDecision(p.onError({ sessionId: 's3', code: 'TRANSPORT', at: T0 + 2 * MIN }))).toMatchObject({
+      action: 'hold',
+      quotaUsed: 0,
+    })
+    // A different cause runs its own probe: TIMEOUT count 1 is not a wave.
+    expect(lastDecision(p.onError({ sessionId: 't1', code: 'TIMEOUT', at: T0 + 2 * MIN + 1_000 }))).toMatchObject({
+      action: 'revive',
+      code: 'TIMEOUT',
+    })
+    // A new same-cause error extends the cooldown.
+    expect(lastDecision(p.onError({ sessionId: 's4', code: 'TRANSPORT', at: T0 + 3 * MIN }))).toMatchObject({
+      action: 'hold',
+      quotaUsed: 0,
+    })
+    expect(p.nextWakeAt()).toBe(T0 + 3 * MIN + WAVE_COOLDOWN_MS)
+    // The quiet period has not elapsed: nothing releases.
+    expect(p.releaseDue(T0 + 3 * MIN + WAVE_COOLDOWN_MS - 1)).toEqual([])
+    const released = p.releaseDue(T0 + 3 * MIN + WAVE_COOLDOWN_MS)
+    expect(released.find((r) => r.kind === 'wave')).toMatchObject({
+      event: 'release',
+      cause: 'TRANSPORT',
+      held: 3,
+    })
+    // Full checks re-run at release (the window still counts >= 2, but the
+    // quiet period is what released them), each revive consumes its own can,
+    // and the global stagger slot spaces the batch.
+    const revives = decisions(released)
+      .filter((d) => d.action === 'revive')
+      .sort((a, b) => a.plannedAt! - b.plannedAt!)
+    expect(revives.map((d) => d.sessionId)).toEqual(['s2', 's3', 's4'])
+    expect(revives.map((d) => d.plannedAt)).toEqual([
+      T0 + 3 * MIN + WAVE_COOLDOWN_MS,
+      T0 + 3 * MIN + WAVE_COOLDOWN_MS + 10_000,
+      T0 + 3 * MIN + WAVE_COOLDOWN_MS + 20_000,
+    ])
+    expect(revives.map((d) => d.quotaUsed)).toEqual([1, 1, 1])
+    expect(revives.every((d) => d.reason === 'ok')).toBe(true)
+    expect(p.nextWakeAt()).toBeNull()
+  })
+
+  it('spaces a released batch by the configured stagger', () => {
+    const p = policy(30_000)
+    p.onError({ sessionId: 'a', code: 'TRANSPORT', at: T0 })
+    p.onError({ sessionId: 'b', code: 'TRANSPORT', at: T0 + MIN })
+    p.onError({ sessionId: 'c', code: 'TRANSPORT', at: T0 + 2 * MIN })
+    const base = T0 + 2 * MIN + WAVE_COOLDOWN_MS
+    const revives = decisions(p.releaseDue(base))
+      .filter((d) => d.action === 'revive')
+      .sort((x, y) => x.plannedAt! - y.plannedAt!)
+    expect(revives.map((d) => d.plannedAt)).toEqual([base, base + 30_000])
+    expect(revives[1].plannedAt! - revives[0].plannedAt!).toBe(30_000)
+  })
+
+  it('drops a session from the pending release once a success proves it alive', () => {
+    const p = policy()
+    p.onError({ sessionId: 'x', code: 'TRANSPORT', at: T0 })
+    p.onError({ sessionId: 'y', code: 'TRANSPORT', at: T0 + MIN })
+    expect(p.nextWakeAt()).toBe(T0 + MIN + WAVE_COOLDOWN_MS)
+    expect(p.onSuccess('y', T0 + 2 * MIN)).toEqual([
+      { kind: 'state', at: T0 + 2 * MIN, sessionId: 'y', event: 'clear', cleared: ['held'] },
+    ])
+    expect(p.nextWakeAt()).toBeNull()
+    expect(p.releaseDue(T0 + MIN + WAVE_COOLDOWN_MS)).toEqual([])
+  })
+
+  it('re-runs the quota check at release against the chain the reserved relay field points to', () => {
+    const p = policy()
+    // Origin O fills its can before the wave (16 min spacing keeps each alone in the window).
+    for (const min of [64, 48, 32, 16]) {
+      expect(lastDecision(p.onError({ sessionId: 'O', code: 'TRANSPORT', at: T0 - min * MIN }))).toMatchObject({
+        action: 'revive',
+        quotaUsed: [1, 2, 3, 4][[64, 48, 32, 16].indexOf(min)],
+      })
+    }
+    // w1 opens the window alone (revives), R joins and is held by the wave.
+    expect(lastDecision(p.onError({ sessionId: 'w1', code: 'TRANSPORT', at: T0 }))).toMatchObject({ action: 'revive' })
+    expect(lastDecision(p.onError({ sessionId: 'R', code: 'TRANSPORT', at: T0 + MIN }))).toMatchObject({
+      action: 'hold',
+      reason: 'wave-hold',
+      quotaUsed: 0,
+    })
+    p.bindRelay('R', 'O')
+    const released = p.releaseDue(T0 + MIN + WAVE_COOLDOWN_MS)
+    // The chain was filled while R waited: release refuses the revival, zero further consumption.
+    expect(lastDecision(released)).toMatchObject({
+      action: 'skip',
+      reason: 'quota-exhausted',
+      chainId: 'O',
+      quotaUsed: 4,
+    })
+  })
+})
+
+describe('150k context watermark', () => {
+  it('parks at or above the limit with evidence and revives below it', () => {
+    const parked = policy()
+    parked.recordUsage('big', 160_000)
+    expect(lastDecision(parked.onError({ sessionId: 'big', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'skip',
+      reason: 'context-limit',
+      contextTokens: 160_000,
+      quotaUsed: 0,
+    })
+    const allowed = policy()
+    allowed.recordUsage('ok', 140_000)
+    expect(lastDecision(allowed.onError({ sessionId: 'ok', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'revive',
+      contextTokens: 140_000,
+    })
+  })
+
+  it('folds the latest usage (shrink un-parks) and leaves an unread watermark open', () => {
+    const p = policy()
+    p.recordUsage('shrunk', 160_000)
+    p.recordUsage('shrunk', 149_999)
+    expect(lastDecision(p.onError({ sessionId: 'shrunk', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'revive',
+      contextTokens: 149_999,
+    })
+    // 16 min later the first error has aged out of the wave window, so the
+    // second session decides on its own merits (unread watermark: no boundary).
+    expect(lastDecision(p.onError({ sessionId: 'fresh', code: 'TRANSPORT', at: T0 + 16 * MIN }))).toMatchObject({
+      action: 'revive',
+      contextTokens: null,
+    })
+  })
+})
+
+describe('reserved relay chain field', () => {
+  it('shares one can across the bound chain while unbound sessions stay independent', () => {
+    const p = policy()
+    for (const [index, min] of [64, 48, 32, 16].entries()) {
+      expect(lastDecision(p.onError({ sessionId: 'O', code: 'TRANSPORT', at: T0 - min * MIN }))).toMatchObject({
+        action: 'revive',
+        quotaUsed: index + 1,
+      })
+    }
+    p.bindRelay('R', 'O')
+    // R alone in the wave window: its decision runs against O's full can.
+    const relay = lastDecision(p.onError({ sessionId: 'R', code: 'TRANSPORT', at: T0 }))
+    expect(relay).toMatchObject({ action: 'skip', reason: 'quota-exhausted', chainId: 'O', quotaUsed: 4 })
+    // An unbound session later keeps its own can.
+    const solo = lastDecision(p.onError({ sessionId: 'F', code: 'TRANSPORT', at: T0 + 16 * MIN }))
+    expect(solo).toMatchObject({ action: 'revive', chainId: 'F', quotaUsed: 1 })
+    expect(p.snapshot(T0 + 16 * MIN).quota).toContainEqual({ chainId: 'O', used: 4 })
+  })
+})
+
+describe('detection and lifecycle edges', () => {
+  it('observes wall and other codes without consuming, and other codes never suspend', () => {
+    const p = policy()
+    const wall = p.onError({ sessionId: 'w', code: 'MALFORMED_RESPONSE', at: T0 })
+    expect(wall[0]).toMatchObject({ kind: 'detect', cls: 'wall', code: 'MALFORMED_RESPONSE' })
+    expect(lastDecision(wall)).toMatchObject({ action: 'skip', reason: 'wall-class' })
+    expect(p.snapshot(T0).suspended).toBe(1)
+    // A non-revive, non-wall code is observed and skipped with no suspension.
+    const other = p.onError({ sessionId: 'o', code: 'PI_AI_ERROR', at: T0 })
+    expect(other[0]).toMatchObject({ kind: 'detect', cls: 'other' })
+    expect(lastDecision(other)).toMatchObject({ action: 'skip', reason: 'non-revive-class', quotaUsed: 0 })
+    expect(p.snapshot(T0).suspended).toBe(1)
+    // The other-class death did not park its session: the next revive-class error runs normally.
+    expect(lastDecision(p.onError({ sessionId: 'o', code: 'TRANSPORT', at: T0 + MIN }))).toMatchObject({
+      action: 'revive',
+      quotaUsed: 1,
+    })
+  })
+
+  it('forget drops the session can, its holds, and the wake deadline', () => {
+    const p = policy()
+    p.onError({ sessionId: 'g', code: 'TRANSPORT', at: T0 })
+    p.onError({ sessionId: 'h', code: 'TRANSPORT', at: T0 + MIN })
+    expect(p.nextWakeAt()).not.toBeNull()
+    p.forget('g')
+    p.forget('h')
+    expect(p.nextWakeAt()).toBeNull()
+    const snap = p.snapshot(T0 + MIN)
+    expect(snap.quota.find((q) => q.chainId === 'g')).toBeUndefined()
+    expect(snap.held).toBe(0)
+  })
+})

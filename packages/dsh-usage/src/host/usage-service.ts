@@ -652,6 +652,19 @@ export class UsageService {
       resolve(ref: unknown): Promise<{ value: string } | undefined>
     }>(this.ctx, 'credentials')
     if (credentials === undefined) return { kind: 'none' }
+    // The MiMo balance probe rides the platform SSO session cookie
+    // (MIMO_PLATFORM_COOKIE), never the sk- chat key: mimo's only balance
+    // endpoint is the cookie-gated platform console API. An absent env reads
+    // as no credential — the balance fact then degrades to absent and the
+    // chat key keeps its own pi-ai path untouched. FORK usage-glance-mimo-balance.
+    if (provider === 'mimo') {
+      try {
+        const cookie = await credentials.resolve(credentialRef('MIMO_PLATFORM_COOKIE'))
+        if (cookie?.value !== undefined && cookie.value !== '') return { kind: 'env', key: cookie.value }
+      } catch {
+        // Malformed references read as absent.
+      }
+    }
     try {
       const record = await credentials.readRecord(credentialKey('llm-pi-ai', provider))
       if (record?.kind === 'api-key' && typeof record.key === 'string' && record.key !== '') {

@@ -44195,6 +44195,11 @@ window.__ModuleLoader__.load({
 			if (usedNum === void 0 || limitNum === void 0 || limitNum <= 0) return void 0;
 			return Math.max(0, Math.min(100, usedNum / limitNum * 100));
 		}
+		/** Console meter micro-cents (1e8 = one currency unit) to major units, else undefined. */
+		function microCents(value) {
+			const num = toNum(value);
+			return num === void 0 ? void 0 : num / 1e8;
+		}
 		function bearer(apiKey) {
 			return { authorization: `Bearer ${apiKey}` };
 		}
@@ -44345,33 +44350,52 @@ window.__ModuleLoader__.load({
 				}
 			};
 		}
-		/** OpenCode Go quota: percent-only rolling/weekly/monthly windows. */
+		/**
+		* OpenCode Go quota: absolute water-line meters from the console status
+		* endpoint (2026-10-24 switch; the old percent-only `/zen/go/v1/usage` read
+		* carried no absolute amounts, so a consumed/limit pair could never render
+		* or feed a threshold trigger). `limitMicroCents`/`usedMicroCents` become
+		* dollars once divided by 1e8; percent derives from that same pair, so the
+		* percentage and the absolute reading can never disagree. Each meter keeps
+		* its genuine `resetsAt`, so consumers deriving elapsed/total days from it
+		* continue to work; the keep-at-0 semantics recorded in agent note
+		* `2026-10-17-usage-opencode-zero-percent-keeps-resets-at` carries over —
+		* a used-0 meter still reports its real next reset. Verified live against
+		* `https://opencode.ai/console/api/go/status` with the resolved bearer key
+		* on 2026-10-24 (HTTP 200, no session cookie or org header required).
+		*/
 		const OPENCODE_GO = {
 			ids: ["opencode-go"],
 			displayName: "OpenCode Go",
 			plan: {
 				build: ({ apiKey }) => ({
-					url: "https://opencode.ai/zen/go/v1/usage",
+					url: "https://opencode.ai/console/api/go/status",
 					headers: bearer(apiKey)
 				}),
 				parse: (status, body) => {
 					if (status !== 200 || typeof body !== "object" || body === null) return void 0;
-					const usage = body.usage;
-					if (typeof usage !== "object" || usage === null) return void 0;
+					const access = body.access;
+					if (typeof access !== "object" || access === null) return void 0;
+					const meters = access.meters;
+					if (typeof meters !== "object" || meters === null) return void 0;
 					const windows = [];
 					for (const [field, key] of [
-						["rolling", "5h"],
-						["weekly", "week"],
-						["monthly", "month"]
+						["fiveHour", "5h"],
+						["week", "week"],
+						["month", "month"]
 					]) {
-						const entry = usage[field];
+						const entry = meters[field];
 						if (typeof entry !== "object" || entry === null) continue;
 						const row = entry;
-						const percent = toNum(row.percent);
+						const limit = microCents(row.limitMicroCents);
+						const used = microCents(row.usedMicroCents);
 						windows.push({
 							key,
-							percent: percent === void 0 ? void 0 : Math.max(0, Math.min(100, percent)),
-							resetsAt: toIso(row.resetsAt)
+							percent: usedPercent(used, limit),
+							resetsAt: toIso(row.resetsAt),
+							...used === void 0 ? {} : { used },
+							...limit === void 0 ? {} : { limit },
+							currency: "USD"
 						});
 					}
 					if (windows.length === 0) return void 0;
