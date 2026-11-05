@@ -44578,7 +44578,31 @@ window.__ModuleLoader__.load({
 			OPENROUTER,
 			siliconFlow("api.siliconflow.cn", ["siliconflow", "siliconflow-cn"], "CNY"),
 			siliconFlow("api.siliconflow.com", ["siliconflow-intl"], "USD"),
-			ZENMUX
+			ZENMUX,
+			{
+				ids: ["mimo"],
+				displayName: "MiMo",
+				balance: {
+					build: ({ apiKey }) => ({
+						url: "https://platform.xiaomimimo.com/api/v1/balance",
+						headers: { cookie: apiKey }
+					}),
+					parse: (status, body) => {
+						if (status !== 200 || typeof body !== "object" || body === null) return void 0;
+						const root = body;
+						if (root.code !== 0) return void 0;
+						const data = root.data;
+						if (typeof data !== "object" || data === null) return void 0;
+						const currency = str(data.currency);
+						const total = str(data.balance);
+						if (currency === void 0 || total === void 0) return void 0;
+						return {
+							currency,
+							totalBalance: total
+						};
+					}
+				}
+			}
 		];
 		/** Find the adapter serving a provider route key, if any. */
 		function adapterFor(provider) {

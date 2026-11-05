@@ -14,11 +14,38 @@ import { isLoopbackRequest } from './loopback.ts'
 
 export const DISPATCH_API_PREFIX = '/api/session-dispatch'
 
+/** Top-level send endpoint: delivery to an existing Session (not under the dispatch prefix). */
+export const SESSION_SEND_API_PREFIX = '/api/session-send'
+
 /** Dispatch prompts are prose task books; 1 MiB covers very long ones with margin. */
 const BODY_MAX_BYTES = 1_000_000
 
+/** Prompt prose cap shared by the dispatch and send routes (900,000 characters). */
+const PROMPT_MAX_CHARS = 900_000
+
 /** Permission presets composed by the web profile's permission row. */
 export const DISPATCH_PERMISSIONS = ['read-only', 'workspace-write', 'danger-full-access'] as const
+
+/**
+ * The attention class of a dispatched Session (triclass, user ruling
+ * 2026-10-29): `human` sessions take the default pin (human-dispatched
+ * work), `bot-boss` sessions take it as well (bot duty: rotation shifts,
+ * watchdog takeovers), and `bot-worker` sessions stay unpinned
+ * (bot-dispatched task work). Absent on the wire means `human` — a caller
+ * that forgets the field fails toward attention, not toward burying the
+ * session. The pre-triclass value `bot` is still accepted on the wire and
+ * normalizes to `bot-worker`, so in-flight callers dispatching under the
+ * old two-value SKILL text keep working across the restart window.
+ */
+export type SessionClass = 'human' | 'bot-boss' | 'bot-worker'
+
+/** Every accepted wire spelling, including the legacy `bot` alias. */
+const SESSION_CLASS_WIRE = ['human', 'bot-boss', 'bot-worker', 'bot'] as const
+
+/** Narrow a raw wire value to the accepted sessionClass spellings. */
+function isWireSessionClass(value: unknown): value is SessionClass | 'bot' {
+  return (SESSION_CLASS_WIRE as readonly unknown[]).includes(value)
+}
 
 /** One validated dispatch request. */
 export interface DispatchRequest {
@@ -28,6 +55,7 @@ export interface DispatchRequest {
   readonly mode?: string
   readonly permission?: string
   readonly taskRef?: string
+  readonly sessionClass?: SessionClass
 }
 
 /**
@@ -81,6 +109,18 @@ export interface DispatchAgentRegistry {
   get(sessionId: string): unknown
 }
 
+/** Neutral attention-classification surface consumed by the dispatch route. */
+export interface DispatchAttentionApi {
+  /**
+   * Record the declared class for a freshly created Session and apply its
+   * default pin state; a rejection is reported as `attentionRecorded: false`
+   * and never fails the dispatch itself.
+   * @param sessionId - id returned by the session create call.
+   * @param sessionClass - declared class (wire default applied by the route).
+   */
+  declare(sessionId: string, sessionClass: SessionClass): Promise<void>
+}
+
 /** Neutral slash-command executor consumed by the optional permission pin. */
 export interface DispatchCommandExecutor {
   execute(agent: unknown, line: string, attachments: readonly never[], signal: AbortSignal): Promise<{ result?: { kind?: string; text?: string } } | undefined>
@@ -94,6 +134,8 @@ export interface DispatchServices {
   readonly commands?: DispatchCommandExecutor
   /** Quick-ledger binding store; when absent, taskRef dispatches record nothing and never 409. */
   readonly bindings?: DispatchBindingStore
+  /** Attention ledger; when absent, dispatches record no class and apply no pin default. */
+  readonly attention?: DispatchAttentionApi
 }
 
 /** Body-parse verdict. */
@@ -110,14 +152,14 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
     return { ok: false, error: 'body must be a JSON object' }
   }
   const record = body as Record<string, unknown>
-  const { workspaceId, prompt, title, mode, permission, taskRef } = record
+  const { workspaceId, prompt, title, mode, permission, taskRef, sessionClass } = record
   if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
     return { ok: false, error: 'workspaceId must be a non-empty string' }
   }
   if (typeof prompt !== 'string' || prompt.trim() === '') {
     return { ok: false, error: 'prompt must be a non-empty string' }
   }
-  if (prompt.length > 900_000) {
+  if (prompt.length > PROMPT_MAX_CHARS) {
     return { ok: false, error: 'prompt exceeds the 900000-character dispatch limit' }
   }
   if (title !== undefined && (typeof title !== 'string' || title.trim() === '' || title.length > 500)) {
@@ -136,6 +178,9 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       return { ok: false, error: 'taskRef must be a non-empty string of at most 2000 characters' }
     }
   }
+  if (sessionClass !== undefined && !isWireSessionClass(sessionClass)) {
+    return { ok: false, error: `sessionClass must be one of ${SESSION_CLASS_WIRE.slice(0, 3).join(' | ')}` }
+  }
   return {
     ok: true,
     value: {
@@ -145,6 +190,9 @@ export function parseDispatchBody(body: unknown): DispatchBodyResult {
       ...(mode === undefined ? {} : { mode: mode.trim() }),
       ...(permission === undefined ? {} : { permission }),
       ...(taskRef === undefined ? {} : { taskRef: taskRef.trim() }),
+      // Legacy `bot` collapses to `bot-worker` so the ledger only ever holds
+      // triclass values; `sessionClass ?? 'human'` below is the wire default.
+      ...(sessionClass === undefined ? {} : { sessionClass: sessionClass === 'bot' ? 'bot-worker' : sessionClass }),
     },
   }
 }
@@ -217,7 +265,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, 400, { ok: false, error: parsed.error })
         return
       }
-      const { workspaceId, prompt, title, mode, permission, taskRef } = parsed.value
+      const { workspaceId, prompt, title, mode, permission, taskRef, sessionClass } = parsed.value
       if (services.workspaces.get(workspaceId) === undefined) {
         writeJson(res, 404, { ok: false, error: `workspace not found: ${workspaceId}` })
         return
@@ -246,12 +294,22 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         }
         const signal = new AbortController().signal
         let sessionId: string
+        let attentionError: string | undefined
         try {
           const created = await services.sessions.create({
             workspaceId,
             ...(mode === undefined ? {} : { agentPreset: mode }),
           })
           sessionId = created.sessionId
+          if (services.attention !== undefined) {
+            try {
+              await services.attention.declare(sessionId, sessionClass ?? 'human')
+            } catch (error) {
+              // Attention is a classification side effect: a ledger failure is
+              // reported alongside the binding's, never as a dispatch failure.
+              attentionError = errorDetail(error)
+            }
+          }
           if (title !== undefined) {
             await services.sessions.rename({ sessionId, title })
           }
@@ -292,11 +350,21 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           } catch (error) {
             // The session is live and prompting; a ledger write failure is
             // reported but does not turn a successful dispatch into a 5xx.
-            writeJson(res, 200, { ok: true, sessionId, bindingRecorded: false, bindingError: errorDetail(error) }, { 'cache-control': 'no-store' })
+            writeJson(res, 200, {
+              ok: true,
+              sessionId,
+              bindingRecorded: false,
+              bindingError: errorDetail(error),
+              ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+            }, { 'cache-control': 'no-store' })
             return
           }
         }
-        writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
+        writeJson(res, 200, {
+          ok: true,
+          sessionId,
+          ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+        }, { 'cache-control': 'no-store' })
       }
       if (taskRef !== undefined && services.bindings !== undefined) {
         await runQueued(taskRef, proceed)
@@ -340,6 +408,93 @@ export function makeBindingsRoute(bindings: DispatchBindingStore): WebRoute {
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })
       }
+    },
+  }
+}
+
+/** One validated session-send request. Deliberately mode-free: delivery is queue-only. */
+export interface SessionSendRequest {
+  readonly sessionId: string
+  readonly prompt: string
+}
+
+/** Body-parse verdict for the send route. */
+export type SessionSendBodyResult = { readonly ok: true; readonly value: SessionSendRequest } | { readonly ok: false; readonly error: string }
+
+/**
+ * Validate one raw session-send body. Pure, and queue-only by construction:
+ * the wire shape has no delivery-mode field, so no caller input can ever
+ * select a different delivery semantic. Every rejection names the offending
+ * field.
+ * @param body - parsed JSON body (unknown from the wire).
+ * @returns the validated request, or the first field error.
+ */
+export function parseSessionSendBody(body: unknown): SessionSendBodyResult {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return { ok: false, error: 'body must be a JSON object' }
+  }
+  const record = body as Record<string, unknown>
+  const { sessionId, prompt } = record
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+    return { ok: false, error: 'sessionId must be a non-empty string' }
+  }
+  if (typeof prompt !== 'string' || prompt.trim() === '') {
+    return { ok: false, error: 'prompt must be a non-empty string' }
+  }
+  if (prompt.length > PROMPT_MAX_CHARS) {
+    return { ok: false, error: 'prompt exceeds the 900000-character send limit' }
+  }
+  return { ok: true, value: { sessionId: sessionId.trim(), prompt } }
+}
+
+/** Session service surface the send route consumes (the prompt half of the dispatch surface). */
+export interface SessionSendServices {
+  readonly sessions: Pick<DispatchSessionApi, 'prompt'>
+}
+
+/**
+ * POST /api/session-send — queue one prompt onto an existing Session, the
+ * REST mirror of typing into a live session's composer. The prompt is
+ * delivered with the fixed queue semantic: a busy Session consumes it as a
+ * fresh turn after the current one, an idle Session starts a turn at once.
+ * No mode field exists on the wire and no code path can steer.
+ */
+export function makeSessionSendRoute(services: SessionSendServices): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${SESSION_SEND_API_PREFIX}`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readBoundedJson(req, BODY_MAX_BYTES)
+      } catch {
+        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+        return
+      }
+      const parsed = parseSessionSendBody(body)
+      if (!parsed.ok) {
+        writeJson(res, 400, { ok: false, error: parsed.error })
+        return
+      }
+      const { sessionId, prompt } = parsed.value
+      const signal = new AbortController().signal
+      try {
+        await services.sessions.prompt({
+          requestId: `session-send-${randomUUID()}`,
+          sessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: prompt }],
+        }, signal)
+      } catch (error) {
+        writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
+        return
+      }
+      writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
     },
   }
 }

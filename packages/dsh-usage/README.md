@@ -52,5 +52,5 @@ Restart `dsh web` for the host half; the client half applies on refresh. The sec
 
 - Usage counting starts when the plugin is first enabled; historical sessions are not backfilled.
 - OAuth-based routes (for example qwen OAuth grants) are detected as such but not probed; the plugin does not spend third-party OAuth budgets.
-- A failed probe keeps the previous fact visible and reports the error line; providers may rate-limit aggressive polling.
+- A failed probe keeps the previous fact visible and reports the error line — but only while the fact stays fresh: once the last success is more than 2 hours old (FORK usage-glance-stale-fact-ttl), the fact degrades to absent so a dead channel (expired cookie, revoked key) cannot present a frozen figure as current. Providers may rate-limit aggressive polling.
 - The pet bubble requires the dsh-pet plugin; without it the section works unchanged.
