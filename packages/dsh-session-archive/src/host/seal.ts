@@ -24,6 +24,7 @@
  * @module @linxin666/dsh-session-archive/host/seal
  */
 
+import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
@@ -62,6 +63,7 @@ const DETAIL = {
   stale: STALE_DETAIL,
   noSaveTrace: 'no-save-trace',
   workTrace: 'work-trace-no-sentinel',
+  noEndorsement: 'no-endorsement',
   legacy: 'legacy-save-no-sentinel',
   transcriptNotFound: 'transcript-not-found',
   decodeFail: 'decode-fail',
@@ -254,6 +256,14 @@ export function analyzeSeal(id: string, dir: string | undefined): SealCheckResul
   const direct = judge(lastAssistant)
   if (direct !== null) {
     if (direct.verdict === 'UNSEALED' && legacy && !direct.detail.startsWith(DETAIL.pending)) return legacyRow()
+    // Post-verdict endorsement downgrade (seal-noendorse-green-1106): a DONE
+    // verdict whose endorsement recheck fails leaves the green tier, so a bare
+    // `SAVE_STATUS=DONE` (AI self-assessment without save-status.py backing)
+    // goes dark at the light and turns the archive gate into a confirmation.
+    // N_A never runs the recheck (zero-output exemption, scanner --recheck 同口径).
+    if (direct.verdict === 'DONE' && !endorsementHolds(lastAssistant, text)) {
+      return { id, verdict: 'UNSEALED', detail: DETAIL.noEndorsement }
+    }
     return { id, ...direct }
   }
   if (saveTraceAnywhere || earlierSentinel) {
@@ -269,4 +279,89 @@ export function analyzeSeal(id: string, dir: string | undefined): SealCheckResul
   // default-pass NEUTRAL, so the gate never silently swallows it.
   if (WORK_TRACE.test(text)) return { id, verdict: 'UNSEALED', detail: DETAIL.workTrace }
   return { id, verdict: 'NEUTRAL', detail: DETAIL.noSaveTrace }
+}
+
+// ---- Endorsement recheck (seal-noendorse-green-1106, save 可靠性批3 ②) ----
+
+/**
+ * Backticked commit hashes anywhere in a message — the scanner's `HASH_RE`
+ * heuristic (board-row 落点头 style; bare hex would collide with epoch-ms
+ * timestamps). `matchAll` clones the regex, so the shared /g pattern is safe.
+ */
+const HASH_RE = /`([0-9a-f]{7,40})`/g
+
+/** The DONE sentinel's own line: the script endorsement tail rides on it. */
+const DONE_TAIL_RE = /SAVE_STATUS=DONE([^\r\n]*)/g
+
+/** Git probe; any failure (missing repo, missing git, timeout) reads `undefined`. */
+function gitRun(repo: string, args: readonly string[]): string | undefined {
+  try {
+    return execFileSync('git', ['-C', repo, ...args], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The session's working directory from the transcript root event (real
+ * transcripts open with a `session` root carrying `cwd`), so a save in
+ * m-note-sized repos resolves to its own repo first.
+ */
+function sessionCwd(transcript: string): string | undefined {
+  const newline = transcript.indexOf('\n')
+  const first = transcript.slice(0, newline === -1 ? undefined : newline).trim()
+  if (!first.startsWith('{')) return undefined
+  try {
+    const event = JSON.parse(first) as { type?: unknown; cwd?: unknown; data?: { cwd?: unknown } }
+    if (event.type !== 'session') return undefined
+    const cwd = typeof event.cwd === 'string' ? event.cwd : event.data?.cwd
+    return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Repo candidates, mirroring the scanner's `recheckDone`: session cwd → harness root → dsh-web root. */
+function repoCandidates(transcript: string): string[] {
+  const roots = [
+    sessionCwd(transcript),
+    process.env.HARNESS_ROOT ?? 'D:\\tech\\deepseek-harness',
+    process.env.DSHWEB_ROOT ?? 'D:\\tech\\dsh-web',
+  ]
+  return [...new Set(roots.filter((repo): repo is string => repo !== undefined && repo !== ''))]
+}
+
+/**
+ * DONE endorsement recheck — the two existing pieces only (照抄 the m-note
+ * scanner's `recheckDone` 口径; the six-dim fields belong to save-done5-1106):
+ * 1. the sentinel's own line carries a script backing `commits=n/n`;
+ * 2. every backticked hash in the message exists in a candidate repo
+ *    (`cat-file -e`) with a remote-tracking ref containing it
+ *    (`branch -r --contains`).
+ * Fail-closed: any missing piece reads false, so an unbacked DONE never stays
+ * green. Hashes are read message-wide because the endorsement line itself
+ * carries no hashes (save-status.py tail is verbatim-checked) — real reports
+ * put 落点头 hashes earlier in the same message.
+ */
+function endorsementHolds(message: string, transcript: string): boolean {
+  const tail = [...message.matchAll(DONE_TAIL_RE)].pop()?.[1] ?? ''
+  if (!/commits=\d+\/\d+/.test(tail)) return false
+  const hashes = [...new Set([...message.matchAll(HASH_RE)].map((match) => match[1]))]
+  if (hashes.length === 0) return false
+  const repos = repoCandidates(transcript)
+  for (const hash of hashes) {
+    const home = repos.find((repo) => gitRun(repo, ['cat-file', '-e', `${hash}^{commit}`]) !== undefined)
+    if (home === undefined) return false
+    const refs = (gitRun(home, ['branch', '-r', '--contains', hash]) ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line !== '' && !line.includes('->'))
+    if (refs.length === 0) return false
+  }
+  return true
 }

@@ -7,7 +7,9 @@
  * @module tests/seal.spec
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { analyzeSeal, isGreenSeal, isStaleSeal, latestTranscriptPath, sealMarker } from '../src/host/seal.ts'
@@ -28,12 +30,54 @@ const SAVE_PENDING = '还有两步没收口。\n\n## ✅ 执行完成\nSAVE_STAT
 const SAVE_TAIL = '## ✅ 执行完成\n保存状态：执行中，稍后继续'
 const CLEAN_REPLY = '这是最后一条普通回复，不含任何保存信号。'
 
+/** The endorsement tail save-status.py prints after DONE (背书行形态). */
+function endorsedTail(count: number): string {
+  return ` commits=${count}/${count} pushedBranch=${count}/${count} merged=${count}/${count} pushedMain=${count}/${count} auditCleaned=yes dirty=0`
+}
+
+interface EndorsedRepo {
+  dir: string
+  hash: string
+}
+
+let repoCache: EndorsedRepo | undefined
+
+/** A real git repo whose single commit sits behind an origin remote-tracking ref (hermetic endorsement fixture). */
+function endorsedRepo(): EndorsedRepo {
+  if (repoCache !== undefined) return repoCache
+  const dir = mkdtempSync(join(tmpdir(), 'seal-endorse-'))
+  const run = (args: string[]): string => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+  run(['init', '-q'])
+  run(['config', 'user.email', 'seal@test'])
+  run(['config', 'user.name', 'seal'])
+  writeFileSync(join(dir, 'seed.txt'), 'seed\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'seed'])
+  const hash = run(['rev-parse', 'HEAD']).trim()
+  run(['update-ref', 'refs/remotes/origin/main', hash])
+  repoCache = { dir, hash }
+  return repoCache
+}
+
+/** Transcript root event carrying the session cwd — the real transcript shape. */
+function sessionRoot(id: string, cwd: string): Record<string, unknown> {
+  return { type: 'session', version: 4, id, cwd }
+}
+
+/** An endorsed DONE report: 落点头 hashes earlier in the message, the endorsement line last. */
+function endorsedDone(count: number, hashes: readonly string[]): string {
+  const listed = hashes.map((hash) => `\`${hash}\``).join(' + ')
+  return `落点头 ${listed} 已推 origin。\n\nSAVE_STATUS=DONE${endorsedTail(count)}`
+}
+
 describe('seal grouping — green tier', () => {
-  it('DONE sentinel in the last assistant message reads DONE', () => {
+  it('endorsed DONE sentinel in the last assistant message reads DONE', () => {
     const host = createFakeHost()
+    const repo = endorsedRepo()
     withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
       userMsg('收口'),
-      assistantMsg(SAVE_DONE),
+      assistantMsg(endorsedDone(1, [repo.hash])),
     ])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
@@ -171,9 +215,10 @@ describe('transcript selection — highest generation wins', () => {
     const host = createFakeHost()
     // Generation 0 still holds an unfinished save; the migrated generation holds the full history.
     withTranscript(host, 'session-a', [assistantMsg(SAVE_TAIL)], { version: 0 })
+    const repo = endorsedRepo()
     withTranscript(host, 'session-a', [
-      { type: 'session', data: { id: 'session-a' } },
-      assistantMsg(SAVE_DONE),
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(endorsedDone(1, [repo.hash])),
     ], { version: 4 })
     expect(latestTranscriptPath(dirOf(host, 'session-a'))).toBe(join(dirOf(host, 'session-a'), 'session.v4.jsonl.zstd'))
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
@@ -211,5 +256,88 @@ describe('seal markers (ledger encoding)', () => {
     expect(sealMarker({ verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' })).toBe('UNSEALED:save-tail-no-sentinel')
     expect(sealMarker({ verdict: 'DONE', detail: 'sentinel-ok' })).toBe('DONE:sentinel-ok')
     expect(sealMarker({ verdict: 'UNKNOWN', detail: 'transcript-not-found' })).toBe('UNKNOWN:transcript-not-found')
+  })
+})
+
+describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-green-1106)', () => {
+  it('operator sees a bare DONE line without commits= demote to UNSEALED no-endorsement', () => {
+    // Given a last assistant message asserting DONE with no script endorsement
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg('收口完成。\n\nSAVE_STATUS=DONE'),
+    ])
+    // When the seal is judged
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then it leaves the green tier with the scanner's no-endorsement reading
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(isGreenSeal(result.verdict)).toBe(false)
+    expect(sealMarker(result)).toBe('UNSEALED:no-endorsement')
+  })
+
+  it('operator keeps DONE green when the endorsed hashes reach a remote-tracking ref', () => {
+    // Given a save report whose 落点头 hash sits earlier in the message than the endorsement line
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(endorsedDone(1, [repo.hash])),
+    ])
+    // When the seal is judged, the endorsement recheck finds the hash and its remote ref
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then the DONE verdict stays in the green tier
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it('operator gets non-green when commits= names a hash no candidate repo holds', () => {
+    // Given a line claiming commits=1/1 over a hash no candidate repo holds
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(endorsedDone(1, ['f'.repeat(40)])),
+    ])
+    // When the seal is judged, the endorsement recheck misses the hash
+    // Then the endorsement fails and the verdict leaves the green tier
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator gets non-green when one of two endorsed hashes is unreachable', () => {
+    // Given commits=2/2 where only one of the two hashes exists in a candidate repo
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(endorsedDone(2, [repo.hash, 'e'.repeat(40)])),
+    ])
+    // When the seal is judged, the recheck walks every hash in the message
+    // Then the whole endorsement fails
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator gets non-green when commits= names no backticked hash at all', () => {
+    // Given a full endorsement tail that never names a hash to verify
+    const host = createFakeHost()
+    withTranscript(host, 'session-a', [
+      assistantMsg(`收口完成。\n\nSAVE_STATUS=DONE${endorsedTail(1)}`),
+    ])
+    // When the seal is judged, there is nothing to recheck
+    // Then it cannot stay green
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator keeps N_A green without any endorsement recheck', () => {
+    // Given a zero-output verdict whose message carries no usable endorsement
+    const host = createFakeHost()
+    withTranscript(host, 'session-a', [
+      assistantMsg(`零产出，无须背书。\`${'d'.repeat(40)}\`\n\nSAVE_STATUS=N_A`),
+    ])
+    // When the seal is judged, N_A never runs the recheck
+    // Then it keeps its green tier
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    expect(result).toEqual({ id: 'session-a', verdict: 'N_A', detail: 'no-artifacts-by-design' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
   })
 })

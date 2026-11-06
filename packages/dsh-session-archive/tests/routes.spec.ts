@@ -165,9 +165,10 @@ describe('route fencing and contracts', () => {
   it('requires an actor on POST /archive and archives with a declared one', async () => {
     // The merged contract runs both gates on POST /archive: the actor must be
     // declared (triclass, 400 without it) and the target must clear the seal
-    // gate (contract C2), so session-a carries a green transcript here.
+    // gate (contract C2), so session-a carries a green N_A transcript here
+    // (the endorsement recheck only ever runs on DONE verdicts).
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
-    writeTranscript(host, 'session-a', [assistantMsg('## ✅ 执行完成\nSAVE_STATUS=DONE')])
+    writeTranscript(host, 'session-a', [assistantMsg('本轮确认无产出。\n\nSAVE_STATUS=N_A')])
     const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)

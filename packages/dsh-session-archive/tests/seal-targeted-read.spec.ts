@@ -76,12 +76,14 @@ describe('resolveSessionDirs — targeted lookup equals the full index restricte
 })
 
 describe('ArchiveService.sealCheck — targeted read behind the six-value grouping', () => {
-  const SAVE_DONE = '## ✅ 执行完成\nSAVE_STATUS=DONE'
+  // A green N_A row: the endorsement recheck only ever runs on DONE verdicts,
+  // so the zero-output tier stays the hermetic green fixture here.
+  const SAVE_NA = '本轮确认无产出。\n\nSAVE_STATUS=N_A'
 
   it('operator gets the six-value verdicts without ever triggering the full directory scan', async () => {
     // Given a service over a fixture home with one sealed and one missing session
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-green', updatedAt: 1 }] })
-    writeTranscript(host, 'session-green', [assistantMsg(SAVE_DONE)])
+    writeTranscript(host, 'session-green', [assistantMsg(SAVE_NA)])
     const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
 
     // When a seal-check runs on a fresh service
@@ -92,7 +94,7 @@ describe('ArchiveService.sealCheck — targeted read behind the six-value groupi
     const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
     expect(dirIndex.scans).toBe(0)
     expect(results).toEqual([
-      { id: 'session-green', verdict: 'DONE', detail: 'sentinel-ok' },
+      { id: 'session-green', verdict: 'N_A', detail: 'no-artifacts-by-design' },
       { id: 'session-ghost', verdict: 'UNKNOWN', detail: 'transcript-not-found' },
     ])
 
