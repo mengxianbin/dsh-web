@@ -8,8 +8,12 @@
  * Criteria and vocabulary are copied 1:1 from the m-note preflight scanner
  * `scripts/dsh/session-sentinel-scan.mjs` (main tree, 入册 2026-10-26):
  * `SAVE_STATUS` three values, the LEGACY cut (2026-10-26), the save-trace
- * regex, and "stale = a sentinel in an earlier message while the last
- * assistant message continues the conversation". The decode method follows
+ * regex, "stale = a sentinel in an earlier message while the last
+ * assistant message continues the conversation", and the last-line gate
+ * (seal-judge-lastline-1106, 2026-11-06): the sentinel only ever counts in
+ * the last assistant message's **last non-empty trimmed line** — the
+ * endorsement-line form, isomorphic to the save SKILL's "sentinel line =
+ * the completion report's last line". The decode method follows
  * `content/tech/ai/session-forensics.md` 场景十六: magic-scan the zstd frame
  * headers and decompress frame by frame with `node:zlib`
  * (`zstdDecompressSync`) — transcripts are append-only multi-frame files.
@@ -164,16 +168,42 @@ function messageText(event: { data?: unknown }): string {
   return out
 }
 
-/** Judge the last assistant message alone; null = no direct signal (caller consults the whole transcript). */
+/**
+ * 末行闸 (seal-judge-lastline-1106, 2026-11-06): a message's **last line** =
+ * its last non-empty trimmed line (the endorsement-line form; isomorphic to
+ * the save SKILL's "sentinel line = the completion report's last line").
+ */
+function lastLineOf(text: string): string {
+  const lines = text.split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim()
+    if (line !== '') return line
+  }
+  return ''
+}
+
+/**
+ * Judge the last assistant message alone; null = no direct signal (caller consults the whole transcript).
+ *
+ * Last-line gate (seal-judge-lastline-1106, 2026-11-06): the search scope is
+ * the message's **last non-empty trimmed line** only — the endorsement-line
+ * form, isomorphic to the save SKILL's "sentinel line = the completion
+ * report's last line". Only the search range shrinks from the whole message
+ * to its last line; the three-value judgement, the SAVE_TRACE fallback and
+ * the caller's WORK_TRACE/LEGACY split keep their logic unchanged, so prose
+ * quotes of `SAVE_STATUS=` in the body no longer read green (verbatim-same
+ * as the scanner's `judge()`, contract C1).
+ */
 function judge(text: string): { verdict: SealVerdict; detail: string } | null {
-  const lastMatch = [...text.matchAll(new RegExp(SENTINEL, 'g'))].pop()
+  const line = lastLineOf(text)
+  const lastMatch = [...line.matchAll(new RegExp(SENTINEL, 'g'))].pop()
   if (lastMatch) {
     const value = lastMatch[1]
     if (value === 'DONE') return { verdict: 'DONE', detail: DETAIL.sentinelOk }
     if (value === 'N_A') return { verdict: 'N_A', detail: DETAIL.noArtifacts }
     return { verdict: 'UNSEALED', detail: DETAIL.pending }
   }
-  if (SAVE_TRACE.test(text)) return { verdict: 'UNSEALED', detail: DETAIL.saveTail }
+  if (SAVE_TRACE.test(line)) return { verdict: 'UNSEALED', detail: DETAIL.saveTail }
   return null
 }
 
