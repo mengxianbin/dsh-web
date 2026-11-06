@@ -46,7 +46,7 @@ import {
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { TtlMemo } from './ttl-memo.ts'
-import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
+import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
 
@@ -415,13 +415,15 @@ export class ArchiveService {
    * The six-value seal grouping for a batch of ids — the single implementation
    * behind both archive channels (contract C1: 分组实现全插件仅此一份): the
    * native dialog consumes it through `POST /seal-check`, the REST hard gate
-   * calls `analyzeSeal` directly through {@link archive}. Location reuses the
-   * sessions-root directory index; an id with no locatable transcript answers
-   * `UNKNOWN` (fail-closed, never a silent pass).
+   * calls `analyzeSeal` directly through {@link archive}. Location probes
+   * only the named ids against the sessions root (targeted read — no full
+   * `indexSessionDirs` walk, no `dirSize`, see {@link resolveSessionDirs});
+   * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
+   * a silent pass).
    */
   sealCheck(ids: readonly string[]): SealCheckResult[] {
-    const index = this.dirIndex.get()
-    return ids.map((id) => analyzeSeal(id, index.byId.get(id)))
+    const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
+    return ids.map((id) => analyzeSeal(id, dirs.get(id)))
   }
 
   // ------------------------------------------------------------------

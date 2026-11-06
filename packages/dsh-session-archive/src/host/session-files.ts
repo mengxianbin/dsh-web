@@ -127,6 +127,76 @@ export function indexSessionDirs(sessionsRoot: string): SessionDirIndex {
 }
 
 /**
+ * Resolve only the named sessions against the sessions root — the seal-check
+ * path, which must locate a handful of transcript dirs without paying for the
+ * full-tree walk of {@link indexSessionDirs} (every project dir, every
+ * segment, `dirSize` recursion: seconds on a root with thousands of sessions
+ * — a cost `sealCheck` used to pay on every request).
+ *
+ * The lookup mirrors the index construction exactly — same project order,
+ * same `canonicalSessionId` keying, same directory/realpath/containment
+ * checks — so the returned map equals `indexSessionDirs(root).byId`
+ * restricted to `ids`: an id absent from the full index resolves to nothing
+ * (the caller answers `UNKNOWN`), and the first project dir in readdir order
+ * wins a duplicate, as in the full index. Only names are listed until an id
+ * matches; a matched candidate then takes the same stat/realpath checks, and
+ * `dirSize` is never computed. Ids never reach the filesystem as paths —
+ * only readdir-derived segment names are joined.
+ */
+export function resolveSessionDirs(sessionsRoot: string, ids: readonly string[]): Map<string, string> {
+  const found = new Map<string, string>()
+  if (ids.length === 0 || !existsSync(sessionsRoot)) return found
+  let rootReal: string
+  try {
+    rootReal = realpathSync(sessionsRoot)
+  } catch {
+    return found
+  }
+  let projectDirs: string[]
+  try {
+    projectDirs = readdirSync(sessionsRoot)
+  } catch {
+    return found
+  }
+  const wanted = new Set(ids)
+  for (const project of projectDirs) {
+    if (wanted.size === 0) break
+    const projectPath = join(sessionsRoot, project)
+    let entries: string[]
+    try {
+      entries = readdirSync(projectPath)
+    } catch {
+      // Not a readable project dir (a stray file at the root, a vanished dir).
+      continue
+    }
+    for (const segment of entries) {
+      const id = canonicalSessionId(segment)
+      if (!wanted.has(id)) continue
+      const dirPath = join(projectPath, segment)
+      let stat
+      try {
+        stat = statSync(dirPath)
+      } catch {
+        continue
+      }
+      if (!stat.isDirectory()) continue
+      let real: string
+      try {
+        real = realpathSync(dirPath)
+      } catch {
+        continue
+      }
+      if (!isInside(rootReal, real)) continue
+      // First hit wins, exactly as the full index keeps its first mapping;
+      // dropping the id from the wanted set stops further probing for it.
+      found.set(id, dirPath)
+      wanted.delete(id)
+    }
+  }
+  return found
+}
+
+/**
  * Resolve one session's storage dir against an index. Returns undefined when
  * the session has no legacy directory (rdb-stored or foreign).
  */
