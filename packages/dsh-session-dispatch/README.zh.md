@@ -8,7 +8,8 @@ DSH Web 的纯 REST 会话派发：`POST /api/session-dispatch` 通过 Host 自�
 任务到会话的绑定；该 taskRef 仍有活会话时同样的派发被 `409` 拒绝，
 `GET /api/session-dispatch/bindings` 提供带实时活性的账面条目。
 `POST /api/session-send` 向既有会话排入一条提示词（queue-only 投递，请求体不
-暴露投递 mode 字段）。每次派发还会向注意力账本（`$DSH_HOME/session-attention.json`）
+暴露投递 mode 字段）。`POST /api/session-stop` 取消既有会话的当前 turn——排队
+输入保留，会话可再经 session-send 唤醒。每次派发还会向注意力账本（`$DSH_HOME/session-attention.json`）
 声明一个 `sessionClass`（默认 `human`；bot 值班会话为 `bot-boss`；bot 派发的任务
 工作为 `bot-worker`；旧字面 `bot` 归一为 `bot-worker`），账本对每个
 会话只应用一次默认置顶。仅 Host 侧——本包不声明 `dsh.client` 面，浏览器花名册中
@@ -87,6 +88,22 @@ Host 拒绝（会话不存在、已归档或已 dispose）、`403` 非回环、`
 长正文指针纪律：先落 git（commit），send 只带路径 + 一句指令——900,000 字符
 上限是天花板，不是预期用法。
 
+### `POST /api/session-stop`
+
+取消既有会话的当前 turn——面向程序化调用方的 Stop 按钮镜像（继任掐醒卡死的前代、
+看门狗在 save/归档跳转前解卡）。Host 侧 cancel 协作式中止活 turn 并保留排队输入，
+因此会话可再经 `POST /api/session-send` 唤醒；请求不携带 stop-entry，持久成因保持
+entry-less。请求体（JSON，至多 1 MiB）：
+
+| 字段 | 类型 | 必填 | 含义 |
+|------|------|------|------|
+| `sessionId` | string | 是 | 目标既有会话，其当前 turn 被取消 |
+| `actor` | string | 否 | 仅审计标签，写进一行结构化 `[session-stop]` 日志；永不到达 cancel 调用 |
+
+响应：`200 { ok: true, accepted: true }`、`400` 请求体非法或 `session/*`
+Host 拒绝（目标不在 attach = `session/not-found`、subagent 归属拒绝）、`403`
+非回环、`405` 方法错误。`actor` 只记日志：不扩任何台账 schema。
+
 ### `GET /api/session-dispatch/health`
 
 重启核验用存活探针：`200 { ok: true, service: "dsh-session-dispatch" }`。
@@ -101,10 +118,10 @@ Host 拒绝（会话不存在、已归档或已 dispose）、`403` 非回环、`
 ## 结构
 
 - `src/index.ts`——插件入口：注入 `webServer`、`sessionController`、
-  `workspaceRegistry`，注册派发、健康、绑定与 session-send 四条路由；运行
-  注意力启动 pass 与首条消息分类钩子。
+  `workspaceRegistry`，注册派发、健康、绑定、session-send 与 session-stop
+  五条路由；运行注意力启动 pass 与首条消息分类钩子。
 - `src/host/routes.ts`——请求体校验、`taskRef`/绑定契约与路由工厂（派发、
-  健康、绑定、session-send）。
+  健康、绑定、session-send、session-stop）。
 - `src/host/bindings.ts`——快账：`$DSH_HOME` 下的原子绑定持久化、实时活性查
   询、损坏账本 fail-open 重建。
 - `src/host/attention.ts`——注意力账本：`$DSH_HOME` 下的 sessionClass 记录、

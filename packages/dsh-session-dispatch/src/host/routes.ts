@@ -17,6 +17,9 @@ export const DISPATCH_API_PREFIX = '/api/session-dispatch'
 /** Top-level send endpoint: delivery to an existing Session (not under the dispatch prefix). */
 export const SESSION_SEND_API_PREFIX = '/api/session-send'
 
+/** Top-level stop endpoint: cancel a Session's active turn (not under the dispatch prefix). */
+export const SESSION_STOP_API_PREFIX = '/api/session-stop'
+
 /** Dispatch prompts are prose task books; 1 MiB covers very long ones with margin. */
 const BODY_MAX_BYTES = 1_000_000
 
@@ -97,6 +100,14 @@ export interface DispatchSessionApi {
     request: { requestId: string; sessionId: string; mode: 'queue' | 'steer'; content: readonly { type: 'text'; text: string }[] },
     signal: AbortSignal,
   ): Promise<{ accepted: true }>
+  /**
+   * Cancel the Session's active turn while keeping its pending inbox, so a
+   * stopped Session can be woken again through POST /api/session-send.
+   * Structural: the Host controller's cancel also takes an optional `entry`
+   * (the R2 stop-entry record); this surface never sends one, so the durable
+   * cause stays entry-less until the stop-entry ruling opens a new spelling.
+   */
+  cancel(request: { sessionId: string }): unknown
 }
 
 /** Neutral workspace lookup the dispatch route consumes. */
@@ -495,6 +506,89 @@ export function makeSessionSendRoute(services: SessionSendServices): WebRoute {
         return
       }
       writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
+    },
+  }
+}
+
+/** One validated session-stop request. */
+export interface SessionStopRequest {
+  readonly sessionId: string
+  readonly actor?: string
+}
+
+/** Body-parse verdict for the stop route. */
+export type SessionStopBodyResult = { readonly ok: true; readonly value: SessionStopRequest } | { readonly ok: false; readonly error: string }
+
+/**
+ * Validate one raw session-stop body. Pure — the optional `actor` is only
+ * carried through for the route's audit line; it never steers the cancel
+ * call, and every rejection names the offending field.
+ * @param body - parsed JSON body (unknown from the wire).
+ * @returns the validated request, or the first field error.
+ */
+export function parseSessionStopBody(body: unknown): SessionStopBodyResult {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+    return { ok: false, error: 'body must be a JSON object' }
+  }
+  const record = body as Record<string, unknown>
+  const { sessionId, actor } = record
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+    return { ok: false, error: 'sessionId must be a non-empty string' }
+  }
+  if (actor !== undefined && typeof actor !== 'string') {
+    return { ok: false, error: 'actor must be a string' }
+  }
+  return { ok: true, value: { sessionId: sessionId.trim(), ...(actor === undefined ? {} : { actor }) } }
+}
+
+/** Session cancel surface the stop route consumes (the turn-abort half of the controller). */
+export interface SessionStopServices {
+  readonly sessions: Pick<DispatchSessionApi, 'cancel'>
+}
+
+/**
+ * POST /api/session-stop — cancel a Session's active turn: the REST mirror
+ * of the Stop button for programmatic callers (a successor waking a stuck
+ * predecessor, a watchdog unwedging a session before the save/archive hop).
+ * The Host cancel aborts the live turn cooperatively and keeps the pending
+ * inbox, so the Session can be woken again through POST /api/session-send.
+ * Host rejections (session/not-found for a detached target, the subagent
+ * ownership refusal) are passed through as 4xx with the Host's own text —
+ * never swallowed. The optional `actor` is audit-only: it is logged as one
+ * structured line and never reaches the cancel call.
+ */
+export function makeSessionStopRoute(services: SessionStopServices): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${SESSION_STOP_API_PREFIX}`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' })
+        return
+      }
+      let body: unknown
+      try {
+        body = await readBoundedJson(req, BODY_MAX_BYTES)
+      } catch {
+        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+        return
+      }
+      const parsed = parseSessionStopBody(body)
+      if (!parsed.ok) {
+        writeJson(res, 400, { ok: false, error: parsed.error })
+        return
+      }
+      const { sessionId, actor } = parsed.value
+      try {
+        await services.sessions.cancel({ sessionId })
+      } catch (error) {
+        writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
+        return
+      }
+      // Audit line only: the actor is recorded, never acted on.
+      console.log(`[session-stop] actor=${actor ?? '-'} target=${sessionId}`)
+      writeJson(res, 200, { ok: true, accepted: true }, { 'cache-control': 'no-store' })
     },
   }
 }

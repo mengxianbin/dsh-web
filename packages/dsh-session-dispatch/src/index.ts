@@ -9,7 +9,7 @@ import { mountOnce } from './mount-once.ts'
 import { resolveDshHome } from './dsh-home.ts'
 import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
-import { makeDispatchRoutes, makeSessionSendRoute, type DispatchSessionApi } from './host/routes.ts'
+import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
 
 export const name = 'dsh-session-dispatch'
 export const inject = ['webServer', 'sessionController', 'workspaceRegistry']
@@ -34,7 +34,10 @@ export const Config: z<Config> = z.object({
  * `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
  * `POST /api/session-send` queues one prompt onto an existing Session with
  * the fixed queue semantic (the wire shape has no delivery-mode field, so no
- * caller input can steer). Every dispatch also declares its `sessionClass`
+ * caller input can steer). `POST /api/session-stop` cancels an existing
+ * Session's active turn — the pending inbox survives, so the Session can be
+ * woken again through session-send — and logs one structured audit line for
+ * the optional caller-supplied `actor` (audit-only, never steering). Every dispatch also declares its `sessionClass`
  * (`human` default; `bot-boss` for bot duty sessions; `bot-worker` for
  * bot-dispatched task work; the legacy `bot` spelling normalizes to
  * `bot-worker`) into the attention ledger (`$DSH_HOME/session-attention.json`),
@@ -79,6 +82,8 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
       }),
       // Delivery onto an existing Session: queue-only by construction.
       makeSessionSendRoute({ sessions }),
+      // Turn cancellation on an existing Session: inbox-preserving abort.
+      makeSessionStopRoute({ sessions }),
     ]
     const disposers = routes.map((route) => ctx.webServer.register(route))
     // First real user message is the classification fallback: a Session the

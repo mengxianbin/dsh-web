@@ -10,7 +10,10 @@ quick ledger (`$DSH_HOME/dispatch-bindings.json`); while that taskRef still
 has a live session the same dispatch is refused with `409`, and
 `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
 `POST /api/session-send` queues one prompt onto an existing Session
-(queue-only delivery; the wire shape has no delivery-mode field). Every
+(queue-only delivery; the wire shape has no delivery-mode field).
+`POST /api/session-stop` cancels an existing Session's active turn — the
+pending inbox survives, so the Session can be woken again through
+session-send. Every
 dispatch also declares a `sessionClass` (`human` by default; `bot-boss` for
 bot duty sessions; `bot-worker` for bot-dispatched task work; the legacy `bot`
 spelling normalizes to `bot-worker`) into the attention ledger
@@ -103,6 +106,25 @@ wrong method. Pointer discipline for long bodies: commit the text to git
 first and send only the path plus a one-line instruction — the 900,000
 character cap is a ceiling, not the intended shape.
 
+### `POST /api/session-stop`
+
+Cancel an existing Session's active turn — the REST mirror of the Stop
+button for programmatic callers (a successor nudging a stuck predecessor, a
+watchdog unwedging a session before the save/archive hop). The Host cancel
+aborts the live turn cooperatively and keeps the pending inbox, so the
+Session can be woken again through `POST /api/session-send`; no stop-entry
+is sent, so the durable cause stays entry-less. Body (JSON, at most 1 MiB):
+
+| field | type | required | meaning |
+|-------|------|----------|---------|
+| `sessionId` | string | yes | Target existing Session whose active turn is cancelled |
+| `actor` | string | no | Audit-only label written into one structured `[session-stop]` log line; it never reaches the cancel call |
+
+Responses: `200 { ok: true, accepted: true }`, `400` invalid body or
+`session/*` Host rejection (`session/not-found` for a detached target, the
+subagent ownership refusal), `403` non-loopback, `405` wrong method. The
+`actor` is logged only: no ledger schema changes.
+
 ### `GET /api/session-dispatch/health`
 
 Liveness probe for restart verification: `200 { ok: true, service:
@@ -119,11 +141,12 @@ not a task account of record — the git board stays the only authority.
 ## Layout
 
 - `src/index.ts` — plugin entry: injects `webServer`, `sessionController`,
-  `workspaceRegistry`; registers the dispatch, health, bindings, and
-  session-send routes; runs the attention startup pass and the first-message
-  classification hook.
+  `workspaceRegistry`; registers the dispatch, health, bindings,
+  session-send, and session-stop routes; runs the attention startup pass and
+  the first-message classification hook.
 - `src/host/routes.ts` — body validation, the `taskRef`/binding contracts,
-  and the route factories (dispatch, health, bindings, session-send).
+  and the route factories (dispatch, health, bindings, session-send,
+  session-stop).
 - `src/host/bindings.ts` — the quick ledger: atomic binding persistence under
   `$DSH_HOME`, live-aliveness lookup, fail-open corrupt-ledger rebuild.
 - `src/host/attention.ts` — the attention ledger: sessionClass records under
