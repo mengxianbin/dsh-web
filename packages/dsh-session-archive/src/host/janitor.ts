@@ -44,6 +44,7 @@ import {
   type LedgerSource,
 } from './ledger.ts'
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
+import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { TtlMemo } from './ttl-memo.ts'
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
@@ -442,16 +443,48 @@ export class ArchiveService {
     return run
   }
 
-  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, gate?: ArchiveGate): Promise<BatchResponse> {
+  /**
+   * Archive a batch of sessions. Every call passes the triclass identity
+   * gate first (user ruling, 2026-10-29): the actor resolves against the
+   * attention ledger and each target decides on its own — a denied id gets
+   * `skipped / identity-denied` with both classes in `detail`, the rest of
+   * the batch proceeds (no taint). The actor is persisted into every ledger
+   * entry it archives, so attribution reads from the ledger instead of
+   * transcript archaeology. When a seal gate is passed, it decides per id
+   * after the identity gate (contract C2: green/stale archive, true red and
+   * UNKNOWN refuse with `seal-required`, no batch contagion either).
+   * @param ids - canonical session ids.
+   * @param source - ledger source tag (`manual` from the REST route).
+   * @param currentSessionId - caller's currently open session (auto path protection).
+   * @param actor - who ordered this archive (deciding session id or channel
+   * name); absent resolves to no identity, which the gate always refuses —
+   * the route 400s before this can happen.
+   * @param gate - archive seal gate (contract C2); absent = no seal reads.
+   */
+  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string, gate?: ArchiveGate): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
       const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
+      // Identity gate, resolved once per batch from the dispatch plugin's
+      // attention ledger ($DSH_HOME/session-attention.json).
+      const identity = await readIdentityTable(this.dshHome)
+      const actorClass = resolveActorClass(actor, identity)
       for (const id of ids) {
         const row = byId.get(id)
         if (row === undefined) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
+          continue
+        }
+        const targetClass: IdentityClass = identity.get(id) ?? 'human'
+        if (!mayArchive(actorClass, targetClass)) {
+          results.push({
+            id,
+            status: 'skipped',
+            reason: 'identity-denied',
+            detail: `actor ${actorClass ?? 'unclassified'} cannot archive ${targetClass} session`,
+          })
           continue
         }
         if (row.archived) {
@@ -500,6 +533,7 @@ export class ArchiveService {
             source: entrySource,
             ...(entryReason !== undefined ? { reason: entryReason } : {}),
             ...(entrySeal !== undefined ? { seal: entrySeal } : {}),
+            ...(actor !== undefined ? { actor } : {}),
           }
           results.push({ id, status: 'ok' })
         } catch (error) {

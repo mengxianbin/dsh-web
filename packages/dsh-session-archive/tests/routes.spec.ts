@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { AddressInfo } from 'node:net'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService, PlanMismatchError } from '../src/host/janitor.ts'
-import { createFakeHost, fakeContext } from './fixtures.ts'
+import { assistantMsg, createFakeHost, fakeContext, writeTranscript } from './fixtures.ts'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 
 function startServer(routes: WebRoute[]): Promise<{ server: Server; url: string }> {
@@ -152,14 +152,33 @@ describe('route fencing and contracts', () => {
     const service = new ArchiveService(ctx as never, { dshHome: host.home })
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const first = service.archive(['session-a'], 'manual')
+    const first = service.archive(['session-a'], 'manual', undefined, 'manual-test')
     try {
-      const busy = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'] })
+      const busy = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'], actor: 'manual-test' })
       expect(busy.status).toBe(409)
     } finally {
       release?.()
       await first
     }
+  })
+
+  it('requires an actor on POST /archive and archives with a declared one', async () => {
+    // The merged contract runs both gates on POST /archive: the actor must be
+    // declared (triclass, 400 without it) and the target must clear the seal
+    // gate (contract C2), so session-a carries a green transcript here.
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
+    writeTranscript(host, 'session-a', [assistantMsg('## ✅ 执行完成\nSAVE_STATUS=DONE')])
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const missing = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'] })
+    expect(missing.status).toBe(400)
+    expect((missing.body as { error: string }).error).toContain('actor is required')
+
+    const declared = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'], actor: 'manual-test' })
+    expect(declared.status).toBe(200)
+    const body = declared.body as { results: { id: string; status: string }[] }
+    expect(body.results).toEqual([{ id: 'session-a', status: 'ok' }])
   })
 
   it('serves the inventory document', async () => {

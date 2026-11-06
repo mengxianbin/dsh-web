@@ -129,7 +129,7 @@ describe('POST /archive — gate path 1: green passes', () => {
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
     expect(host.registry.archivedSessionIds).toEqual(['session-green'])
@@ -144,13 +144,14 @@ describe('POST /archive — gate path 2: sentinel-stale passes with accounting',
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-stale', status: 'ok' }])
     expect(service.ledgerSnapshot().entries['session-stale']).toEqual({
       archivedAt: expect.any(Number),
       source: 'manual',
       seal: 'stale',
+      actor: 'manual',
     })
   })
 })
@@ -163,6 +164,7 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-green', 'session-red', 'session-unknown'],
+      actor: 'manual',
     })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
@@ -182,7 +184,7 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-pending', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'sentinel-pending' } },
@@ -199,6 +201,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-red'],
+      actor: 'manual',
       force: true,
       reason: '板行[x] git 收口证据，任务书授权强归',
     })
@@ -209,6 +212,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
       source: 'override',
       reason: '板行[x] git 收口证据，任务书授权强归',
       seal: 'UNSEALED:save-tail-no-sentinel',
+      actor: 'manual',
     })
   })
 
@@ -219,6 +223,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-green', 'session-stale', 'session-red'],
+      actor: 'manual',
       force: true,
       reason: 'taskbot:taskRef=板行#anchor 板行[x] 受命收口',
     })
@@ -248,7 +253,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], force: 'yes', reason: 'not-boolean' })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], actor: 'manual', force: 'yes', reason: 'not-boolean' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' } },

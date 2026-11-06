@@ -40,6 +40,15 @@ export interface LedgerEntry {
    * seal judgement (contract C3).
    */
   seal?: string
+  /**
+   * Who ordered this archive: the deciding session id (`session-…`, resolved
+   * against the attention identity table) or a channel name (`manual`, …) for
+   * a human-driven REST call. Present on plugin-performed archives that
+   * carried an actor; native-UI `observed` backfills and pre-triclass
+   * entries have none (2026-10-29 triclass ruling: attribution moves from
+   * transcript archaeology to ledger reconciliation).
+   */
+  actor?: string
 }
 
 export interface LedgerDocument {
@@ -87,7 +96,7 @@ export function deserializeLedger(raw: string): LedgerDocument {
   const entries: Record<string, LedgerEntry> = {}
   for (const [id, value] of Object.entries(doc.entries as Record<string, unknown>)) {
     if (typeof value !== 'object' || value === null) continue
-    const entry = value as { archivedAt?: unknown; source?: unknown; reason?: unknown; seal?: unknown }
+    const entry = value as { archivedAt?: unknown; source?: unknown; reason?: unknown; seal?: unknown; actor?: unknown }
     if (typeof entry.archivedAt !== 'number' || !Number.isFinite(entry.archivedAt)) continue
     // Documents written before `observed`/`override` existed keep deserializing
     // unchanged; an unknown source is still dropped. `override` (added with the
@@ -98,6 +107,9 @@ export function deserializeLedger(raw: string): LedgerDocument {
     const restored: LedgerEntry = { archivedAt: entry.archivedAt, source: entry.source }
     if (typeof entry.reason === 'string' && entry.reason !== '') restored.reason = entry.reason
     if (typeof entry.seal === 'string' && entry.seal !== '') restored.seal = entry.seal
+    // `actor` (added with the triclass gate) survives a reload when it is a
+    // bounded string; a foreign type is dropped without dropping the entry.
+    if (typeof entry.actor === 'string' && entry.actor !== '') restored.actor = entry.actor.slice(0, 200)
     entries[id] = restored
   }
   return { version: 1, entries }

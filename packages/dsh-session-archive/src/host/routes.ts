@@ -55,6 +55,7 @@ function batchBody(body: unknown): BatchRequestBody {
   return {
     ids: idList(record.ids),
     ...(typeof record.currentSessionId === 'string' ? { currentSessionId: record.currentSessionId } : {}),
+    ...(typeof record.actor === 'string' && record.actor.trim() !== '' ? { actor: record.actor.trim().slice(0, 200) } : {}),
     ...(typeof record.expectedTotal === 'number' && Number.isFinite(record.expectedTotal) ? { expectedTotal: Math.round(record.expectedTotal) } : {}),
   }
 }
@@ -106,7 +107,12 @@ export function makePreviewRoute(service: ArchiveService): WebRoute {
   }
 }
 
-function batchRoute(service: ArchiveService, path: string, run: (body: BatchRequestBody) => Promise<{ results: unknown; freedBytes: number }>): WebRoute {
+function batchRoute(
+  service: ArchiveService,
+  path: string,
+  run: (body: BatchRequestBody) => Promise<{ results: unknown; freedBytes: number }>,
+  options: { requireActor?: boolean } = {},
+): WebRoute {
   return {
     kind: 'exact',
     path,
@@ -129,6 +135,13 @@ function batchRoute(service: ArchiveService, path: string, run: (body: BatchRequ
       }
       if (body.ids.length > 20_000) {
         writeJson(res, 413, { ok: false, error: 'too many session ids' })
+        return
+      }
+      // Who ordered this archive must be stated up front (triclass ruling,
+      // 2026-10-29): a missing actor is a caller-fixable 400, mirroring the
+      // seal gate's required-field pattern, never a silent human default.
+      if (options.requireActor === true && body.actor === undefined) {
+        writeJson(res, 400, { ok: false, error: 'actor is required: pass the deciding session id or a channel name (e.g. manual)' })
         return
       }
       try {
@@ -214,6 +227,15 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
         writeJson(res, 413, { ok: false, error: 'too many session ids' })
         return
       }
+      // Identity gate + actor audit trail (triclass ruling, 2026-10-29): the
+      // body names who ordered the archive (400 without it), and the service
+      // refuses — per id, without batch taint — every target that actor's class
+      // may not archive (`identity-denied`), then persists `actor` into the
+      // ledger entry.
+      if (body.actor === undefined) {
+        writeJson(res, 400, { ok: false, error: 'actor is required: pass the deciding session id or a channel name (e.g. manual)' })
+        return
+      }
       const forced = record.force === true
       const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
       if (forced && reason === '') {
@@ -221,7 +243,7 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
         return
       }
       try {
-        const response = await service.archive(body.ids, 'manual', body.currentSessionId, forced ? { force: { reason } } : {})
+        const response = await service.archive(body.ids, 'manual', body.currentSessionId, body.actor, forced ? { force: { reason } } : {})
         writeJson(res, 200, response, { 'cache-control': 'no-store' })
       } catch (error) {
         if (error instanceof BusyError) {
