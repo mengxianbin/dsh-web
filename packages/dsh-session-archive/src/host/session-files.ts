@@ -7,7 +7,8 @@
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { existsSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { existsSync, realpathSync, rmSync } from 'node:fs'
+import { readdir, realpath, stat } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 /**
@@ -30,19 +31,21 @@ export interface SessionDirIndex {
   unreadable: string[]
 }
 
-function dirSize(path: string): number {
+async function dirSize(path: string): Promise<number> {
   let total = 0
   let entries: string[]
   try {
-    entries = readdirSync(path)
+    entries = await readdir(path)
   } catch {
     return 0
   }
   for (const entry of entries) {
     try {
-      const stat = statSync(join(path, entry))
-      if (stat.isDirectory()) total += dirSize(join(path, entry))
-      else total += stat.size
+      // oxlint-disable-next-line eslint/no-await-in-loop -- one stat per entry, sequential by design: the walk must yield to the event loop between syscalls, never fan out.
+      const info = await stat(join(path, entry))
+      // oxlint-disable-next-line eslint/no-await-in-loop -- recursive descent stays sequential for the same yield-per-entry reason.
+      if (info.isDirectory()) total += await dirSize(join(path, entry))
+      else total += info.size
     } catch {
       // A vanished entry contributes nothing.
     }
@@ -70,42 +73,51 @@ function relativeWithin(root: string, child: string): string | undefined {
  * any directory under `<sessionsRoot>/<project>/` (the project key dirs are
  * the cwd-encoded ones). Symlinks are never followed into the index: a link
  * under the sessions root pointing outside is recorded as unreadable instead.
+ *
+ * Async by design (seal-scan-async-1106): every filesystem call is awaited
+ * off the event loop, and the walk yields back to the loop every
+ * {@link SCAN_YIELD_EVERY} session dirs so concurrent HTTP requests on the
+ * same process are never blocked behind a full-tree scan.
  */
-export function indexSessionDirs(sessionsRoot: string): SessionDirIndex {
+export async function indexSessionDirs(sessionsRoot: string): Promise<SessionDirIndex> {
   const index: SessionDirIndex = { byId: new Map(), sizes: new Map(), unreadable: [] }
   if (!existsSync(sessionsRoot)) return index
   let rootReal: string
   try {
-    rootReal = realpathSync(sessionsRoot)
+    rootReal = await realpath(sessionsRoot)
   } catch {
     return index
   }
   let projectDirs: string[]
   try {
-    projectDirs = readdirSync(sessionsRoot)
+    projectDirs = await readdir(sessionsRoot)
   } catch {
     return index
   }
+  let seen = 0
   for (const project of projectDirs) {
     const projectPath = join(sessionsRoot, project)
     let entries: string[]
     try {
-      entries = readdirSync(projectPath)
+      // oxlint-disable-next-line eslint/no-await-in-loop -- project dirs are walked one at a time so a big tree never monopolises the loop.
+      entries = await readdir(projectPath)
     } catch {
       continue
     }
     for (const segment of entries) {
       const dirPath = join(projectPath, segment)
-      let stat
+      let info
       try {
-        stat = statSync(dirPath)
+        // oxlint-disable-next-line eslint/no-await-in-loop -- per-dir stat: sequential pacing is the whole point of the async scan.
+        info = await stat(dirPath)
       } catch {
         continue
       }
-      if (!stat.isDirectory()) continue
+      if (!info.isDirectory()) continue
       let real: string
       try {
-        real = realpathSync(dirPath)
+        // oxlint-disable-next-line eslint/no-await-in-loop -- realpath stays in the sequential walk for the same pacing reason.
+        real = await realpath(dirPath)
       } catch {
         index.unreadable.push(dirPath)
         continue
@@ -115,15 +127,33 @@ export function indexSessionDirs(sessionsRoot: string): SessionDirIndex {
         index.unreadable.push(dirPath)
         continue
       }
-      for (const candidate of [canonicalSessionId(segment)]) {
-        if (!index.byId.has(candidate)) {
-          index.byId.set(candidate, dirPath)
-          index.sizes.set(candidate, dirSize(dirPath))
-        }
+      if (!index.byId.has(canonicalSessionId(segment))) {
+        const id = canonicalSessionId(segment)
+        index.byId.set(id, dirPath)
+        // oxlint-disable-next-line eslint/no-await-in-loop -- size accounting belongs to the same sequential walk.
+        index.sizes.set(id, await dirSize(dirPath))
       }
+      seen += 1
+      // oxlint-disable-next-line eslint/no-await-in-loop -- this await IS the yield: every 32 dirs the walk hands the loop back to pending HTTP requests.
+      if (seen % SCAN_YIELD_EVERY === 0) await yieldToEventLoop()
     }
   }
   return index
+}
+
+/**
+ * Session dirs processed between explicit yields back to the event loop.
+ * The awaits above already interleave I/O, but a burst of cached stats can
+ * still run as one long microtask chain; the periodic macrotask yield bounds
+ * worst-case latency of concurrent requests to one small chunk.
+ */
+const SCAN_YIELD_EVERY = 32
+
+/** Hand control back to the event loop (macrotask), letting pending I/O run. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((done) => {
+    setImmediate(done)
+  })
 }
 
 /**

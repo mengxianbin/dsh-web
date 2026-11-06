@@ -310,7 +310,7 @@ export class ArchiveService {
   // Sources and protection
   // ------------------------------------------------------------------
 
-  private sources(): InventorySources {
+  private async sources(): Promise<InventorySources> {
     const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
     const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[] }>('workspaceRegistry')
     return {
@@ -319,7 +319,7 @@ export class ArchiveService {
       dshHome: this.dshHome,
       ledger: this.ledger,
       projcacheFiles: this.projcacheFiles,
-      dirIndex: this.dirIndex.get(),
+      dirIndex: await this.dirIndex.get(),
       projcacheIndex: this.projcacheIndex.get(),
     }
   }
@@ -391,7 +391,7 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async inventory(): Promise<InventoryView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const workspaces: WorkspaceView[] = built.workspaces
     return {
       generatedAt: Date.now(),
@@ -419,9 +419,8 @@ export class ArchiveService {
    * sessions-root directory index; an id with no locatable transcript answers
    * `UNKNOWN` (fail-closed, never a silent pass).
    */
-  sealCheck(ids: readonly string[]): SealCheckResult[] {
-    const index = this.dirIndex.get()
-    return ids.map((id) => analyzeSeal(id, index.byId.get(id)))
+  sealCheck(ids: readonly string[]): Promise<SealCheckResult[]> {
+    return this.dirIndex.get().then((index) => ids.map((id) => analyzeSeal(id, index.byId.get(id))))
   }
 
   // ------------------------------------------------------------------
@@ -444,7 +443,7 @@ export class ArchiveService {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
       for (const id of ids) {
         const row = byId.get(id)
@@ -514,7 +513,7 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
       const toUnarchive: string[] = []
       for (const id of ids) {
@@ -574,7 +573,7 @@ export class ArchiveService {
     options: { reason?: string; seal?: string } = {},
   ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
     const now = Date.now()
-    const index = this.dirIndex.get()
+    const index = await this.dirIndex.get()
     const results: ArchiveOverrideRow[] = []
     let changed = false
     for (const id of ids) {
@@ -623,7 +622,7 @@ export class ArchiveService {
    */
   async deleteSessions(ids: readonly string[], options: { currentSessionId?: string; expectedTotal?: number; source?: 'manual' | 'auto' } = {}): Promise<BatchResponse> {
     return this.withLock(async () => {
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const protectedMap = this.protectedReason(options.currentSessionId, built.rows)
       const plan = planDelete(built.rows, ids, protectedMap)
       // A mismatch only matters when the host would delete MORE than the user
@@ -782,7 +781,7 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async autoPreview(): Promise<AutoPreviewView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const now = Date.now()
     const protectedSet = new Set(this.protectedReason(undefined, built.rows).keys())
     const archiveCandidates = this.config.autoArchiveEnabled
@@ -827,7 +826,7 @@ export class ArchiveService {
       const startedAt = Date.now()
       try {
         if (kind === 'archive') {
-          const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+          const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
           const protectedSet = new Set(this.protectedReason(currentSessionId, built.rows).keys())
           const candidates = autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now: startedAt, protectedIds: protectedSet })
           const response = await this.archiveInternal(candidates.map((entry) => entry.id), 'auto', built.nativeIds)
@@ -836,7 +835,7 @@ export class ArchiveService {
           await this.flushState()
           return stats
         }
-        const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+        const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
         const protectedMap = this.protectedReason(currentSessionId, built.rows)
         const protectedSet = new Set(protectedMap.keys())
         // Backfill first, against the same rows this cycle plans with: the
@@ -882,7 +881,7 @@ export class ArchiveService {
   private cycleObservedArchives(): Promise<number> {
     return this.withLock(async () => {
       const now = Date.now()
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       return (await this.recordObservedArchives(built, now)).length
     })
   }
@@ -991,7 +990,7 @@ export class ArchiveService {
 
   async preview(id: string): Promise<SessionPreviewView> {
     const controller = this.serviceFace<{ inspect?(sessionId: string, signal?: AbortSignal): Promise<{ meta?: { createdAt?: number; cwd?: string }; events?: readonly unknown[] }> }>('sessionController')
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const row: ArchiveSessionRow | undefined = built.rows.find((entry) => entry.id === id)
     if (row === undefined) {
       throw new Error('session not found')

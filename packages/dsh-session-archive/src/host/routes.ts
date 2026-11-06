@@ -176,7 +176,7 @@ export function makeSealCheckRoute(service: ArchiveService): WebRoute {
         return
       }
       try {
-        const results = service.sealCheck(ids)
+        const results = await service.sealCheck(ids)
         writeJson(res, 200, { results }, { 'cache-control': 'no-store' })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })

@@ -252,7 +252,7 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
     }
   }
 
-  const dirIndex = sources.dirIndex ?? indexSessionDirs(join(sources.dshHome, 'sessions'))
+  const dirIndex = sources.dirIndex ?? await indexSessionDirs(join(sources.dshHome, 'sessions'))
   for (const id of dirIndex.byId.keys()) add(id).hasDir = true
 
   const projcache = sources.projcacheIndex ?? readProjcacheIndex(sources.dshHome)

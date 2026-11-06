@@ -32,25 +32,25 @@ describe('isInside', () => {
 })
 
 describe('indexSessionDirs', () => {
-  it('indexes by the canonical id with sizes', () => {
+  it('indexes by the canonical id with sizes', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-session-archive-'))
     const project = join(home, 'sessions', '--demo--')
     mkdirSync(join(project, 'abc'), { recursive: true })
     writeFileSync(join(project, 'abc', 'session.jsonl.zstd'), Buffer.alloc(128, 1))
-    const index = indexSessionDirs(join(home, 'sessions'))
+    const index = await indexSessionDirs(join(home, 'sessions'))
     expect(index.byId.get('session-abc')).toBeDefined()
     expect(index.byId.has('abc')).toBe(false)
     expect(index.sizes.get('session-abc')).toBe(128)
   })
 
-  it('does not follow symlinks that escape the sessions root', () => {
+  it('does not follow symlinks that escape the sessions root', async () => {
     if (process.platform === 'win32') return
     const home = mkdtempSync(join(tmpdir(), 'dsh-session-archive-'))
     const outside = mkdtempSync(join(tmpdir(), 'dsh-session-archive-outside-'))
     const project = join(home, 'sessions', '--demo--')
     mkdirSync(project, { recursive: true })
     symlinkSync(outside, join(project, 'escape'))
-    const index = indexSessionDirs(join(home, 'sessions'))
+    const index = await indexSessionDirs(join(home, 'sessions'))
     expect(index.byId.size).toBe(0)
     expect(index.unreadable).toHaveLength(1)
     expect(existsSync(outside)).toBe(true)
