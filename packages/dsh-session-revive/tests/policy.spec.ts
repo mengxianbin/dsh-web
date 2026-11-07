@@ -352,3 +352,63 @@ describe('detection and lifecycle edges', () => {
     expect(snap.held).toBe(0)
   })
 })
+
+describe('stop causes (design §7: max-tokens / durability-flush)', () => {
+  it('detects a stop cause as revive-class and runs it through the same quota chain', () => {
+    const p = policy()
+    const first = p.onError({ sessionId: 's', code: 'max-tokens', at: T0 })
+    expect(first[0]).toMatchObject({ kind: 'detect', cls: 'revive', code: 'max-tokens' })
+    expect(lastDecision(first)).toMatchObject({
+      action: 'revive',
+      reason: 'ok',
+      code: 'max-tokens',
+      quotaUsed: 1,
+      quotaLimit: 4,
+    })
+    // The stop cause consumes the same can as network deaths: TRANSPORT next.
+    expect(lastDecision(p.onError({ sessionId: 's', code: 'TRANSPORT', at: T0 + 16 * MIN }))).toMatchObject({
+      action: 'revive',
+      quotaUsed: 2,
+    })
+    expect(p.snapshot(T0).counters.reviveClass).toBe(2)
+  })
+
+  it('runs the durability stop cause through detection and the same consecutive-death breaker', () => {
+    const p = policy()
+    const first = p.onError({ sessionId: 'd', code: 'durability-flush', at: T0 })
+    expect(first[0]).toMatchObject({ kind: 'detect', cls: 'revive', code: 'durability-flush' })
+    expect(lastDecision(first)).toMatchObject({ action: 'revive', code: 'durability-flush' })
+    // Revive -> stop cause again inside 10 min = the consecutive same-cause
+    // circuit breaker trips with evidence and parks the session for good.
+    const second = p.onError({ sessionId: 'd', code: 'durability-flush', at: T0 + 3 * MIN })
+    expect(second.find((r) => r.kind === 'breaker')).toMatchObject({
+      event: 'trip',
+      code: 'durability-flush',
+      gapMs: 3 * MIN,
+    })
+    expect(lastDecision(second)).toMatchObject({ action: 'skip', reason: 'breaker-trip' })
+    expect(p.snapshot(T0 + 3 * MIN).counters.breakerTrips).toBe(1)
+    // After the trip the session stays parked on any later stop cause.
+    expect(lastDecision(p.onError({ sessionId: 'd', code: 'max-tokens', at: T0 + 30 * MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'breaker-stopped',
+    })
+  })
+
+  it('groups waves by the stop-cause code itself, leaving other causes independent', () => {
+    const p = policy()
+    expect(lastDecision(p.onError({ sessionId: 'w1', code: 'max-tokens', at: T0 }))).toMatchObject({
+      action: 'revive',
+    })
+    // Second same-code stop cause inside 15 min opens the wave and holds it.
+    expect(lastDecision(p.onError({ sessionId: 'w2', code: 'max-tokens', at: T0 + MIN }))).toMatchObject({
+      action: 'hold',
+      reason: 'wave-hold',
+      wave: { cause: 'max-tokens', count: 2 },
+    })
+    // The wave is keyed by code, so a different cause is not grouped into it.
+    expect(lastDecision(p.onError({ sessionId: 'w3', code: 'durability-flush', at: T0 + 2 * MIN }))).toMatchObject({
+      action: 'revive',
+    })
+  })
+})

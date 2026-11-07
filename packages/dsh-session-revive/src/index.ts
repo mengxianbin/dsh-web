@@ -5,11 +5,18 @@
  * at zero cost until resetsAt, a 10-minute breaker stops a session that dies
  * again right after a revival, same-cause waves hold sessions until a 5-minute
  * quiet period then release them staggered, and the 150k context watermark
- * parks oversized sessions. Every detection and decision is one structured
- * JSON log line. `mode: 'shadow'` (the default) suppresses only the send —
- * the full decision account still runs so the ruled parameters can be tuned
- * against a real night of logs; `mode: 'live'` queues the nudge through the
- * host session controller. Host-only package: no `dsh.client` face.
+ * parks oversized sessions. Two stop causes join the same account per the
+ * 2026-11-07 triage ruling (design §7): a `max-tokens` turn end (the provider
+ * answered, the output was truncated) and the goal-round-driver's durability
+ * flush failure warn (observed through a logger exporter tap) — both nudge
+ * with a cause-tagged text telling the model to `update_goal action=resume`
+ * first. Excluded causes (human abort, session resume/fork markers, goal
+ * block/complete) are never continued — they only write a `stop-parked`
+ * evidence line. Every detection and decision is one structured JSON log
+ * line. `mode: 'shadow'` (the default) suppresses only the send — the full
+ * decision account still runs so the ruled parameters can be tuned against a
+ * real night of logs; `mode: 'live'` queues the nudge through the host session
+ * controller. Host-only package: no `dsh.client` face.
  */
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
@@ -17,7 +24,14 @@ import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import z from 'schemastery'
-import { NUDGE_TEXT, STAGGER_MIN_MS, Config, resolveConfig } from './config.ts'
+import {
+  DURABILITY_WARN_RE,
+  PARKED_TURN_END_REASONS,
+  STAGGER_MIN_MS,
+  Config,
+  nudgeTextFor,
+  resolveConfig,
+} from './config.ts'
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeStatusRoute } from './host/routes.ts'
@@ -70,8 +84,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       ctx.logger.info(`dsh-session-revive ${JSON.stringify({ mode: resolved.mode, ...record })}`)
     }
 
-    const sendNudge = (sessionId: string, plannedAt: number): void => {
+    const sendNudge = (sessionId: string, plannedAt: number, code?: string): void => {
       const delay = Math.max(0, plannedAt - Date.now())
+      const text = nudgeTextFor(code)
       const timer = setTimeout(() => {
         sendTimers.delete(timer)
         void sessions
@@ -80,12 +95,12 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
               requestId: `session-revive-${randomUUID()}`,
               sessionId,
               mode: 'queue',
-              content: [{ type: 'text', text: NUDGE_TEXT }],
+              content: [{ type: 'text', text }],
             },
             abort.signal,
           )
           .then(() => {
-            log({ kind: 'log', at: Date.now(), event: 'nudge-sent', sessionId })
+            log({ kind: 'log', at: Date.now(), event: 'nudge-sent', sessionId, ...(code === undefined ? {} : { detail: { cause: code } }) })
           })
           .catch((error: unknown) => {
             log({
@@ -93,7 +108,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
               at: Date.now(),
               event: 'nudge-failed',
               sessionId,
-              detail: { error: String(error).slice(0, 300) },
+              detail: { error: String(error).slice(0, 300), ...(code === undefined ? {} : { cause: code }) },
             })
           })
       }, delay)
@@ -106,7 +121,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       if (resolved.mode !== 'live') return
       for (const record of records) {
         if (record.kind === 'decision' && record.action === 'revive') {
-          sendNudge(record.sessionId, record.plannedAt ?? Date.now())
+          sendNudge(record.sessionId, record.plannedAt ?? Date.now(), record.code)
         }
       }
     }
@@ -127,6 +142,14 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         },
         Math.max(0, deadline - Date.now()),
       )
+    }
+
+    /**
+     * Log a parked stop: an excluded cause the ruling says never to continue
+     * (design §7.1). Evidence only — no policy state, no quota, no send.
+     */
+    const park = (at: number, sessionId: string, cause: string, detail?: Record<string, unknown>): void => {
+      log({ kind: 'log', at, event: 'stop-parked', sessionId, detail: { cause, ...detail } })
     }
 
     const offEvent = ctx.on('session/event', (session: Session, event: SessionEvent) => {
@@ -150,6 +173,34 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           armWake()
           return
         }
+        if (reason.kind === 'max-tokens') {
+          // Stop cause (design §7.2): the provider answered — the turn ran to
+          // the output ceiling — so a stale wall loses its subject first; the
+          // truncation then enters the same revival account as a death.
+          for (const record of policy.onSuccess(sessionId, at)) log(record)
+          const origin = session.header.origin
+          applyRecords(
+            policy.onError({
+              sessionId,
+              code: 'max-tokens',
+              at,
+              ...(typeof origin === 'string' ? { origin } : {}),
+            }),
+          )
+          armWake()
+          return
+        }
+        // Excluded stop causes (design §7.1): evidence line, never continued.
+        if (reason.kind === 'aborted') {
+          park(at, sessionId, 'human-abort', { cancel: reason.reason.kind })
+          for (const record of policy.onSuccess(sessionId, at)) log(record)
+          return
+        }
+        if (PARKED_TURN_END_REASONS.has(reason.kind)) {
+          park(at, sessionId, reason.kind)
+          for (const record of policy.onSuccess(sessionId, at)) log(record)
+          return
+        }
         for (const record of policy.onSuccess(sessionId, at)) log(record)
         return
       }
@@ -158,10 +209,58 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         if (usage !== undefined) {
           policy.recordUsage(sessionId, usage.inputTokens + (usage.cacheReadTokens ?? 0))
         }
+        return
+      }
+      // Durable goal lifecycle: block/complete are parked stops (design §7.1).
+      // Structural narrowing: `goal/change` is declared by the harness goal
+      // package's module augmentation, which this package does not link — the
+      // event still arrives on the session stream, so match by literal and
+      // view the payload shape structurally.
+      if ((event.type as string) === 'goal/change') {
+        const at = typeof event.time === 'number' ? event.time : Date.now()
+        const change = event.data as unknown as {
+          operation?: string
+          goal?: { blockedReason?: { code?: string; message?: string } }
+        }
+        if (change.operation === 'block') {
+          park(at, sessionId, 'goal-blocked', {
+            code: change.goal?.blockedReason?.code,
+            message: change.goal?.blockedReason?.message,
+          })
+          return
+        }
+        if (change.operation === 'complete') {
+          park(at, sessionId, 'goal-complete')
+          return
+        }
       }
     })
     const offDisposed = ctx.on('session/disposed', (session: Session) => {
       policy.forget(String(session.id))
+    })
+    /**
+     * Durability stop-cause tap (design §7.1): when goal-round-driver's
+     * checkpoint flush fails it warns and disarms — a silent goal death no
+     * `turn/end` reports. The driver logs through the shared logger, so a
+     * logger exporter observes the exact warn line and feeds it into the same
+     * revival account. `levels.default = 2` (LoggerLevel.WARN) passes
+     * error+info+warn and drops debug; the regex does the rest.
+     */
+    const offTap = ctx.logger.exporter({
+      levels: { default: 2 },
+      export: (message) => {
+        if (message.type !== 'warn') return
+        try {
+          const text = Array.isArray(message.args) ? message.args.map(String).join(' ') : ''
+          const hit = DURABILITY_WARN_RE.exec(text)
+          if (hit === null) return
+          const at = typeof message.ts === 'number' ? message.ts : Date.now()
+          applyRecords(policy.onError({ sessionId: hit[1], code: 'durability-flush', at }))
+          armWake()
+        } catch {
+          // A broken tap must never take down the logger pipeline.
+        }
+      },
     })
     const disposeRoute = ctx.webServer.register(
       makeStatusRoute(() => ({ mode: resolved.mode, ...policy.snapshot(Date.now()) })),
@@ -178,6 +277,11 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         offDisposed()
       } catch {
         // Listener already gone during shutdown.
+      }
+      try {
+        offTap()
+      } catch {
+        // Exporter already gone during shutdown.
       }
       if (wakeTimer !== undefined) clearTimeout(wakeTimer)
       for (const timer of sendTimers) clearTimeout(timer)

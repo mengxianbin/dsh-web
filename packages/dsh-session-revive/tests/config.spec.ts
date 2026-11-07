@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   Config,
+  DURABILITY_WARN_RE,
+  NUDGE_TEXT,
+  STOP_CAUSES,
   STAGGER_DEFAULT_MS,
   STAGGER_MIN_MS,
   classifyFailure,
+  nudgeTextFor,
   resolveConfig,
 } from '../src/config.ts'
 
@@ -65,5 +69,47 @@ describe('classifyFailure', () => {
     for (const code of ['PI_AI_ERROR', 'RATE_LIMIT', 'SERVER', 'ABORTED', 'UNKNOWN']) {
       expect(classifyFailure(code)).toBe('other')
     }
+  })
+
+  it('folds the two stop causes into revive class without touching the ruled REVIVE_CODES literal (design §7.2)', () => {
+    expect(new Set(STOP_CAUSES)).toEqual(new Set(['max-tokens', 'durability-flush']))
+    expect(classifyFailure('max-tokens')).toBe('revive')
+    expect(classifyFailure('durability-flush')).toBe('revive')
+    // Case-sensitive on purpose: compaction's MAX_TOKENS is not a stop cause.
+    expect(classifyFailure('MAX_TOKENS')).toBe('other')
+    // Network codes keep their class.
+    expect(classifyFailure('TRANSPORT')).toBe('revive')
+    expect(classifyFailure('TIMEOUT')).toBe('revive')
+  })
+})
+
+describe('cause-tagged nudge texts (design §7.2(4))', () => {
+  it('keeps the plain continue for network causes and unknown causes', () => {
+    expect(nudgeTextFor('TRANSPORT')).toBe(NUDGE_TEXT)
+    expect(nudgeTextFor('TIMEOUT')).toBe(NUDGE_TEXT)
+    expect(nudgeTextFor(undefined)).toBe(NUDGE_TEXT)
+    expect(nudgeTextFor('QUOTA')).toBe(NUDGE_TEXT)
+  })
+
+  it('tells the model to resume the goal first for both stop causes', () => {
+    for (const cause of ['max-tokens', 'durability-flush']) {
+      const text = nudgeTextFor(cause)
+      expect(text).not.toBe(NUDGE_TEXT)
+      expect(text).toContain('update_goal action=resume')
+      expect(text.startsWith('继续')).toBe(true)
+    }
+    expect(nudgeTextFor('max-tokens')).toContain('token 上限')
+    expect(nudgeTextFor('durability-flush')).toContain('检查点')
+  })
+})
+
+describe('durability warn signature (design §7.1)', () => {
+  it('captures the agent id from the exact driver warn line and ignores everything else', () => {
+    const line =
+      'goal-round-driver: durability checkpoint failed for agent "f9e3c2d1-0000-4000-8000-1234567890ab": Error: disk full'
+    const hit = DURABILITY_WARN_RE.exec(line)
+    expect(hit?.[1]).toBe('f9e3c2d1-0000-4000-8000-1234567890ab')
+    expect(DURABILITY_WARN_RE.test('dsh-session-revive {"mode":"shadow"}')).toBe(false)
+    expect(DURABILITY_WARN_RE.test('goal-round-driver: armed a session')).toBe(false)
   })
 })

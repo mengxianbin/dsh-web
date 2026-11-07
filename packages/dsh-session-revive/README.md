@@ -8,16 +8,34 @@ Shadow-first automatic session revival for DSH Web: the plugin observes every
 rolling 4h x 4 quota per chain, wall-class suspension at zero cost until
 `resetsAt`, a 10-minute circuit breaker, same-cause wave holds released
 staggered after a 5-minute quiet period, and the 150k context watermark.
-Every detection and decision is one structured JSON log line. The default
-`shadow` mode never touches a session; `mode: 'live'` queues a continue
-nudge through the Host session controller. Host-only — the package declares
-no `dsh.client` face.
+Two stop causes join the same account per the 2026-11-07 triage ruling
+(design §7): a `max-tokens` turn end (the provider answered, the output hit
+the ceiling) and the goal-round-driver's durability flush failure (observed
+through a logger exporter tap). Excluded causes — human abort, session
+resume/fork markers, goal block/complete — are never continued; they only
+write a `stop-parked` evidence line. Every detection and decision is one
+structured JSON log line. The default `shadow` mode never touches a session;
+`mode: 'live'` queues a continue nudge through the Host session controller.
+Host-only — the package declares no `dsh.client` face.
 
 ## What it does
 
 - Classifies each `turn/end` error: revive-class (`TRANSPORT`, `TIMEOUT`)
   enters the revival flow, wall-class records a zero-consumption suspension
   until `resetsAt`, and other codes are observed and logged only.
+- Folds the two stop causes (design §7.2) into the same revival flow: a
+  `max-tokens` turn end first clears any stale suspension (the provider did
+  answer), then runs the account as a revive-class death; a durability flush
+  failure warn line from the goal-round-driver is captured by a logger
+  exporter tap and fed in the same way. Both consume the same 4h x 4 can,
+  breaker, and waves as network deaths.
+- Tags the live nudge by cause (design §7.2(4)): stop causes tell the model
+  to `update_goal action=resume` first (the nudge turn carries direct-human
+  authority), while `TRANSPORT`/`TIMEOUT` keep the plain "continue".
+- Writes a `stop-parked` evidence line — never a continuation — for excluded
+  stops (design §7.1): `turn/end` abort (with its cancel kind),
+  `interrupted`/`forked` lifecycle markers, and `goal/change` block or
+  complete.
 - Runs the ruled account before every revival: breaker first (a re-death
   within 10 minutes of a revival stops that session for good), then
   suspension, the 150k watermark, the wave hold, and the rolling 4h x 4
@@ -94,6 +112,9 @@ the active `mode`.
   (the watchdog chain is a separate line).
 - Codes outside both lists (for example `RATE_LIMIT`, `PI_AI_ERROR`) neither
   revive nor suspend: only the design's wall enumeration parks a session.
+- The durability stop cause couples to the goal-round-driver's exact warn
+  wording (a regex over the logger stream); a driver wording change silently
+  stops detection until the signature is updated.
 - The first error of a forming wave is decided before the wave exists; if
   the network is already down, the breaker and the 4h x 4 quota bound the
   damage.
