@@ -38,11 +38,12 @@ function endorsedTail(count: number): string {
 interface EndorsedRepo {
   dir: string
   hash: string
+  hash2: string
 }
 
 let repoCache: EndorsedRepo | undefined
 
-/** A real git repo whose single commit sits behind an origin remote-tracking ref (hermetic endorsement fixture). */
+/** A real git repo whose commits sit behind an origin remote-tracking ref (hermetic endorsement fixture). */
 function endorsedRepo(): EndorsedRepo {
   if (repoCache !== undefined) return repoCache
   const dir = mkdtempSync(join(tmpdir(), 'seal-endorse-'))
@@ -54,8 +55,15 @@ function endorsedRepo(): EndorsedRepo {
   run(['add', '.'])
   run(['commit', '-q', '-m', 'seed'])
   const hash = run(['rev-parse', 'HEAD']).trim()
-  run(['update-ref', 'refs/remotes/origin/main', hash])
-  repoCache = { dir, hash }
+  // Second live hash (seal-hash-backtick-1108): multi-item lists / item-level
+  // backtick cases need two live hashes; the first stays on origin/main's
+  // ancestry so every pre-existing reading is unchanged.
+  writeFileSync(join(dir, 'seed2.txt'), 'seed2\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'seed2'])
+  const hash2 = run(['rev-parse', 'HEAD']).trim()
+  run(['update-ref', 'refs/remotes/origin/main', hash2])
+  repoCache = { dir, hash, hash2 }
   return repoCache
 }
 
@@ -404,6 +412,63 @@ describe('declared-list endorsement — 核验与声明同源 (seal-declare-veri
     ])
     // When the seal is judged, the legacy path still scans the whole message
     // Then the dead prose hash fails the endorsement exactly as before
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+})
+
+describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtick-1108)', () => {
+  it('operator keeps DONE green when the whole DONE tail is wrapped in inline code', () => {
+    // Given a 联动腿 DONE tail pasted as one inline-code span (closing backtick
+    // glued to the last declared hash — the session-13e402ca 2026-11-08 shape)
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(`联动腿贴行：\n- **harness（脚本化声明，六维全绿）**：\`SAVE_STATUS=DONE${declaredTail([repo.hash, repo.hash2])}\``),
+    ])
+    // When the seal is judged, the closing backtick is stripped, not hashed
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then the declared list verifies and DONE stays green
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it('operator gets non-green when a declared item is non-hex after stripping', () => {
+    // Given a declared list with a non-hex item (zz) behind a trailing backtick
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(`落点头已声明。\n\nSAVE_STATUS=DONE${declaredTail([repo.hash, 'zz'], 2)}\``),
+    ])
+    // When the seal is judged, the invalid item fails closed — never silently dropped
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator keeps DONE green when list items carry their own backticks', () => {
+    // Given declared items individually wrapped in inline code (`h1`,h2)
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    const itemized = `\`${repo.hash}\`,${repo.hash2}`
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(`落点头已声明。\n\nSAVE_STATUS=DONE${endorsedTail(2)} hashes=${itemized}`),
+    ])
+    // When the seal is judged, each item is stripped then verified
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then DONE stays green — 项级剥离
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it('operator gets non-green when a wrapped tail still declares a dead hash', () => {
+    // Given an inline-code-wrapped tail whose declared list names a dead hash
+    const host = createFakeHost()
+    withTranscript(host, 'session-a', [
+      assistantMsg(`落点头已声明。\n\n- **harness（脚本化声明，六维全绿）**：\`SAVE_STATUS=DONE${declaredTail(['f'.repeat(40)])}\``),
+    ])
+    // When the seal is judged, stripping only repairs formatting, not content
+    // Then the dead hash still fails verification (剥离只及排版不及内容)
     expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
   })
 })
