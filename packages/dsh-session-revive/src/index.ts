@@ -29,6 +29,7 @@ import {
   PARKED_TURN_END_REASONS,
   STAGGER_MIN_MS,
   Config,
+  conditionOverrideNotice,
   nudgeTextFor,
   resolveConfig,
 } from './config.ts'
@@ -71,8 +72,16 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       `dsh-session-revive: staggerMs ${raw} is below the ${STAGGER_MIN_MS} ms design floor; clamped to ${clamped}`,
     )
   })
+  // 拍板账⑨: a condition-list override is loud at startup — the effective
+  // lists and the ruled defaults print side by side so drift shows on boot.
+  const overrideNotice = conditionOverrideNotice(resolved)
+  if (overrideNotice !== undefined) ctx.logger.warn(overrideNotice)
   ctx.effect(() => {
-    const policy = new RevivalPolicy({ staggerMs: resolved.staggerMs })
+    const policy = new RevivalPolicy({
+      staggerMs: resolved.staggerMs,
+      conditions: resolved.conditions,
+      conditionOverrides: resolved.conditionOverrides,
+    })
     const sessions = ctx.sessionController as unknown as ReviveSessionApi
     const abort = new AbortController()
     const sendTimers = new Set<ReturnType<typeof setTimeout>>()
@@ -159,6 +168,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         const reason = event.data.reason
         if (reason.kind === 'error') {
           const origin = session.header.origin
+          // 拍板⑩: the folded request header is the route the failing request
+          // used — the wall route a later `model/selection` is compared against.
+          const header = session.requestHeader()
           applyRecords(
             policy.onError({
               sessionId,
@@ -168,6 +180,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
                 : { providerRetryAfterMs: reason.error.providerRetryAfterMs }),
               at,
               ...(typeof origin === 'string' ? { origin } : {}),
+              ...(header === undefined
+                ? {}
+                : { route: { provider: header.config.provider, model: header.config.model } }),
             }),
           )
           armWake()
@@ -209,6 +224,17 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         if (usage !== undefined) {
           policy.recordUsage(sessionId, usage.inputTokens + (usage.cacheReadTokens ?? 0))
         }
+        return
+      }
+      // 拍板⑩ 墙随路由走: a durable route switch releases a wall suspension
+      // and rejoins the flow as a revive-class death (auto-route's `switch`
+      // lands as this event; the revive plugin stays the single nudge hand,
+      // so the quota account has exactly one writer).
+      if (event.type === 'model/selection') {
+        const at = typeof event.time === 'number' ? event.time : Date.now()
+        const { provider, model } = event.data
+        applyRecords(policy.onModelSelection({ sessionId, provider, model, at }))
+        armWake()
         return
       }
       // Durable goal lifecycle: block/complete are parked stops (design §7.1).

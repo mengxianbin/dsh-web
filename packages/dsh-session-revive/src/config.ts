@@ -12,19 +12,47 @@ export interface Config {
   mode?: 'shadow' | 'live'
   /** Minimum spacing between planned revivals in ms (default and floor 10s). */
   staggerMs?: number
+  /**
+   * Replace the revive-class code list (拍板账⑨ 条件清单配置化). Absent keeps
+   * the ruled {@link REVIVE_CODES} default. The whole list is replaced, never
+   * merged: config only moves where the list lives — the ruling obligation
+   * does not move, so changing values still requires a design §4.1 statistics
+   * re-run before a new ruling. `STOP_CAUSES` is deliberately NOT configurable
+   * (the design §7 triage ruling stays in code).
+   */
+  reviveCodes?: string[]
+  /** Replace the wall-class code list (拍板账⑨); absent keeps the ruled {@link WALL_CODES} default. */
+  wallCodes?: string[]
 }
 
 export const Config: z<Config> = z.object({
   enabled: z.boolean(),
   mode: z.union([z.const('shadow'), z.const('live')]),
   staggerMs: z.number(),
+  reviveCodes: z.array(z.string()),
+  wallCodes: z.array(z.string()),
 })
+
+/**
+ * The two configurable code lists (拍板账⑨): which codes classify as revive
+ * vs wall. The code defaults are the ruled design values; profile config may
+ * replace either list wholesale — config moves where the list lives, not the
+ * ruling obligation behind it.
+ */
+export interface ConditionLists {
+  revive: ReadonlySet<string>
+  wall: ReadonlySet<string>
+}
 
 /** Fully resolved runtime config. */
 export interface ResolvedConfig {
   enabled: boolean
   mode: 'shadow' | 'live'
   staggerMs: number
+  /** Effective condition lists: profile config when present, else the ruled defaults. */
+  conditions: ConditionLists
+  /** Config keys that replaced a ruled default (empty = pure code defaults in force). */
+  conditionOverrides: string[]
 }
 
 // ── Ruled parameters (design session-auto-revival-design-1102 §四; 实施不改值 —
@@ -111,15 +139,21 @@ export const WALL_CODES: ReadonlySet<string> = new Set([
 /** Failure classes of one `turn/end` error. */
 export type FailureClass = 'revive' | 'wall' | 'other'
 
+/** The ruled condition lists in force when profile config does not override them (设计裁定值 = 代码默认值). */
+export const RULED_CONDITIONS: ConditionLists = { revive: REVIVE_CODES, wall: WALL_CODES }
+
 /**
  * Classify an `LlmFailure.code` (or a synthetic stop cause): revive-class
  * enters the revival flow, wall-class records a zero-consumption suspension,
  * everything else is observed and logged but never revived (design §4.2
  * enumeration; stop causes added by design §7.2 — same chain, new causes).
+ * `conditions` defaults to the ruled lists; the policy passes the effective
+ * (possibly profile-overridden) lists. `STOP_CAUSES` folds regardless — the
+ * §7 triage ruling stays in code and is not configurable.
  */
-export function classifyFailure(code: string): FailureClass {
-  if (REVIVE_CODES.has(code) || STOP_CAUSES.has(code)) return 'revive'
-  if (WALL_CODES.has(code)) return 'wall'
+export function classifyFailure(code: string, conditions: ConditionLists = RULED_CONDITIONS): FailureClass {
+  if (conditions.revive.has(code) || STOP_CAUSES.has(code)) return 'revive'
+  if (conditions.wall.has(code)) return 'wall'
   return 'other'
 }
 
@@ -149,6 +183,8 @@ export function nudgeTextFor(code: string | undefined): string {
  * Apply defaults and clamps to one config validation pass.
  * `mode` defaults to `shadow`: the plugin only writes structured logs until
  * the turn-on switch is explicitly set to `live`.
+ * Condition lists default to the ruled design values; a present config key
+ * replaces that list wholesale and is recorded in `conditionOverrides`.
  * @param config - schema-validated config shape.
  * @param warnStagger - called when `staggerMs` violates the ruled floor.
  * @returns the resolved runtime config.
@@ -162,9 +198,38 @@ export function resolveConfig(
     warnStagger?.(staggerMs, STAGGER_MIN_MS)
     staggerMs = STAGGER_MIN_MS
   }
+  const conditions: ConditionLists = {
+    revive: config.reviveCodes !== undefined ? new Set(config.reviveCodes) : REVIVE_CODES,
+    wall: config.wallCodes !== undefined ? new Set(config.wallCodes) : WALL_CODES,
+  }
+  const conditionOverrides: string[] = []
+  if (config.reviveCodes !== undefined) conditionOverrides.push('reviveCodes')
+  if (config.wallCodes !== undefined) conditionOverrides.push('wallCodes')
   return {
     enabled: config.enabled ?? true,
     mode: config.mode ?? 'shadow',
     staggerMs,
+    conditions,
+    conditionOverrides,
   }
+}
+
+/**
+ * The loud startup line for a condition-list override (拍板账⑨ 判据「启动日志
+ * 响亮记 override」): names the overridden keys, prints the effective lists next
+ * to the ruled defaults so any drift is visible on every boot, and restates
+ * that config only moved where the list lives — changing values still requires
+ * a design §4.1 statistics re-run before a new ruling.
+ * @param resolved - the resolved runtime config.
+ * @returns the message when any list is overridden, `undefined` otherwise.
+ */
+export function conditionOverrideNotice(resolved: ResolvedConfig): string | undefined {
+  if (resolved.conditionOverrides.length === 0) return undefined
+  const show = (set: ReadonlySet<string>): string => (set.size === 0 ? '<empty>' : [...set].join(','))
+  return (
+    `dsh-session-revive: condition lists overridden by profile config [${resolved.conditionOverrides.join(', ')}] — ` +
+    `effective revive=[${show(resolved.conditions.revive)}] wall=[${show(resolved.conditions.wall)}]; ` +
+    `ruled defaults revive=[${show(REVIVE_CODES)}] wall=[${show(WALL_CODES)}]. ` +
+    'Config only moves where the list lives: changing values still requires a design §4.1 stats re-run.'
+  )
 }

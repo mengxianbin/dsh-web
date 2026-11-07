@@ -18,6 +18,9 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
 
 - 给每个 `turn/end` 错误分类：可复活类（`TRANSPORT`、`TIMEOUT`）进复活流，
   撞墙类记零消耗挂起直到 `resetsAt`，其余码只观测、只记日志。
+- 路由切走即解除撞墙挂起（2026-11-07 裁定）：持久 `model/selection` 事件的
+  provider 离开撞墙路由时清掉挂起、按可复活类计 1 次额度并入复活流——错峰、
+  断路器与 150k 水位照旧；provider 未变（或撞墙路由未观测到）则维持零消耗挂起。
 - 两个停轮原因并入同一条复活账（设计 §7.2）：`max-tokens` 停轮先清掉陈旧
   挂起（供应商确实响应过）再按可复活类死亡走账；goal-round-driver 的检查点
   写入失败告警行由 logger exporter tap 捕获、同样喂入。两者与网络死因共用
@@ -33,7 +36,7 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
 - 同因波开启期间（15 分钟内同码错误达到 2 次）挂起会话，5 分钟静默后释放，
   逐个错峰复活、各自扣自己罐的额度。
 - 提供 `GET /api/session-revive/status`（仅回环）：方式、计数、挂起/停用/
-  断路状态与分罐额度，用于重启后验证与留证复核。
+  断路状态、分罐额度与生效条件清单，用于重启后验证与留证复核。
 
 ## 安装
 
@@ -55,11 +58,15 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 | `enabled` | boolean | `true` | 总开关；`false` 时监听、定时器与路由全部不挂 |
 | `mode` | string（`shadow` 或 `live`） | `shadow` | `shadow` 记完整决策账、只扣发送；`live` 才排队 nudge |
 | `staggerMs` | number | `10000` | 复活计划的最小间隔；低于 `10000` 一律夹到 `10000` 并告警 |
+| `reviveCodes` | string[] | 裁定的可复活名单（`TRANSPORT`、`TIMEOUT`） | 整体替换可复活类名单；配置只搬存放地，改值仍须重跑设计档 §4.1 统计再裁 |
+| `wallCodes` | string[] | 裁定的撞墙名单（设计枚举加其 `AUTH` 族与模型配置族） | 整体替换撞墙类名单，裁定义务同上 |
 
-裁定参数由设计档定死、不可配置：4 小时窗口内每链 4 次（只计可复活类死亡）、
-10 分钟断路器、15 分钟内同码 2 次成波且 5 分钟无新同码错误才释放、
-150000 token 上下文水位停靠不 nudge。撞墙类码（设计名单加上其 `AUTH` 族与
-模型配置族）零消耗并把会话挂起到 `resetsAt`。
+数值类裁定参数由设计档定死、不可配置：4 小时窗口内每链 4 次（只计可复活类
+死亡）、10 分钟断路器、15 分钟内同码 2 次成波且 5 分钟无新同码错误才释放、
+150000 token 上下文水位停靠不 nudge。两张码表是唯一的可配置面：代码默认值
+即设计裁定值，profile 配置可整体替换其一——配置只搬存放地，改值仍须在新裁定
+前重跑设计档 §4.1 统计。状态端点回显生效清单（含哪些键被覆盖），启动日志
+响亮记 override。撞墙类码零消耗并把会话挂起到 `resetsAt`。
 
 每次判定经宿主 logger 落一行：`dsh-session-revive ` 前缀加一个带当前 `mode`
 标记的 JSON 对象。
@@ -91,3 +98,5 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
   驱动侧改文案会让检测静默失效，须同步更新签名。
 - 成波中的第一个错误在波成形前就已判定；若网络当时已断，损失由断路器与
   4h x 4 额度兜住。
+- 路由切走解除依赖失败请求已折叠进会话的请求头：未观测到路由的撞墙会
+  fail-closed 维持挂起——证明 provider 已切离需要比对的两边。

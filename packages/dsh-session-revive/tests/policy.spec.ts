@@ -4,8 +4,9 @@ import {
   QUOTA_WINDOW_MS,
   STAGGER_MIN_MS,
   WAVE_COOLDOWN_MS,
+  WALL_CODES,
 } from '../src/config.ts'
-import { RevivalPolicy, type DecisionRecord, type PolicyRecord } from '../src/policy.ts'
+import { ROUTE_SWITCH_CODE, RevivalPolicy, type DecisionRecord, type PolicyRecord } from '../src/policy.ts'
 
 /** Fixed epoch so every arithmetic in the expectations is exact. */
 const T0 = 1_760_000_000_000
@@ -409,6 +410,220 @@ describe('stop causes (design §7: max-tokens / durability-flush)', () => {
     // The wave is keyed by code, so a different cause is not grouped into it.
     expect(lastDecision(p.onError({ sessionId: 'w3', code: 'durability-flush', at: T0 + 2 * MIN }))).toMatchObject({
       action: 'revive',
+    })
+  })
+})
+
+describe('墙随路由走: a model/selection releases a wall suspension (拍板⑩)', () => {
+  /** Wall-suspend a session on a known route (the folded header of the failing request). */
+  function wall(
+    p: RevivalPolicy,
+    sessionId: string,
+    at: number,
+    provider: string,
+    opts: { retryAfterMs?: number; withRoute?: boolean } = {},
+  ): void {
+    p.onError({
+      sessionId,
+      code: 'QUOTA',
+      at,
+      ...(opts.retryAfterMs === undefined ? {} : { providerRetryAfterMs: opts.retryAfterMs }),
+      ...(opts.withRoute === false ? {} : { route: { provider, model: `${provider}-model` } }),
+    })
+  }
+
+  it('切走 → 挂起解除且计 1 次额度 (a future resetsAt does not block the release)', () => {
+    const p = policy()
+    wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 }) // resetsAt = T0+60s, still in the future
+    expect(p.snapshot(T0).suspended).toBe(1)
+    const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', model: 'mimo-v2.6-flash', at: T0 + 30_000 })
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        kind: 'log',
+        event: 'wall-route-release',
+        detail: expect.objectContaining({
+          from: 'deepseek/deepseek-model',
+          to: 'mimo/mimo-v2.6-flash',
+          resetsAt: T0 + 60_000,
+        }),
+      }),
+    )
+    const decision = lastDecision(records)
+    expect(decision).toMatchObject({
+      action: 'revive',
+      reason: 'ok',
+      code: ROUTE_SWITCH_CODE,
+      quotaUsed: 1,
+      quotaLimit: 4,
+      plannedAt: T0 + 30_000,
+    })
+    expect(p.snapshot(T0 + 30_000).suspended).toBe(0)
+    expect(p.snapshot(T0 + 30_000).quota).toContainEqual({ chainId: 'A', used: 1 })
+  })
+
+  it('未切走 → 维持零消耗 (same provider — even with a different model — keeps the hold)', () => {
+    const p = policy()
+    wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 })
+    const records = p.onModelSelection({
+      sessionId: 'A',
+      provider: 'deepseek',
+      model: 'deepseek-v4-pro', // model changed, provider did not
+      at: T0 + 30_000,
+    })
+    expect(decisions(records)).toEqual([])
+    expect(records).toContainEqual(
+      expect.objectContaining({ kind: 'log', event: 'wall-route-unchanged' }),
+    )
+    const snap = p.snapshot(T0 + 30_000)
+    expect(snap.suspended).toBe(1)
+    expect(snap.quota).toEqual([]) // zero consumption
+    expect(snap.counters.revived).toBe(0)
+    expect(snap.counters.cleared).toBe(0)
+  })
+
+  it('非挂起会话的 selection 不触发', () => {
+    const p = policy()
+    expect(p.onModelSelection({ sessionId: 'fresh', provider: 'mimo', at: T0 })).toEqual([])
+    // Suspended, then a successful turn clears the hold: later selections are no-ops.
+    wall(p, 'B', T0, 'deepseek')
+    expect(p.onSuccess('B', T0 + MIN)).toEqual([
+      { kind: 'state', at: T0 + MIN, event: 'clear', sessionId: 'B', cleared: ['suspended'] },
+    ])
+    expect(p.onModelSelection({ sessionId: 'B', provider: 'mimo', at: T0 + 2 * MIN })).toEqual([])
+    expect(p.snapshot(T0 + 2 * MIN).suspended).toBe(0)
+    expect(p.snapshot(T0 + 2 * MIN).quota).toEqual([])
+  })
+
+  it('fail-closed: a wall without an observed route keeps the hold even on a foreign provider', () => {
+    const p = policy()
+    wall(p, 'A', T0, 'deepseek', { withRoute: false }) // no folded header at wall time
+    const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 30_000 })
+    expect(decisions(records)).toEqual([])
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        kind: 'log',
+        event: 'wall-route-unchanged',
+        detail: expect.objectContaining({ wallRoute: 'unknown' }),
+      }),
+    )
+    expect(p.snapshot(T0 + 30_000).suspended).toBe(1)
+    expect(p.snapshot(T0 + 30_000).quota).toEqual([])
+  })
+
+  it('第 2 行原样: without a selection event nothing wakes on resetsAt alone', () => {
+    const p = policy()
+    wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 }) // resetsAt = T0+60s
+    expect(p.snapshot(T0 + 5 * MIN).suspended).toBe(1) // expired hold still sits: no timer exists
+    expect(p.snapshot(T0 + 5 * MIN).counters.revived).toBe(0)
+  })
+
+  it('断路器照旧: a release right after a revival trips the breaker instead of reviving', () => {
+    const p = policy()
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 }))).toMatchObject({
+      action: 'revive',
+      quotaUsed: 1,
+    })
+    wall(p, 'A', T0 + 2 * MIN, 'deepseek') // dies (wall) inside the breaker window
+    const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 3 * MIN })
+    expect(records).toContainEqual(
+      expect.objectContaining({ kind: 'breaker', event: 'trip', sessionId: 'A', gapMs: 3 * MIN, code: ROUTE_SWITCH_CODE }),
+    )
+    expect(lastDecision(records)).toMatchObject({ action: 'skip', reason: 'breaker-trip' })
+    const snap = p.snapshot(T0 + 3 * MIN)
+    expect(snap.tripped).toEqual(['A'])
+    expect(snap.suspended).toBe(0) // the hold still releases; the breaker is what stops it
+    expect(snap.quota).toContainEqual({ chainId: 'A', used: 1 }) // no second stamp
+  })
+
+  it('150k 水位照旧: the release parks at the watermark instead of nudging', () => {
+    const p = policy()
+    p.recordUsage('A', 200_000)
+    wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 })
+    const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 30_000 })
+    expect(lastDecision(records)).toMatchObject({
+      action: 'skip',
+      reason: 'context-limit',
+      contextTokens: 200_000,
+    })
+    expect(p.snapshot(T0 + 30_000).suspended).toBe(0)
+    expect(p.snapshot(T0 + 30_000).quota).toEqual([])
+  })
+
+  it('额度罐: releases consume the same 4h x 4 can; the fifth skips quota-exhausted', () => {
+    const p = policy()
+    for (let index = 0; index < 4; index += 1) {
+      const wallAt = T0 + index * 16 * MIN // 16 min spacing: past the breaker, inside the window
+      wall(p, 'A', wallAt, 'deepseek', { retryAfterMs: 60_000 })
+      const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: wallAt + 30_000 })
+      expect(lastDecision(records)).toMatchObject({ action: 'revive', quotaUsed: index + 1 })
+    }
+    wall(p, 'A', T0 + 64 * MIN, 'deepseek', { retryAfterMs: 60_000 })
+    const fifth = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 64 * MIN + 30_000 })
+    expect(lastDecision(fifth)).toMatchObject({
+      action: 'skip',
+      reason: 'quota-exhausted',
+      quotaUsed: 4,
+      quotaLimit: 4,
+    })
+    const snap = p.snapshot(T0 + 64 * MIN + 30_000)
+    expect(snap.suspended).toBe(0) // the hold still releases; only the revival is capped
+    expect(snap.counters.revived).toBe(4)
+  })
+
+  it('波挂起不双击: the release drops a pending wave hold so cooldown cannot re-revive', () => {
+    const p = policy()
+    // First network death revives; the second (11 min later: past the breaker,
+    // inside the 15 min wave window) opens the wave and holds A.
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 }))).toMatchObject({ action: 'revive' })
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 11 * MIN }))).toMatchObject({
+      action: 'hold',
+      reason: 'wave-hold',
+    })
+    expect(p.snapshot(T0 + 11 * MIN).held).toBe(1)
+    // The session then hits a wall on its route; the wave hold stays pending.
+    wall(p, 'A', T0 + 12 * MIN, 'deepseek', { retryAfterMs: 60_000 })
+    expect(p.snapshot(T0 + 12 * MIN).held).toBe(1)
+    // The route switch releases both the suspension and the wave hold, one stamp.
+    const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 13 * MIN })
+    expect(records).toContainEqual(
+      expect.objectContaining({ kind: 'state', event: 'clear', cleared: ['suspended', 'held'] }),
+    )
+    expect(lastDecision(records)).toMatchObject({ action: 'revive', quotaUsed: 2 })
+    expect(p.snapshot(T0 + 13 * MIN).held).toBe(0)
+    // The wave cooldown later finds nobody held: no double revive, no extra stamp.
+    expect(p.releaseDue(T0 + 11 * MIN + WAVE_COOLDOWN_MS + MIN)).toEqual([])
+    expect(p.snapshot(T0 + 17 * MIN).quota).toContainEqual({ chainId: 'A', used: 2 })
+  })
+})
+
+describe('condition lists echoed from the policy (拍板⑨ status 回显生效清单)', () => {
+  it('defaults to the ruled lists with no overrides', () => {
+    expect(policy().snapshot(T0).conditions).toEqual({
+      revive: ['TRANSPORT', 'TIMEOUT'],
+      wall: [...WALL_CODES],
+      overridden: [],
+    })
+  })
+
+  it('echoes overridden lists exactly as configured and classifies by them', () => {
+    const p = new RevivalPolicy({
+      staggerMs: STAGGER_MIN_MS,
+      conditions: { revive: new Set(['A']), wall: new Set(['B', 'C']) },
+      conditionOverrides: ['reviveCodes', 'wallCodes'],
+    })
+    expect(p.snapshot(T0).conditions).toEqual({
+      revive: ['A'],
+      wall: ['B', 'C'],
+      overridden: ['reviveCodes', 'wallCodes'],
+    })
+    expect(lastDecision(p.onError({ sessionId: 's1', code: 'A', at: T0 }))).toMatchObject({ action: 'revive' })
+    expect(lastDecision(p.onError({ sessionId: 's2', code: 'B', at: T0 + 16 * MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'wall-class',
+    })
+    expect(lastDecision(p.onError({ sessionId: 's3', code: 'QUOTA', at: T0 + 32 * MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'non-revive-class',
     })
   })
 })

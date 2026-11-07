@@ -3,9 +3,11 @@ import {
   CONTEXT_LIMIT_TOKENS,
   QUOTA_MAX,
   QUOTA_WINDOW_MS,
+  RULED_CONDITIONS,
   WAVE_COOLDOWN_MS,
   WAVE_WINDOW_MS,
   classifyFailure,
+  type ConditionLists,
   type FailureClass,
 } from './config.ts'
 
@@ -98,6 +100,15 @@ export interface LogRecord {
   detail?: Record<string, unknown>
 }
 
+/**
+ * Synthetic decision code for a 拍板⑩ route-switch release: the revival was
+ * triggered by a `model/selection` event, not by an error, so no
+ * `LlmFailure.code` applies. Deliberately not a stop cause — the nudge stays
+ * the plain continue — and the wave probe never sees it (a selection is not a
+ * network error), so it cannot open or join a wave.
+ */
+export const ROUTE_SWITCH_CODE = 'route-switch'
+
 /** Every structured line the policy or shell can produce. */
 export type PolicyRecord = DetectRecord | DecisionRecord | BreakerRecord | WaveRecord | StateRecord | LogRecord
 
@@ -110,6 +121,8 @@ export interface PolicySnapshot {
   tripped: string[]
   waves: Array<{ cause: string; count: number; lastErrorAt: number; held: number }>
   quota: Array<{ chainId: string; used: number }>
+  /** Effective condition lists this policy classifies with (拍板账⑨ status 回显生效清单). */
+  conditions: { revive: string[]; wall: string[]; overridden: string[] }
 }
 
 interface SessionState {
@@ -119,6 +132,15 @@ interface SessionState {
   tripped: boolean
   /** Wall suspension end; `Infinity` = provider stated no reset, hold until a success clears it. */
   suspendedUntil?: number
+  /**
+   * Route whose wall error opened the suspension (拍板⑩ 墙随路由走): the
+   * provider/model the failing request used, captured from the session's
+   * folded request header at wall time. A later `model/selection` whose
+   * provider differs releases the hold. Only meaningful while suspended;
+   * an absent route (no header folded yet) fails closed — the release
+   * cannot prove the provider left the walled route, so the hold stands.
+   */
+  wallRoute?: { provider: string; model?: string }
   /** Latest folded watermark: inputTokens + cacheReadTokens of the last usage seen. */
   contextTokens?: number
 }
@@ -145,6 +167,10 @@ export class RevivalPolicy {
   private readonly states = new Map<string, SessionState>()
   /** Global spacing between planned revivals, from resolved config (floor 10s). */
   private readonly staggerMs: number
+  /** Effective condition lists classification runs against (拍板账⑨ 配置化). */
+  private readonly conditions: ConditionLists
+  /** Config keys that replaced a ruled default; echoed by the status snapshot. */
+  private readonly conditionOverrides: string[]
   /** Rolling consumption stamps per quota chain (v1 chain id = session id). */
   private readonly quota = new Map<string, number[]>()
   /** Reserved for the relay line: relay session -> origin chain. v1 never writes it. */
@@ -168,9 +194,13 @@ export class RevivalPolicy {
 
   /**
    * @param options.staggerMs - global spacing between planned revivals (>= 10s floor, applied by the caller).
+   * @param options.conditions - effective condition lists to classify with (defaults to the ruled design values).
+   * @param options.conditionOverrides - config keys that replaced a ruled default; echoed in the status snapshot.
    */
-  constructor(options: { staggerMs: number }) {
+  constructor(options: { staggerMs: number; conditions?: ConditionLists; conditionOverrides?: string[] }) {
     this.staggerMs = options.staggerMs
+    this.conditions = options.conditions ?? RULED_CONDITIONS
+    this.conditionOverrides = options.conditionOverrides ?? []
   }
 
   /**
@@ -195,6 +225,7 @@ export class RevivalPolicy {
     const cleared: string[] = []
     if (state.suspendedUntil !== undefined) {
       state.suspendedUntil = undefined
+      state.wallRoute = undefined
       cleared.push('suspended')
     }
     if (this.dropHeld(sessionId)) cleared.push('held')
@@ -214,9 +245,11 @@ export class RevivalPolicy {
     providerRetryAfterMs?: number
     at: number
     origin?: string
+    /** Route the failing request used (folded `request/header`); anchors the 拍板⑩ wall route. */
+    route?: { provider: string; model?: string }
   }): PolicyRecord[] {
-    const { sessionId, code, providerRetryAfterMs, at, origin } = input
-    const cls = classifyFailure(code)
+    const { sessionId, code, providerRetryAfterMs, at, origin, route } = input
+    const cls = classifyFailure(code, this.conditions)
     this.counters.detected += 1
     if (cls === 'revive') this.counters.reviveClass += 1
     else if (cls === 'wall') this.counters.wallClass += 1
@@ -237,6 +270,10 @@ export class RevivalPolicy {
           : Number.POSITIVE_INFINITY
       const state = this.stateOf(sessionId)
       state.suspendedUntil = Math.max(state.suspendedUntil ?? Number.NEGATIVE_INFINITY, stated)
+      // 拍板⑩ 墙随路由走: remember which route this wall hit so a later
+      // `model/selection` can prove the provider left it. A header-less wall
+      // cannot have changed route (no new request ran), so a known route sticks.
+      if (route !== undefined) state.wallRoute = route
       records.push(this.skipRecord(sessionId, chainId, 'wall-class', at, code, {
         resetsAt: state.suspendedUntil === Number.POSITIVE_INFINITY ? null : state.suspendedUntil,
       }))
@@ -264,6 +301,61 @@ export class RevivalPolicy {
     }
     records.push(...this.decide({ sessionId, code, at, allowWaveHold: true }))
     return records
+  }
+
+  /**
+   * One durable `model/selection` event (拍板⑩ 墙随路由走): a wall-suspended
+   * session whose provider left the walled route has lost the wall's subject —
+   * the hold releases and the session rejoins the normal revival flow,
+   * consuming exactly one quota stamp through the unchanged gates (stagger,
+   * breaker, 150k watermark; a new route that also walls is capped by the
+   * quota can + the 10-minute breaker). A selection that keeps the provider —
+   * or a wall whose route was never observed (fail closed) — keeps the
+   * zero-consumption hold (§4.2 row 2 as-is); sessions that are not
+   * suspended never trigger.
+   * @param input - the selection's session, provider/model, and event time.
+   * @returns records to log (empty when nothing applies).
+   */
+  onModelSelection(input: { sessionId: string; provider: string; model?: string; at: number }): PolicyRecord[] {
+    const { sessionId, provider, model, at } = input
+    const state = this.states.get(sessionId)
+    if (state === undefined || state.suspendedUntil === undefined) return []
+    const routeLabel = (route: { provider: string; model?: string }): string =>
+      route.model === undefined ? route.provider : `${route.provider}/${route.model}`
+    const selection = model === undefined ? provider : `${provider}/${model}`
+    const wallRoute = state.wallRoute
+    if (wallRoute === undefined || wallRoute.provider === provider) {
+      // Route unchanged (or the walled route never observed): the "a revival
+      // would hit the same wall" premise still holds, so §4.2 row 2 stands.
+      return [
+        {
+          kind: 'log',
+          at,
+          event: 'wall-route-unchanged',
+          sessionId,
+          detail: {
+            selection,
+            wallRoute: wallRoute === undefined ? 'unknown' : routeLabel(wallRoute),
+            resetsAt: state.suspendedUntil === Number.POSITIVE_INFINITY ? null : state.suspendedUntil,
+          },
+        },
+      ]
+    }
+    // provider 已切离撞墙路由 → 挂起解除、按可复活类照常计 1 次额度复活
+    // (拍板⑩): the wall's premise died with its route, so the hold goes
+    // first, any pending wave hold goes with it (the quiet period watched the
+    // old route), and the unchanged gates decide the revival below.
+    const resetsAt = state.suspendedUntil === Number.POSITIVE_INFINITY ? null : state.suspendedUntil
+    state.suspendedUntil = undefined
+    state.wallRoute = undefined
+    const cleared = ['suspended']
+    if (this.dropHeld(sessionId)) cleared.push('held')
+    this.counters.cleared += 1
+    return [
+      { kind: 'state', at, sessionId, event: 'clear', cleared },
+      { kind: 'log', at, event: 'wall-route-release', sessionId, detail: { from: routeLabel(wallRoute), to: selection, resetsAt } },
+      ...this.decide({ sessionId, code: ROUTE_SWITCH_CODE, at, allowWaveHold: false }),
+    ]
   }
 
   /**
@@ -351,6 +443,11 @@ export class RevivalPolicy {
       tripped,
       waves: waves.slice(0, 20),
       quota,
+      conditions: {
+        revive: [...this.conditions.revive],
+        wall: [...this.conditions.wall],
+        overridden: [...this.conditionOverrides],
+      },
     }
   }
 
@@ -472,6 +569,7 @@ export class RevivalPolicy {
         return records
       }
       state.suspendedUntil = undefined
+      state.wallRoute = undefined
     }
 
     // 150k watermark: park with evidence; an unknown watermark (no usage seen

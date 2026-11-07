@@ -55,6 +55,21 @@ describe('GET /api/session-revive/status', () => {
     })
   })
 
+  it('echoes the effective condition lists from the status payload (拍板⑨ 回显生效清单)', async () => {
+    const route = makeStatusRoute(() => ({
+      mode: 'shadow',
+      conditions: { revive: ['TRANSPORT', 'TIMEOUT'], wall: ['QUOTA'], overridden: ['wallCodes'] },
+      counters: { detected: 1 },
+    }))
+    const captured = await run(route.handler, fakeReq('GET'))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toMatchObject({
+      ok: true,
+      mode: 'shadow',
+      conditions: { revive: ['TRANSPORT', 'TIMEOUT'], wall: ['QUOTA'], overridden: ['wallCodes'] },
+    })
+  })
+
   it('refuses non-loopback callers with 403', async () => {
     const route = makeStatusRoute(() => ({ mode: 'shadow' }))
     const captured = await run(route.handler, fakeReq('GET', { loopback: false }))

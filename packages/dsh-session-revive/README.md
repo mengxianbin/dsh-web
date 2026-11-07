@@ -23,6 +23,11 @@ Host-only — the package declares no `dsh.client` face.
 - Classifies each `turn/end` error: revive-class (`TRANSPORT`, `TIMEOUT`)
   enters the revival flow, wall-class records a zero-consumption suspension
   until `resetsAt`, and other codes are observed and logged only.
+- Releases a wall suspension when the route moves (2026-11-07 ruling): a
+  durable `model/selection` whose provider leaves the walled route clears the
+  hold and rejoins the flow as one quota-consuming revive — stagger, breaker,
+  and the 150k watermark unchanged; an unchanged provider (or an unobserved
+  wall route) keeps the zero-consumption hold.
 - Folds the two stop causes (design §7.2) into the same revival flow: a
   `max-tokens` turn end first clears any stale suspension (the provider did
   answer), then runs the account as a revive-class death; a durability flush
@@ -44,8 +49,9 @@ Host-only — the package declares no `dsh.client` face.
   codes within 15 minutes) and releases them after 5 quiet minutes, with each
   revive spaced by the configured stagger and charged to its own chain.
 - Serves `GET /api/session-revive/status` (loopback-only) with mode,
-  counters, held/suspended/tripped state, and per-chain quota usage for
-  post-restart verification and evidence review.
+  counters, held/suspended/tripped state, per-chain quota usage, and the
+  effective condition lists for post-restart verification and evidence
+  review.
 
 ## Install
 
@@ -69,14 +75,21 @@ live in one place in `src/config.ts`):
 | `enabled` | boolean | `true` | Master switch; `false` skips listeners, timers, and routes |
 | `mode` | string (`shadow` or `live`) | `shadow` | `shadow` logs the full decision account and withholds only the send; `live` queues the nudge |
 | `staggerMs` | number | `10000` | Minimum spacing between planned revivals; anything below `10000` clamps up to `10000` with a warning |
+| `reviveCodes` | string[] | the ruled revive list (`TRANSPORT`, `TIMEOUT`) | Replace the revive-class list wholesale; config moves where the list lives, changing values still requires a design §4.1 statistics re-run |
+| `wallCodes` | string[] | the ruled wall list (design enumeration plus its `AUTH` and model-configuration families) | Replace the wall-class list wholesale, with the same ruling obligation |
 
-The ruled parameters are fixed by the design ruling and are not
+The numeric ruled parameters are fixed by the design ruling and are not
 configurable: a 4 hour window with 4 revivals per chain (only revive-class
 deaths consume), a 10-minute breaker, a wave of 2 same-cause errors inside
 15 minutes released after 5 minutes without a new same-cause error, and a
-150000-token context watermark that parks instead of nudging. Wall-class
-codes (the design list plus its `AUTH` and model-configuration families)
-consume nothing and suspend the session until `resetsAt`.
+150000-token context watermark that parks instead of nudging. The two code
+lists are the one configurable surface: their code defaults are the ruled
+design values and profile config may replace either wholesale — config only
+moves where the list lives, so changing values still requires a design
+§4.1 statistics re-run before a new ruling. The status endpoint echoes the
+effective lists (and which keys overrode), and a startup warning prints the
+override loudly. Wall-class codes consume nothing and suspend the session
+until `resetsAt`.
 
 Every decision is one line through the Host logger: the
 `dsh-session-revive ` prefix followed by a single JSON object stamped with
@@ -118,3 +131,6 @@ the active `mode`.
 - The first error of a forming wave is decided before the wave exists; if
   the network is already down, the breaker and the 4h x 4 quota bound the
   damage.
+- The route-switch release needs the failing request's folded header: a wall
+  observed without a route fails closed and keeps its hold, because proving
+  the provider left the walled route requires both sides of the comparison.
