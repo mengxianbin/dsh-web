@@ -70,6 +70,18 @@ function endorsedDone(count: number, hashes: readonly string[]): string {
   return `落点头 ${listed} 已推 origin。\n\nSAVE_STATUS=DONE${endorsedTail(count)}`
 }
 
+/** The endorsement tail with save-status.py's `hashes=` declared list (seal-declare-verify-1107 新格式). */
+function declaredTail(hashes: readonly string[], count = hashes.length): string {
+  return `${endorsedTail(count)} hashes=${hashes.join(',')}`
+}
+
+/** A DONE report whose endorsement line carries the declared list; prose hashes ride outside it. */
+function declaredDone(hashes: readonly string[], proseHashes: readonly string[] = []): string {
+  const prose = proseHashes.map((hash) => `\`${hash}\``).join(' + ')
+  const lead = prose === '' ? '落点头已声明。' : `正文另提 ${prose}（清单外散文）。`
+  return `${lead}\n\nSAVE_STATUS=DONE${declaredTail(hashes)}`
+}
+
 describe('seal grouping — green tier', () => {
   it('endorsed DONE sentinel in the last assistant message reads DONE', () => {
     const host = createFakeHost()
@@ -339,5 +351,59 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     expect(result).toEqual({ id: 'session-a', verdict: 'N_A', detail: 'no-artifacts-by-design' })
     expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+})
+
+describe('declared-list endorsement — 核验与声明同源 (seal-declare-verify-1107)', () => {
+  it('operator keeps DONE green when a dead hash outside the declared list is prose only', () => {
+    // Given an endorsement line declaring one live hash while prose names a dead one
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(declaredDone([repo.hash], ['f'.repeat(40)])),
+    ])
+    // When the seal is judged, only the declared list is verified
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then the DONE verdict stays green — 清单外散文 hash 一概不核
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it('operator gets non-green when the declared list itself names a dead hash', () => {
+    // Given an endorsement line whose declared list contains a hash no repo holds
+    const host = createFakeHost()
+    withTranscript(host, 'session-a', [
+      assistantMsg(declaredDone(['f'.repeat(40)])),
+    ])
+    // When the seal is judged, the declared hash fails verification
+    // Then the endorsement fails and the verdict leaves the green tier
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator gets non-green when commits= length disagrees with the declared list', () => {
+    // Given commits=2/2 while the declared list carries only one hash (篡改/贴错)
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(`落点头已声明。\n\nSAVE_STATUS=DONE${declaredTail([repo.hash], 2)}`),
+    ])
+    // When the seal is judged, the list cannot back the claimed commits count
+    // Then the endorsement fails (防伪：commits 与清单长度不符仍红)
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+
+  it('operator keeps the legacy message-wide scan when the tail declares no list', () => {
+    // Given a legacy tail (no hashes=) whose prose holds a dead hash
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(`落点头 \`${repo.hash}\` 已推，另提死 hash \`${'b'.repeat(40)}\`。\n\nSAVE_STATUS=DONE${endorsedTail(1)}`),
+    ])
+    // When the seal is judged, the legacy path still scans the whole message
+    // Then the dead prose hash fails the endorsement exactly as before
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
   })
 })

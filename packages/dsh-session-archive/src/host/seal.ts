@@ -340,19 +340,42 @@ function repoCandidates(transcript: string): string[] {
  * DONE endorsement recheck — the two existing pieces only (照抄 the m-note
  * scanner's `recheckDone` 口径; the six-dim fields belong to save-done5-1106):
  * 1. the sentinel's own line carries a script backing `commits=n/n`;
- * 2. every backticked hash in the message exists in a candidate repo
- *    (`cat-file -e`) with a remote-tracking ref containing it
- *    (`branch -r --contains`).
- * Fail-closed: any missing piece reads false, so an unbacked DONE never stays
- * green. Hashes are read message-wide because the endorsement line itself
- * carries no hashes (save-status.py tail is verbatim-checked) — real reports
- * put 落点头 hashes earlier in the same message.
+ * 2. every **declared** hash exists in a candidate repo (`cat-file -e`)
+ *    with a remote-tracking ref containing it (`branch -r --contains`).
+ * 声明-核验同源 (seal-declare-verify-1107, C1 1:1 with the scanner): when the
+ * judgment tail carries `hashes=<h1,h2,…>` (save-status.py's declared list),
+ * only that list is verified — prose hashes outside every declared list are
+ * ignored (弃用/引用/他仓 hash 一概不核). Each declaring tail must also be
+ * self-consistent (`commits=n/n` length == list length), else fail-closed.
+ * A judgment tail without `hashes=` (legacy format) keeps the old
+ * message-wide scan, so pre-existing sessions behave exactly as before.
+ * Fail-closed throughout: any missing piece reads false, so an unbacked
+ * DONE never stays green.
  */
 function endorsementHolds(message: string, transcript: string): boolean {
-  const tail = [...message.matchAll(DONE_TAIL_RE)].pop()?.[1] ?? ''
+  const tails = [...message.matchAll(DONE_TAIL_RE)].map((match) => match[1])
+  const tail = tails[tails.length - 1] ?? ''
   if (!/commits=\d+\/\d+/.test(tail)) return false
-  const hashes = [...new Set([...message.matchAll(HASH_RE)].map((match) => match[1]))]
-  if (hashes.length === 0) return false
+  let hashes: string[]
+  if (/\bhashes=/.test(tail)) {
+    // Declared mode: verify the declared lists only; each list must match its
+    // own commits=n/n (防伪：commits 与清单长度不符仍红).
+    const declared: string[] = []
+    for (const candidate of tails) {
+      const hit = /\bhashes=([^\s]*)/.exec(candidate)
+      if (hit === null) continue
+      const list = hit[1].split(',').filter(Boolean)
+      const commits = /\bcommits=(\d+)\/(\d+)/.exec(candidate)
+      if (commits === null || commits[1] !== commits[2] || Number(commits[2]) !== list.length) return false
+      declared.push(...list)
+    }
+    hashes = [...new Set(declared)]
+    if (hashes.length === 0) return false
+  } else {
+    // Legacy tail (no hashes=): full message scan, unchanged from before.
+    hashes = [...new Set([...message.matchAll(HASH_RE)].map((match) => match[1]))]
+    if (hashes.length === 0) return false
+  }
   const repos = repoCandidates(transcript)
   for (const hash of hashes) {
     const home = repos.find((repo) => gitRun(repo, ['cat-file', '-e', `${hash}^{commit}`]) !== undefined)
