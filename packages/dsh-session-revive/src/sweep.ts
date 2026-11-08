@@ -47,6 +47,43 @@ export interface SweepRow {
   readonly projections?: { readonly values: Readonly<Record<string, unknown>> }
 }
 
+/**
+ * Structural view of the session controller's list face: rows arrive inside
+ * the `SessionListValue` envelope the Host's `list` returns (`{ items }`),
+ * never as a bare array. Declaring the envelope honestly is the point — a
+ * view that promises a bare array compiles against the structural cast and
+ * dies at runtime on `for...of` before a single row is read.
+ */
+export interface SweepListApi {
+  list(
+    request: { includeArchived: boolean; trimHeavyProjections: boolean },
+    signal?: AbortSignal,
+  ): Promise<{ readonly items: readonly SweepRow[] }>
+}
+
+/**
+ * Build the sweep's `listRows` dependency over the Host session controller.
+ * The controller answers `SessionListValue` (`{ items }`) while the screen
+ * consumes a bare row array, so the unwrap lives here — in the one place the
+ * tests exercise — because passing the envelope through fails closed at the
+ * first `for...of` (`rows is not iterable`, observed on the 2026-11-08 boot)
+ * and the sweep screens nothing.
+ * @param controller - structural list face of the session controller.
+ * @returns the ruled row-scope listing (archived excluded, heavy projections
+ *   trimmed) with the envelope unwrapped into rows.
+ */
+export function makeListRows(
+  controller: SweepListApi,
+): (signal: AbortSignal) => Promise<readonly SweepRow[]> {
+  return async (signal) => {
+    const listed = await controller.list(
+      { includeArchived: false, trimHeavyProjections: true },
+      signal,
+    )
+    return listed.items
+  }
+}
+
 /** How the list-side screen classifies one row before any log read. */
 export type SweepClass = 'live' | 'closed' | 'candidate' | 'unknown'
 

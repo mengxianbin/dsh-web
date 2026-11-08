@@ -35,7 +35,7 @@ import {
 } from './config.ts'
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
-import { runBootSweep, type SweepRow } from './sweep.ts'
+import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
 import { makeStatusRoute } from './host/routes.ts'
 
 export const name = 'dsh-session-revive'
@@ -61,17 +61,11 @@ interface ReviveSessionApi {
 }
 
 /**
- * Structural views the boot sweep reads (same projection style as
- * `ReviveSessionApi`): the list face of the session controller and the raw
- * persistence seam, whose branded ids this plugin passes as plain strings.
+ * Structural view of the raw persistence seam the boot sweep reads (same
+ * projection style as `ReviveSessionApi`), whose branded ids this plugin
+ * passes as plain strings. The list face lives in `sweep.ts` as
+ * `SweepListApi`, declared against the envelope the controller returns.
  */
-interface SweepSessionApi {
-  list(
-    request: { includeArchived: boolean; trimHeavyProjections: boolean },
-    signal?: AbortSignal,
-  ): Promise<readonly SweepRow[]>
-}
-
 interface SweepPersistence {
   open(
     id: string,
@@ -328,11 +322,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     // applyRecords/sendNudge path: staggered, breaker-armed, watermark-
     // checked, and quota-exempt (status counters/quota 零增).
     void runBootSweep({
-      listRows: (signal) =>
-        (ctx.sessionController as unknown as SweepSessionApi).list(
-          { includeArchived: false, trimHeavyProjections: true },
-          signal,
-        ),
+      listRows: makeListRows(ctx.sessionController as unknown as SweepListApi),
       readEvents: async (sessionId, signal) => {
         // Resolved per read, not at activation: sessionPersistence is not in
         // this plugin's inject graph, so an eager capture could bind before

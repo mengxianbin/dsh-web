@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { LogRecord, PolicyRecord } from '../src/policy.ts'
-import { classifySweepRow, runBootSweep, scanOpenTurn, type BootSweepDeps, type SweepRow } from '../src/sweep.ts'
+import { classifySweepRow, makeListRows, runBootSweep, scanOpenTurn, type BootSweepDeps, type SweepListApi, type SweepRow } from '../src/sweep.ts'
 
 function row(sessionId: string, extra: Partial<SweepRow> = {}): SweepRow {
   return { sessionId, running: false, agentAvailable: false, ...extra }
@@ -64,6 +64,42 @@ describe('list-row screen (turnBoundary projection)', () => {
     expect(classifySweepRow(row('O', { projections: TB_OPEN }))).toBe('candidate')
     expect(classifySweepRow(row('N'))).toBe('unknown')
     expect(classifySweepRow(row('X', { projections: { values: {} } }))).toBe('unknown')
+  })
+})
+
+describe('controller list binding (makeListRows)', () => {
+  // Regression: the binding once promised a bare array while the controller
+  // returns the SessionListValue envelope ({ items }), so the first real boot
+  // died at `for...of` with "rows is not iterable" and screened nothing.
+  it('unwraps the { items } envelope the controller actually returns', async () => {
+    const rows = [row('a'), row('b')]
+    const controller: SweepListApi = { list: async () => ({ items: rows }) }
+    const listRows = makeListRows(controller)
+    await expect(listRows(new AbortController().signal)).resolves.toEqual(rows)
+  })
+
+  it('passes the ruled row-scope request (archived excluded, heavy projections trimmed)', async () => {
+    const seen: unknown[] = []
+    const controller: SweepListApi = {
+      list: async (request) => {
+        seen.push(request)
+        return { items: [] }
+      },
+    }
+    await makeListRows(controller)(new AbortController().signal)
+    expect(seen).toEqual([{ includeArchived: false, trimHeavyProjections: true }])
+  })
+
+  it('drives the sweep end to end through the envelope without failing', async () => {
+    const controller: SweepListApi = {
+      list: async () => ({ items: [row('cand', { projections: TB_OPEN })] }),
+    }
+    const { deps, sinks } = makeDeps(makeListRows(controller))
+    deps.readEvents = async () => [ev('turn/start')]
+    await runBootSweep(deps)
+    expect(failures(sinks)).toHaveLength(0)
+    expect(sinks.decided).toEqual([{ sessionId: 'cand', at: 1000, contextTokens: undefined }])
+    expect(summary(sinks)?.detail).toMatchObject({ rows: 1, candidates: 1, revived: 1 })
   })
 })
 
