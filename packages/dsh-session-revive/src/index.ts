@@ -35,6 +35,7 @@ import {
 } from './config.ts'
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
+import { runBootSweep, type SweepRow } from './sweep.ts'
 import { makeStatusRoute } from './host/routes.ts'
 
 export const name = 'dsh-session-revive'
@@ -57,6 +58,32 @@ interface ReviveSessionApi {
     },
     signal?: AbortSignal,
   ): Promise<unknown>
+}
+
+/**
+ * Structural views the boot sweep reads (same projection style as
+ * `ReviveSessionApi`): the list face of the session controller and the raw
+ * persistence seam, whose branded ids this plugin passes as plain strings.
+ */
+interface SweepSessionApi {
+  list(
+    request: { includeArchived: boolean; trimHeavyProjections: boolean },
+    signal?: AbortSignal,
+  ): Promise<readonly SweepRow[]>
+}
+
+interface SweepPersistence {
+  open(
+    id: string,
+    mode: 'read',
+  ): Promise<{
+    read(
+      offset?: number,
+      length?: number,
+      options?: { signal?: AbortSignal },
+    ): Promise<{ events: readonly SessionEvent[] }>
+    close(): Promise<void>
+  }>
 }
 
 /**
@@ -292,6 +319,60 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       makeStatusRoute(() => ({ mode: resolved.mode, ...policy.snapshot(Date.now()) })),
     )
     armWake()
+
+    // 拍板⑪ boot sweep: at activation the plugin actively scans for orphan
+    // turns instead of waiting for events — the `interrupted` closer only
+    // lands at the next resume, so an idle killed session never emits one
+    // (design §4.2 条3). Confirmed orphans are attributed to the restart
+    // (only process death leaves a turn open) and wake through this same
+    // applyRecords/sendNudge path: staggered, breaker-armed, watermark-
+    // checked, and quota-exempt (status counters/quota 零增).
+    void runBootSweep({
+      listRows: (signal) =>
+        (ctx.sessionController as unknown as SweepSessionApi).list(
+          { includeArchived: false, trimHeavyProjections: true },
+          signal,
+        ),
+      readEvents: async (sessionId, signal) => {
+        // Resolved per read, not at activation: sessionPersistence is not in
+        // this plugin's inject graph, so an eager capture could bind before
+        // the backend constructs and stay undefined for the whole boot.
+        const persistence = ctx.get('sessionPersistence') as SweepPersistence | undefined
+        if (persistence === undefined) throw new Error('sessionPersistence unavailable')
+        const handle = await persistence.open(sessionId, 'read')
+        try {
+          const { events } = await handle.read(undefined, undefined, { signal })
+          return events
+        } finally {
+          await handle.close()
+        }
+      },
+      isAttached: (sessionId) => (ctx.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId) !== undefined,
+      decide: (sessionId, at, contextTokens) => {
+        // Fold the orphan's last observed usage first so the 150k watermark
+        // gate actually bounds this revival (an unknown watermark adds no
+        // boundary, per the design).
+        if (contextTokens !== undefined) policy.recordUsage(sessionId, contextTokens)
+        return policy.onBootSweep({ sessionId, at })
+      },
+      apply: applyRecords,
+      log,
+      now: () => Date.now(),
+      signal: abort.signal,
+    }).catch((error: unknown) => {
+      // runBootSweep contains its own failure lines; this only catches a
+      // failing evidence logger during shutdown.
+      try {
+        log({
+          kind: 'log',
+          at: Date.now(),
+          event: 'boot-sweep-failed',
+          detail: { stage: 'shell', error: String(error).slice(0, 300) },
+        })
+      } catch {
+        // Never let the sweep's own reporting break plugin teardown.
+      }
+    })
 
     return () => {
       try {

@@ -9,7 +9,10 @@ DSH Web 影子先行的会话自动复活插件：监听每个 `turn/end` 错误
 原因分治裁定（设计 §7），两个停轮原因并入同一条账：`max-tokens` 停轮（供应商
 已响应、只是输出撞上 token 上限）与 goal-round-driver 的检查点写入失败（经
 logger exporter tap 捕获）。排除类停轮——人为中止、会话 resume/fork 标记、
-目标 block/complete——一律不自动续，只写一行 `stop-parked` 留证。每次检测与
+目标 block/complete——一律不自动续，只写一行 `stop-parked` 留证。激活时插件
+还会跑一次 boot sweep（2026-11-08 裁定，设计 §4.2）：主动扫描孤儿轮——存储
+日志尾部 `turn/start` 未闭合的会话——判定「中断归因 = 重启」（只有进程死亡会
+留下未闭合 turn），逐个确认后走同一条错峰 nudge 叫醒，且零额度。每次检测与
 每次判定都是一行结构化 JSON 日志。默认 `shadow` 模式完全不碰会话；
 `mode: 'live'` 才会经宿主会话控制器排队一句继续 nudge。仅宿主侧——本包不声明
 `dsh.client` 面。
@@ -33,6 +36,12 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
   `goal/change` 的 block 与 complete。
 - 每次复活前先过裁定账：断路器最前（复活后 10 分钟内再死即永久停该会话），
   然后是挂起、150k 水位、波挂起，最后才是滚动 4h x 4 分罐额度。
+- 激活时扫重启孤儿轮（2026-11-08 裁定，设计 §4.2）：用 harness 的
+  `turnBoundary` 投影预筛出末轮未闭合的会话行，候选一律再经原始存储日志读
+  确认（唯一能区分「未闭合 turn」与「已提交 interrupted closer」的来源），
+  确认的孤儿走同一条错峰路径叫醒——断路器照常武装、150k 水位照查，但额度
+  豁免，status 的 `counters`/`quota` 零增。sweep 等不到事件：`interrupted`
+  closer 只在下次 resume 时落盘（设计 §4.2 条3）。
 - 同因波开启期间（15 分钟内同码错误达到 2 次）挂起会话，5 分钟静默后释放，
   逐个错峰复活、各自扣自己罐的额度。
 - 提供 `GET /api/session-revive/status`（仅回环）：方式、计数、挂起/停用/
@@ -69,7 +78,10 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 响亮记 override。撞墙类码零消耗并把会话挂起到 `resetsAt`。
 
 每次判定经宿主 logger 落一行：`dsh-session-revive ` 前缀加一个带当前 `mode`
-标记的 JSON 对象。
+标记的 JSON 对象。boot sweep 另有自己的证据行：每次激活一行 `boot-sweep`
+汇总（列表/预筛/读取/复活计数）、每个孤儿一条带 `code: "boot-sweep"` 的
+`decision`，放弃时响亮落 `boot-sweep-failed`（fail closed——未确认的会话
+绝不 nudge）。
 
 ## 安全模型
 
@@ -100,3 +112,10 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
   4h x 4 额度兜住。
 - 路由切走解除依赖失败请求已折叠进会话的请求头：未观测到路由的撞墙会
   fail-closed 维持挂起——证明 provider 已切离需要比对的两边。
+- sweep 预筛信任投影检查点，而检查点按 write-behind 窗口滞后日志（5 秒 /
+  200 事件；只在创建、`turn/end`、会话处置三点强制刷）：硬杀重启若落在孤儿
+  `turn/start` 后的该窗口内，此孤儿当次激活筛不出来；优雅重启在会话处置时
+  强制刷检、能筛出。被筛中的候选一律再经原始读确认，所以滞后只可能漏、
+  不会误复活已闭合会话。
+- sweep 对确认的孤儿不分年龄一律复活——未裁过时间窗——所以装上后的首次
+  激活会把历史积压整批错峰唤醒，同样受 150k 水位与断路器约束。

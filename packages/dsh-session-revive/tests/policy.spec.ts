@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest'
 import {
   BREAKER_WINDOW_MS,
+  CONTEXT_LIMIT_TOKENS,
   QUOTA_WINDOW_MS,
   STAGGER_MIN_MS,
   WAVE_COOLDOWN_MS,
   WALL_CODES,
 } from '../src/config.ts'
-import { ROUTE_SWITCH_CODE, RevivalPolicy, type DecisionRecord, type PolicyRecord } from '../src/policy.ts'
+import {
+  BOOT_SWEEP_CODE,
+  ROUTE_SWITCH_CODE,
+  RevivalPolicy,
+  type DecisionRecord,
+  type PolicyRecord,
+} from '../src/policy.ts'
 
 /** Fixed epoch so every arithmetic in the expectations is exact. */
 const T0 = 1_760_000_000_000
@@ -625,5 +632,101 @@ describe('condition lists echoed from the policy (拍板⑨ status 回显生效�
       action: 'skip',
       reason: 'non-revive-class',
     })
+  })
+})
+
+describe('boot sweep (拍板⑪ restart revival, zero quota)', () => {
+  it('revives through every gate but the quota can and leaves the account byte-identical', () => {
+    const p = policy()
+    const before = p.snapshot(T0)
+    const records = p.onBootSweep({ sessionId: 'S', at: T0 })
+    expect(lastDecision(records)).toMatchObject({
+      action: 'revive',
+      reason: 'ok',
+      code: BOOT_SWEEP_CODE,
+      chainId: 'S',
+      quotaUsed: 0,
+      quotaLimit: 4,
+      plannedAt: T0,
+      contextTokens: null,
+    })
+    const after = p.snapshot(T0)
+    expect(after.quota).toEqual(before.quota)
+    expect(after.counters).toEqual(before.counters)
+    expect(after.skipReasons).toEqual(before.skipReasons)
+  })
+
+  it('arms the breaker: a death inside 10 minutes of a sweep revival trips and stays stopped', () => {
+    const p = policy()
+    p.onBootSweep({ sessionId: 'S', at: T0 })
+    const records = p.onError({ sessionId: 'S', code: 'TRANSPORT', at: T0 + MIN })
+    expect(records.some((record) => record.kind === 'breaker')).toBe(true)
+    expect(p.snapshot(T0 + MIN).tripped).toContain('S')
+    expect(lastDecision(p.onBootSweep({ sessionId: 'S', at: T0 + 2 * MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'breaker-stopped',
+      code: BOOT_SWEEP_CODE,
+    })
+    // The sweep's own trip wrote no account counter (status 零增).
+    expect(p.snapshot(T0 + 2 * MIN).counters.breakerTrips).toBe(1)
+  })
+
+  it('leaves the whole 4h x 4 can for the error path (restart这一次不算额度)', () => {
+    const p = policy()
+    p.onBootSweep({ sessionId: 'A', at: T0 })
+    expect(p.snapshot(T0).quota).toEqual([])
+    // First error lands after the breaker window the sweep revival armed;
+    // 16-minute spacing keeps every error alone in the wave window.
+    const stamps = [11, 27, 43, 59].map((min) => T0 + min * MIN)
+    for (const at of stamps) {
+      expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at }))).toMatchObject({ action: 'revive' })
+    }
+    expect(lastDecision(p.onError({ sessionId: 'A', code: 'TRANSPORT', at: T0 + 75 * MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'quota-exhausted',
+      quotaUsed: 4,
+    })
+  })
+
+  it('the 150k watermark parks an oversized orphan with evidence and zero account movement', () => {
+    const p = policy()
+    p.recordUsage('S', CONTEXT_LIMIT_TOKENS)
+    const before = p.snapshot(T0)
+    const records = p.onBootSweep({ sessionId: 'S', at: T0 })
+    expect(lastDecision(records)).toMatchObject({
+      action: 'skip',
+      reason: 'context-limit',
+      code: BOOT_SWEEP_CODE,
+      contextTokens: CONTEXT_LIMIT_TOKENS,
+    })
+    const after = p.snapshot(T0)
+    expect(after.counters).toEqual(before.counters)
+    expect(after.quota).toEqual(before.quota)
+  })
+
+  it('the global stagger spaces sweep nudges apart without a stamp', () => {
+    const p = policy()
+    expect(lastDecision(p.onBootSweep({ sessionId: 'A', at: T0 }))).toMatchObject({ plannedAt: T0 })
+    expect(lastDecision(p.onBootSweep({ sessionId: 'B', at: T0 }))).toMatchObject({
+      plannedAt: T0 + STAGGER_MIN_MS,
+    })
+    expect(p.snapshot(T0).quota).toEqual([])
+  })
+
+  it('an unexpired wall suspension still holds a sweep revival; an expired one falls through', () => {
+    const p = policy()
+    p.onError({ sessionId: 'W', code: 'QUOTA', at: T0 })
+    expect(lastDecision(p.onBootSweep({ sessionId: 'W', at: T0 + MIN }))).toMatchObject({
+      action: 'skip',
+      reason: 'wall-suspended',
+      code: BOOT_SWEEP_CODE,
+    })
+    const q = policy()
+    q.onError({ sessionId: 'W', code: 'QUOTA', providerRetryAfterMs: 30_000, at: T0 })
+    expect(lastDecision(q.onBootSweep({ sessionId: 'W', at: T0 + MIN }))).toMatchObject({
+      action: 'revive',
+      code: BOOT_SWEEP_CODE,
+    })
+    expect(q.snapshot(T0 + MIN).suspended).toBe(0)
   })
 })

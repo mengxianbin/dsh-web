@@ -13,7 +13,12 @@ Two stop causes join the same account per the 2026-11-07 triage ruling
 the ceiling) and the goal-round-driver's durability flush failure (observed
 through a logger exporter tap). Excluded causes — human abort, session
 resume/fork markers, goal block/complete — are never continued; they only
-write a `stop-parked` evidence line. Every detection and decision is one
+write a `stop-parked` evidence line. At activation the plugin also runs a
+boot sweep (2026-11-08 ruling, design §4.2): it actively scans for orphan
+turns — sessions whose stored log ends in an unclosed `turn/start` — judges
+中断归因 = 重启 (only process death leaves a turn open), and wakes each
+confirmed orphan through the same staggered nudge with zero quota
+consumption. Every detection and decision is one
 structured JSON log line. The default `shadow` mode never touches a session;
 `mode: 'live'` queues a continue nudge through the Host session controller.
 Host-only — the package declares no `dsh.client` face.
@@ -45,6 +50,15 @@ Host-only — the package declares no `dsh.client` face.
   within 10 minutes of a revival stops that session for good), then
   suspension, the 150k watermark, the wave hold, and the rolling 4h x 4
   chain quota.
+- Sweeps for restart orphans at activation (2026-11-08 ruling, design
+  §4.2): the harness `turnBoundary` projection screens the session list for
+  an open final turn, every candidate is confirmed by a raw stored-log read
+  (the only source that distinguishes an open turn from a committed
+  `interrupted` closer), and each confirmed orphan is nudged through the
+  same staggered path — breaker-armed and 150k-watermark-checked, but
+  quota-exempt, so status `counters`/`quota` never move. The sweep cannot
+  wait for events: the `interrupted` closer is only written at the next
+  resume (design §4.2 条3).
 - Holds sessions while a same-cause wave is open (2 or more identical error
   codes within 15 minutes) and releases them after 5 quiet minutes, with each
   revive spaced by the configured stagger and charged to its own chain.
@@ -93,7 +107,11 @@ until `resetsAt`.
 
 Every decision is one line through the Host logger: the
 `dsh-session-revive ` prefix followed by a single JSON object stamped with
-the active `mode`.
+the active `mode`. The boot sweep adds its own evidence: one `boot-sweep`
+summary line per activation (list/screen/read/revive counts), per-orphan
+`decision` records carrying `code: "boot-sweep"`, and a loud
+`boot-sweep-failed` line whenever it gives up (fail closed — an
+unconfirmed session is never nudged).
 
 ## Security model
 
@@ -134,3 +152,14 @@ the active `mode`.
 - The route-switch release needs the failing request's folded header: a wall
   observed without a route fails closed and keeps its hold, because proving
   the provider left the walled route requires both sides of the comparison.
+- The sweep's screen trusts the projection checkpoint, which lags the log by
+  the write-behind window (5 s / 200 events; mandatory flush only at
+  creation, `turn/end`, and disposal): a hard-kill restart landing inside
+  that window after an orphan's `turn/start` leaves that orphan unscreened
+  until the next activation; a graceful restart flushes at session disposal
+  and is caught. Screened candidates are always confirmed by a raw read, so
+  the lag can only miss, never revive a closed session.
+- The sweep revives every confirmed orphan regardless of age — no time window
+  is ruled — so the first activation after install wakes the historical
+  backlog in one staggered batch, bounded by the 150k watermark and the
+  breaker like any other revival.

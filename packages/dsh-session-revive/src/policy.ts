@@ -109,6 +109,17 @@ export interface LogRecord {
  */
 export const ROUTE_SWITCH_CODE = 'route-switch'
 
+/**
+ * Synthetic decision code for a 拍板账⑪ boot-sweep revival: the trigger is the
+ * activation-time orphan-turn scan, not an error, so no `LlmFailure.code`
+ * applies. Deliberately not a stop cause — the nudge stays the plain continue
+ * and the wave probe never sees it (a sweep is not a network error), so it
+ * cannot open or join a wave. Sweep decisions write evidence lines only:
+ * the ruled account's `counters` and `quota` stay untouched (零额度 = 免计数,
+ * status counters/quota 零增).
+ */
+export const BOOT_SWEEP_CODE = 'boot-sweep'
+
 /** Every structured line the policy or shell can produce. */
 export type PolicyRecord = DetectRecord | DecisionRecord | BreakerRecord | WaveRecord | StateRecord | LogRecord
 
@@ -359,6 +370,94 @@ export class RevivalPolicy {
   }
 
   /**
+   * One confirmed boot-sweep orphan (拍板⑪ 重启自动复活 + 重启这一次不算额度):
+   * the same gates as a fresh revival — breaker, wall suspension, the 150k
+   * watermark, and the global stagger slot — but the quota can is neither
+   * read nor stamped and the ruled account's `counters` stay untouched, so a
+   * sweep leaves the status snapshot byte-identical (status counters/quota
+   * 零增); the decision line itself is the evidence. The breaker still arms
+   * (`lastRevivalAt`) so a sweep revival that dies again inside 10 minutes
+   * trips through the normal error path as usual. The wave probe stays out:
+   * the sweep feeds it no errors and `boot-sweep` cannot open or join a wave
+   * (same isolation as {@link ROUTE_SWITCH_CODE}), which keeps 拍板⑪'s
+   * "免计数不免四闸" — breaker / stagger / watermark / probe all still bound
+   * this revival, the probe simply has nothing to hold it on.
+   * @param input - the confirmed orphan's session and the decision time.
+   * @returns records to log (always at least one decision).
+   */
+  onBootSweep(input: { sessionId: string; at: number }): PolicyRecord[] {
+    const { sessionId, at } = input
+    const records: PolicyRecord[] = []
+    const state = this.stateOf(sessionId)
+    const chainId = this.chainIdOf(sessionId)
+
+    if (state.tripped) {
+      records.push(this.sweepSkip(sessionId, chainId, 'breaker-stopped', at))
+      return records
+    }
+
+    // Breaker: a sweep re-entry inside 10 minutes of the last revival would
+    // double-drive the session — trip instead (evidence line, no counter: the
+    // sweep keeps out of the ruled account).
+    if (state.lastRevivalAt !== undefined && at - state.lastRevivalAt < BREAKER_WINDOW_MS) {
+      state.tripped = true
+      this.dropHeld(sessionId)
+      const revivedAt = state.lastRevivalAt
+      const gapMs = at - revivedAt
+      records.push({ kind: 'breaker', at, event: 'trip', sessionId, revivedAt, diedAt: at, gapMs, code: BOOT_SWEEP_CODE })
+      records.push(
+        this.sweepSkip(sessionId, chainId, 'breaker-trip', at, {
+          breaker: { revivedAt, diedAt: at, gapMs },
+        }),
+      )
+      return records
+    }
+
+    // Wall suspension: an unexpired hold keeps its subject (§4.2 row 2); an
+    // expired one falls through exactly like the error path does.
+    if (state.suspendedUntil !== undefined) {
+      if (at < state.suspendedUntil) {
+        records.push(
+          this.sweepSkip(sessionId, chainId, 'wall-suspended', at, {
+            resetsAt: state.suspendedUntil === Number.POSITIVE_INFINITY ? null : state.suspendedUntil,
+          }),
+        )
+        return records
+      }
+      state.suspendedUntil = undefined
+      state.wallRoute = undefined
+    }
+
+    // 150k watermark: the sweep folds the orphan's last observed usage before
+    // deciding, so an oversized orphan parks with evidence instead of waking
+    // into a context overflow (an unknown watermark adds no boundary).
+    if (state.contextTokens !== undefined && state.contextTokens >= CONTEXT_LIMIT_TOKENS) {
+      records.push(this.sweepSkip(sessionId, chainId, 'context-limit', at, { contextTokens: state.contextTokens }))
+      return records
+    }
+
+    // Revival: arm the breaker and take the global stagger slot, but never
+    // touch the quota can or the counters (零额度).
+    state.lastRevivalAt = at
+    const plannedAt = Math.max(at, this.lastPlannedAt + this.staggerMs)
+    this.lastPlannedAt = plannedAt
+    records.push({
+      kind: 'decision',
+      at,
+      sessionId,
+      chainId,
+      action: 'revive',
+      reason: 'ok',
+      code: BOOT_SWEEP_CODE,
+      quotaUsed: this.usedOf(chainId, at),
+      quotaLimit: QUOTA_MAX,
+      plannedAt,
+      contextTokens: state.contextTokens ?? null,
+    })
+    return records
+  }
+
+  /**
    * Absolute ms timestamp of the earliest wave whose held set still waits for
    * cooldown, or null when nothing is pending. The host arms one timer to it.
    */
@@ -514,6 +613,34 @@ export class RevivalPolicy {
       quotaUsed: this.usedOf(chainId, at),
       quotaLimit: QUOTA_MAX,
       ...(code === undefined ? {} : { code }),
+      ...extra,
+    }
+  }
+
+  /**
+   * A zero-consumption skip for the boot-sweep path: the same evidence shape
+   * as {@link RevivalPolicy.skipRecord} minus every account mutation — the
+   * sweep's parks leave `counters` and `skipReasons` byte-identical too
+   * (拍板⑪ status 零增), because the sweep's own decision line already names
+   * the reason and the `boot-sweep` code.
+   */
+  private sweepSkip(
+    sessionId: string,
+    chainId: string,
+    reason: DecisionReason,
+    at: number,
+    extra?: Partial<DecisionRecord>,
+  ): DecisionRecord {
+    return {
+      kind: 'decision',
+      at,
+      sessionId,
+      chainId,
+      action: 'skip',
+      reason,
+      code: BOOT_SWEEP_CODE,
+      quotaUsed: this.usedOf(chainId, at),
+      quotaLimit: QUOTA_MAX,
       ...extra,
     }
   }
