@@ -74,8 +74,52 @@ export const STAGGER_DEFAULT_MS = 10_000
 /** Context watermark: at or above this many tokens a session parks, never nudges. */
 export const CONTEXT_LIMIT_TOKENS = 150_000
 
-/** Codes whose sessions are revived (design §4.2: 只计可复活类). */
-export const REVIVE_CODES: ReadonlySet<string> = new Set(['TRANSPORT', 'TIMEOUT'])
+/**
+ * Codes whose sessions are revived (design §4.2: 只计可复活类).
+ *
+ * `content_filter` and `MALFORMED_RESPONSE` joined this list on 2026-11-08
+ * (拍板⑬ admission ruling): the corpus re-run behind it measured both as
+ * continue-recoverable — a human continue completed the next turn in 6/8
+ * content_filter sessions (55% event-level, same band as TRANSPORT's 59%)
+ * and 6/8 MALFORMED_RESPONSE errors — while the wall premise ("a revival
+ * would hit the same wall") does not hold for either: the same route
+ * recovers on a plain re-send. `content_filter` never arrives as a harness
+ * code (the harness folds it into `PI_AI_ERROR`), so {@link refineFailureCode}
+ * materializes it from the failure message before classification.
+ */
+export const REVIVE_CODES: ReadonlySet<string> = new Set([
+  'TRANSPORT',
+  'TIMEOUT',
+  'content_filter',
+  'MALFORMED_RESPONSE',
+])
+
+/**
+ * Message-level content-filter signature (2026-11-08 admission ruling): the
+ * harness classifies a provider content-filter stop through
+ * `classifyPiAiError`, whose text table has no content_filter arm, so the
+ * cause only survives in the message (`Provider finish_reason: content_filter`)
+ * under the catch-all `PI_AI_ERROR`. A match under that catch-all refines the
+ * code to `content_filter`; every other code passes through untouched.
+ * Scoped to `PI_AI_ERROR` because that is the bucket the corpus shows the
+ * filter landing in (11/11 observed cases); HTTP-level rejections keep their
+ * own codes and their own classification.
+ */
+export const CONTENT_FILTER_RE = /\bcontent_filter\b/i
+
+/**
+ * Refine a raw harness failure code with its message (2026-11-08 admission
+ * ruling): `PI_AI_ERROR` + a content_filter message → `content_filter`.
+ * Classification stays entirely in the ruled lists — this only decides
+ * which code they see.
+ * @param code - the harness failure code.
+ * @param message - the failure message, when present.
+ * @returns the refined code to classify.
+ */
+export function refineFailureCode(code: string, message: string | undefined): string {
+  if (code !== 'PI_AI_ERROR') return code
+  return message !== undefined && CONTENT_FILTER_RE.test(message) ? 'content_filter' : code
+}
 
 /**
  * Stop causes folded into the revival flow by the 2026-11-07 triage ruling
@@ -109,19 +153,19 @@ export const PARKED_TURN_END_REASONS: ReadonlySet<string> = new Set(['interrupte
 
 /**
  * Wall codes (design §4.2 撞墙类): zero quota consumption, no revival, the
- * session suspends until `resetsAt`. The first seven entries are the design
- * literal list; the following two blocks map its `AUTH` and `模型配置`
- * categories onto the concrete codes the harness emits.
+ * session suspends until `resetsAt`. The first entries are the design
+ * literal list minus `MALFORMED_RESPONSE` and `content_filter` (both moved
+ * to {@link REVIVE_CODES} by the 2026-11-08 admission ruling, 拍板⑬ — the
+ * corpus re-run showed continue recovers them); the following blocks map its
+ * `AUTH` and `模型配置` categories onto the concrete codes the harness emits.
  */
 export const WALL_CODES: ReadonlySet<string> = new Set([
-  // design §4.2 literal list
+  // design §4.2 literal list (minus the two admit-class codes, 拍板⑬)
   'QUOTA',
   'AUTH',
   'INVALID_REQUEST',
-  'MALFORMED_RESPONSE',
   'NO_ADAPTER',
   'UNKNOWN_MODEL',
-  'content_filter',
   // design `模型配置` category -> harness model-configuration codes
   'MODEL_UNSUPPORTED',
   'INVALID_CONFIG',

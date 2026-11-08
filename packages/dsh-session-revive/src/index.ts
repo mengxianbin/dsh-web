@@ -31,6 +31,7 @@ import {
   Config,
   conditionOverrideNotice,
   nudgeTextFor,
+  refineFailureCode,
   resolveConfig,
 } from './config.ts'
 import { mountOnce } from './mount-once.ts'
@@ -195,7 +196,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           applyRecords(
             policy.onError({
               sessionId,
-              code: reason.error.code,
+              // 拍板⑬: the harness folds a provider content_filter stop into
+              // PI_AI_ERROR with the cause only in the message; refine it back
+              // before the ruled lists classify.
+              code: refineFailureCode(reason.error.code, reason.error.message),
               ...(reason.error.providerRetryAfterMs === undefined
                 ? {}
                 : { providerRetryAfterMs: reason.error.providerRetryAfterMs }),

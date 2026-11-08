@@ -331,8 +331,8 @@ describe('reserved relay chain field', () => {
 describe('detection and lifecycle edges', () => {
   it('observes wall and other codes without consuming, and other codes never suspend', () => {
     const p = policy()
-    const wall = p.onError({ sessionId: 'w', code: 'MALFORMED_RESPONSE', at: T0 })
-    expect(wall[0]).toMatchObject({ kind: 'detect', cls: 'wall', code: 'MALFORMED_RESPONSE' })
+    const wall = p.onError({ sessionId: 'w', code: 'INVALID_REQUEST', at: T0 })
+    expect(wall[0]).toMatchObject({ kind: 'detect', cls: 'wall', code: 'INVALID_REQUEST' })
     expect(lastDecision(wall)).toMatchObject({ action: 'skip', reason: 'wall-class' })
     expect(p.snapshot(T0).suspended).toBe(1)
     // A non-revive, non-wall code is observed and skipped with no suspension.
@@ -606,7 +606,7 @@ describe('墙随路由走: a model/selection releases a wall suspension (拍板�
 describe('condition lists echoed from the policy (拍板⑨ status 回显生效清单)', () => {
   it('defaults to the ruled lists with no overrides', () => {
     expect(policy().snapshot(T0).conditions).toEqual({
-      revive: ['TRANSPORT', 'TIMEOUT'],
+      revive: ['TRANSPORT', 'TIMEOUT', 'content_filter', 'MALFORMED_RESPONSE'],
       wall: [...WALL_CODES],
       overridden: [],
     })

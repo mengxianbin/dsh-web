@@ -4,7 +4,9 @@ English | [中文](README.zh.md)
 
 Shadow-first automatic session revival for DSH Web: the plugin observes every
 `turn/end` error, classifies its failure code, and for revive-class codes
-(`TRANSPORT`, `TIMEOUT`) applies the ruled per-session revival account —
+(`TRANSPORT`, `TIMEOUT`, plus `content_filter` and `MALFORMED_RESPONSE`
+since the 2026-11-08 admission ruling) applies the ruled per-session revival
+account —
 rolling 4h x 4 quota per chain, wall-class suspension at zero cost until
 `resetsAt`, a 10-minute circuit breaker, same-cause wave holds released
 staggered after a 5-minute quiet period, and the 150k context watermark.
@@ -25,9 +27,15 @@ Host-only — the package declares no `dsh.client` face.
 
 ## What it does
 
-- Classifies each `turn/end` error: revive-class (`TRANSPORT`, `TIMEOUT`)
+- Classifies each `turn/end` error: revive-class (`TRANSPORT`, `TIMEOUT`,
+  `content_filter`, `MALFORMED_RESPONSE`)
   enters the revival flow, wall-class records a zero-consumption suspension
-  until `resetsAt`, and other codes are observed and logged only.
+  until `resetsAt`, and other codes are observed and logged only. A provider
+  content-filter stop reaches the harness as the catch-all `PI_AI_ERROR` with
+  the cause only in the message (`Provider finish_reason: content_filter`);
+  the plugin refines that message back to `content_filter` before the lists
+  classify (2026-11-08 admission ruling — the corpus re-run measured a human
+  continue completing the next turn in 6/8 such sessions).
 - Releases a wall suspension when the route moves (2026-11-07 ruling): a
   durable `model/selection` whose provider leaves the walled route clears the
   hold and rejoins the flow as one quota-consuming revive — stagger, breaker,
@@ -89,7 +97,7 @@ live in one place in `src/config.ts`):
 | `enabled` | boolean | `true` | Master switch; `false` skips listeners, timers, and routes |
 | `mode` | string (`shadow` or `live`) | `shadow` | `shadow` logs the full decision account and withholds only the send; `live` queues the nudge |
 | `staggerMs` | number | `10000` | Minimum spacing between planned revivals; anything below `10000` clamps up to `10000` with a warning |
-| `reviveCodes` | string[] | the ruled revive list (`TRANSPORT`, `TIMEOUT`) | Replace the revive-class list wholesale; config moves where the list lives, changing values still requires a design §4.1 statistics re-run |
+| `reviveCodes` | string[] | the ruled revive list (`TRANSPORT`, `TIMEOUT`, `content_filter`, `MALFORMED_RESPONSE`) | Replace the revive-class list wholesale; config moves where the list lives, changing values still requires a design §4.1 statistics re-run |
 | `wallCodes` | string[] | the ruled wall list (design enumeration plus its `AUTH` and model-configuration families) | Replace the wall-class list wholesale, with the same ruling obligation |
 
 The numeric ruled parameters are fixed by the design ruling and are not
@@ -141,7 +149,8 @@ unconfirmed session is never nudged).
   is deferred to tuning.
 - Mid-turn silent deaths emit no `turn/end` event and are not detected here
   (the watchdog chain is a separate line).
-- Codes outside both lists (for example `RATE_LIMIT`, `PI_AI_ERROR`) neither
+- Codes outside both lists (for example `RATE_LIMIT`, or a `PI_AI_ERROR`
+  whose message is not a content filter) neither
   revive nor suspend: only the design's wall enumeration parks a session.
 - The durability stop cause couples to the goal-round-driver's exact warn
   wording (a regex over the logger stream); a driver wording change silently

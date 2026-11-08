@@ -3,7 +3,8 @@
 [English](README.md) | 中文
 
 DSH Web 影子先行的会话自动复活插件：监听每个 `turn/end` 错误、按失败码分类，
-对可复活类码（`TRANSPORT`、`TIMEOUT`）执行裁定好的按会话复活账——分罐滚动
+对可复活类码（`TRANSPORT`、`TIMEOUT`，2026-11-08 准入裁定起另含
+`content_filter`、`MALFORMED_RESPONSE`）执行裁定好的按会话复活账——分罐滚动
 4h x 4 额度、撞墙类零消耗挂起到 `resetsAt`、10 分钟断路器、同因波批量挂起
 并按错峰节奏在 5 分钟静默后释放，外加 150k 上下文水位。按 2026-11-07 停轮
 原因分治裁定（设计 §7），两个停轮原因并入同一条账：`max-tokens` 停轮（供应商
@@ -19,8 +20,13 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
 
 ## 功能
 
-- 给每个 `turn/end` 错误分类：可复活类（`TRANSPORT`、`TIMEOUT`）进复活流，
-  撞墙类记零消耗挂起直到 `resetsAt`，其余码只观测、只记日志。
+- 给每个 `turn/end` 错误分类：可复活类（`TRANSPORT`、`TIMEOUT`、
+  `content_filter`、`MALFORMED_RESPONSE`）进复活流，
+  撞墙类记零消耗挂起直到 `resetsAt`，其余码只观测、只记日志。供应商内容过滤
+  停轮到 harness 手里时已被折叠成兜底码 `PI_AI_ERROR`、成因只活在消息里
+  （`Provider finish_reason: content_filter`）；插件在名单分类前先把该消息
+  精化回 `content_filter`（2026-11-08 准入裁定——语料复跑实测此类会话人工
+  continue 后 6/8 跑完下一轮）。
 - 路由切走即解除撞墙挂起（2026-11-07 裁定）：持久 `model/selection` 事件的
   provider 离开撞墙路由时清掉挂起、按可复活类计 1 次额度并入复活流——错峰、
   断路器与 150k 水位照旧；provider 未变（或撞墙路由未观测到）则维持零消耗挂起。
@@ -67,7 +73,7 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 | `enabled` | boolean | `true` | 总开关；`false` 时监听、定时器与路由全部不挂 |
 | `mode` | string（`shadow` 或 `live`） | `shadow` | `shadow` 记完整决策账、只扣发送；`live` 才排队 nudge |
 | `staggerMs` | number | `10000` | 复活计划的最小间隔；低于 `10000` 一律夹到 `10000` 并告警 |
-| `reviveCodes` | string[] | 裁定的可复活名单（`TRANSPORT`、`TIMEOUT`） | 整体替换可复活类名单；配置只搬存放地，改值仍须重跑设计档 §4.1 统计再裁 |
+| `reviveCodes` | string[] | 裁定的可复活名单（`TRANSPORT`、`TIMEOUT`、`content_filter`、`MALFORMED_RESPONSE`） | 整体替换可复活类名单；配置只搬存放地，改值仍须重跑设计档 §4.1 统计再裁 |
 | `wallCodes` | string[] | 裁定的撞墙名单（设计枚举加其 `AUTH` 族与模型配置族） | 整体替换撞墙类名单，裁定义务同上 |
 
 数值类裁定参数由设计档定死、不可配置：4 小时窗口内每链 4 次（只计可复活类
@@ -104,7 +110,8 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 - 子代理子会话在范围内（设计覆盖全员）；其 `session.header.origin` 记入
   证据，是否排除留作调参旋钮。
 - 半途静默死亡不发 `turn/end` 事件，本插件检测不到（看门狗链是另一条线）。
-- 两张名单之外的码（如 `RATE_LIMIT`、`PI_AI_ERROR`）既不复活也不挂起：只有
+- 两张名单之外的码（如 `RATE_LIMIT`，或消息不含 content_filter 的
+  `PI_AI_ERROR`）既不复活也不挂起：只有
   设计枚举的撞墙类才停靠会话。
 - 检查点停靠原因与 goal-round-driver 的告警文案精确耦合（logger 流上的正则）；
   驱动侧改文案会让检测静默失效，须同步更新签名。

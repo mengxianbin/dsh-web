@@ -11,6 +11,7 @@ import {
   classifyFailure,
   conditionOverrideNotice,
   nudgeTextFor,
+  refineFailureCode,
   resolveConfig,
 } from '../src/config.ts'
 
@@ -63,17 +64,24 @@ describe('Config schema', () => {
 
 describe('condition lists (拍板账⑨ 条件清单配置化)', () => {
   it('keeps the code defaults word-for-word equal to the ruled design values', () => {
-    expect(new Set(REVIVE_CODES)).toEqual(new Set(['TRANSPORT', 'TIMEOUT']))
+    expect(new Set(REVIVE_CODES)).toEqual(
+      new Set([
+        'TRANSPORT',
+        'TIMEOUT',
+        // 2026-11-08 admission ruling (拍板⑬): continue-recoverable codes
+        // moved here from the wall list after a corpus re-run.
+        'content_filter',
+        'MALFORMED_RESPONSE',
+      ]),
+    )
     expect(new Set(WALL_CODES)).toEqual(
       new Set([
-        // design §4.2 literal list
+        // design §4.2 literal list minus the two admit-class codes (拍板⑬)
         'QUOTA',
         'AUTH',
         'INVALID_REQUEST',
-        'MALFORMED_RESPONSE',
         'NO_ADAPTER',
         'UNKNOWN_MODEL',
-        'content_filter',
         // model-config and auth families behind those category labels
         'MODEL_UNSUPPORTED',
         'INVALID_CONFIG',
@@ -111,7 +119,7 @@ describe('condition lists (拍板账⑨ 条件清单配置化)', () => {
     expect(notice).toBeDefined()
     expect(notice).toContain('reviveCodes')
     expect(notice).toContain('effective revive=[A]')
-    expect(notice).toContain('ruled defaults revive=[TRANSPORT,TIMEOUT]')
+    expect(notice).toContain('ruled defaults revive=[TRANSPORT,TIMEOUT,content_filter,MALFORMED_RESPONSE]')
     expect(notice).toContain('§4.1')
   })
 
@@ -134,15 +142,16 @@ describe('classifyFailure', () => {
   it('maps revive-class codes, the design wall list and its categories, and the rest', () => {
     expect(classifyFailure('TRANSPORT')).toBe('revive')
     expect(classifyFailure('TIMEOUT')).toBe('revive')
+    // 2026-11-08 admission ruling (拍板⑬): continue-recoverable codes.
+    expect(classifyFailure('content_filter')).toBe('revive')
+    expect(classifyFailure('MALFORMED_RESPONSE')).toBe('revive')
     for (const code of [
-      // design §4.2 literal list
+      // design §4.2 literal list minus the two admit-class codes (拍板⑬)
       'QUOTA',
       'AUTH',
       'INVALID_REQUEST',
-      'MALFORMED_RESPONSE',
       'NO_ADAPTER',
       'UNKNOWN_MODEL',
-      'content_filter',
       // model-config and auth families behind those category labels
       'MODEL_UNSUPPORTED',
       'INVALID_CONFIG',
@@ -155,6 +164,20 @@ describe('classifyFailure', () => {
     for (const code of ['PI_AI_ERROR', 'RATE_LIMIT', 'SERVER', 'ABORTED', 'UNKNOWN']) {
       expect(classifyFailure(code)).toBe('other')
     }
+  })
+
+  it('refines the harness content_filter bucket back to its own code from the message (拍板⑬)', () => {
+    // The harness folds a provider content_filter stop into PI_AI_ERROR; the
+    // message is the only surviving witness.
+    expect(refineFailureCode('PI_AI_ERROR', 'Provider finish_reason: content_filter')).toBe('content_filter')
+    expect(refineFailureCode('PI_AI_ERROR', 'Provider finish_reason: repetition_truncation')).toBe('PI_AI_ERROR')
+    expect(refineFailureCode('PI_AI_ERROR', 'pi-ai stream ended pending')).toBe('PI_AI_ERROR')
+    expect(refineFailureCode('PI_AI_ERROR', undefined)).toBe('PI_AI_ERROR')
+    // Only the catch-all is refined: real codes keep their own classification.
+    expect(refineFailureCode('INVALID_REQUEST', 'invalid content_filter field')).toBe('INVALID_REQUEST')
+    expect(refineFailureCode('TRANSPORT', 'other side closed content_filter')).toBe('TRANSPORT')
+    // The refined code classifies revive through the ruled list.
+    expect(classifyFailure(refineFailureCode('PI_AI_ERROR', 'Provider finish_reason: content_filter'))).toBe('revive')
   })
 
   it('folds the two stop causes into revive class without touching the ruled REVIVE_CODES literal (design §7.2)', () => {
