@@ -1,0 +1,128 @@
+# dsh-session-revive
+
+[English](README.md) | 中文
+
+DSH Web 影子先行的会话自动复活插件：监听每个 `turn/end` 错误、按失败码分类，
+对可复活类码（`TRANSPORT`、`TIMEOUT`，2026-11-08 准入裁定起另含
+`content_filter`、`MALFORMED_RESPONSE`）执行裁定好的按会话复活账——分罐滚动
+4h x 4 额度、撞墙类零消耗挂起到 `resetsAt`、10 分钟断路器、同因波批量挂起
+并按错峰节奏在 5 分钟静默后释放，外加 150k 上下文水位。按 2026-11-07 停轮
+原因分治裁定（设计 §7），两个停轮原因并入同一条账：`max-tokens` 停轮（供应商
+已响应、只是输出撞上 token 上限）与 goal-round-driver 的检查点写入失败（经
+logger exporter tap 捕获）。排除类停轮——人为中止、会话 resume/fork 标记、
+目标 block/complete——一律不自动续，只写一行 `stop-parked` 留证。激活时插件
+还会跑一次 boot sweep（2026-11-08 裁定，设计 §4.2）：主动扫描孤儿轮——存储
+日志尾部 `turn/start` 未闭合的会话——判定「中断归因 = 重启」（只有进程死亡会
+留下未闭合 turn），逐个确认后走同一条错峰 nudge 叫醒，且零额度。每次检测与
+每次判定都是一行结构化 JSON 日志。默认 `shadow` 模式完全不碰会话；
+`mode: 'live'` 才会经宿主会话控制器排队一句继续 nudge。仅宿主侧——本包不声明
+`dsh.client` 面。
+
+## 功能
+
+- 给每个 `turn/end` 错误分类：可复活类（`TRANSPORT`、`TIMEOUT`、
+  `content_filter`、`MALFORMED_RESPONSE`）进复活流，
+  撞墙类记零消耗挂起直到 `resetsAt`，其余码只观测、只记日志。供应商内容过滤
+  停轮到 harness 手里时已被折叠成兜底码 `PI_AI_ERROR`、成因只活在消息里
+  （`Provider finish_reason: content_filter`）；插件在名单分类前先把该消息
+  精化回 `content_filter`（2026-11-08 准入裁定——语料复跑实测此类会话人工
+  continue 后 6/8 跑完下一轮）。
+- 路由切走即解除撞墙挂起（2026-11-07 裁定）：持久 `model/selection` 事件的
+  provider 离开撞墙路由时清掉挂起、按可复活类计 1 次额度并入复活流——错峰、
+  断路器与 150k 水位照旧；provider 未变（或撞墙路由未观测到）则维持零消耗挂起。
+- 两个停轮原因并入同一条复活账（设计 §7.2）：`max-tokens` 停轮先清掉陈旧
+  挂起（供应商确实响应过）再按可复活类死亡走账；goal-round-driver 的检查点
+  写入失败告警行由 logger exporter tap 捕获、同样喂入。两者与网络死因共用
+  同一条 4h x 4 额度、断路器与波。
+- 按原因给 live nudge 打标（设计 §7.2(4)）：停轮原因的 nudge 先提示
+  `update_goal action=resume`（nudge 轮带直接人类授权），`TRANSPORT`/
+  `TIMEOUT` 沿用朴素「继续」。
+- 对排除类停轮只写 `stop-parked` 留证行、绝不自动续（设计 §7.1）：
+  `turn/end` 中止（带取消来源）、`interrupted`/`forked` 生命周期标记、
+  `goal/change` 的 block 与 complete。
+- 每次复活前先过裁定账：断路器最前（复活后 10 分钟内再死即永久停该会话），
+  然后是挂起、150k 水位、波挂起，最后才是滚动 4h x 4 分罐额度。
+- 激活时扫重启孤儿轮（2026-11-08 裁定，设计 §4.2）：用 harness 的
+  `turnBoundary` 投影预筛出末轮未闭合的会话行，候选一律再经原始存储日志读
+  确认（唯一能区分「未闭合 turn」与「已提交 interrupted closer」的来源），
+  确认的孤儿走同一条错峰路径叫醒——断路器照常武装、150k 水位照查，但额度
+  豁免，status 的 `counters`/`quota` 零增。sweep 等不到事件：`interrupted`
+  closer 只在下次 resume 时落盘（设计 §4.2 条3）。
+- 同因波开启期间（15 分钟内同码错误达到 2 次）挂起会话，5 分钟静默后释放，
+  逐个错峰复活、各自扣自己罐的额度。
+- 提供 `GET /api/session-revive/status`（仅回环）：方式、计数、挂起/停用/
+  断路状态、分罐额度与生效条件清单，用于重启后验证与留证复核。
+
+## 安装
+
+本地链装（本包不发布到 npm）：
+
+```powershell
+dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
+```
+
+唯一的 bundle 行（`session-revive`）挂载事件监听、波释放定时器与状态路由。
+重启宿主（或依赖热补丁重载）后生效。
+
+## 配置
+
+插件配置由 schemastery 校验（默认值与夹取集中在 `src/config.ts` 一处）：
+
+| 字段 | 类型 | 默认值 | 含义 |
+|------|------|--------|------|
+| `enabled` | boolean | `true` | 总开关；`false` 时监听、定时器与路由全部不挂 |
+| `mode` | string（`shadow` 或 `live`） | `shadow` | `shadow` 记完整决策账、只扣发送；`live` 才排队 nudge |
+| `staggerMs` | number | `10000` | 复活计划的最小间隔；低于 `10000` 一律夹到 `10000` 并告警 |
+| `reviveCodes` | string[] | 裁定的可复活名单（`TRANSPORT`、`TIMEOUT`、`content_filter`、`MALFORMED_RESPONSE`） | 整体替换可复活类名单；配置只搬存放地，改值仍须重跑设计档 §4.1 统计再裁 |
+| `wallCodes` | string[] | 裁定的撞墙名单（设计枚举加其 `AUTH` 族与模型配置族） | 整体替换撞墙类名单，裁定义务同上 |
+
+数值类裁定参数由设计档定死、不可配置：4 小时窗口内每链 4 次（只计可复活类
+死亡）、10 分钟断路器、15 分钟内同码 2 次成波且 5 分钟无新同码错误才释放、
+150000 token 上下文水位停靠不 nudge。两张码表是唯一的可配置面：代码默认值
+即设计裁定值，profile 配置可整体替换其一——配置只搬存放地，改值仍须在新裁定
+前重跑设计档 §4.1 统计。状态端点回显生效清单（含哪些键被覆盖），启动日志
+响亮记 override。撞墙类码零消耗并把会话挂起到 `resetsAt`。
+
+每次判定经宿主 logger 落一行：`dsh-session-revive ` 前缀加一个带当前 `mode`
+标记的 JSON 对象。boot sweep 另有自己的证据行：每次激活一行 `boot-sweep`
+汇总（列表/预筛/读取/复活计数）、每个孤儿一条带 `code: "boot-sweep"` 的
+`decision`，放弃时响亮落 `boot-sweep-failed`（fail closed——未确认的会话
+绝不 nudge）。
+
+## 安全模型
+
+- 状态路由仅回环（RFC 5735 本地地址）：远端套接字一律 `403`，会话 id 与
+  计数不出本机。
+- 不碰凭据、不发起外网请求、不写文件：插件只听进程内会话事件，且仅在
+  `live` 模式下经宿主自带的会话控制器给目标会话排队一条文本消息。
+- `shadow`（默认）零发送：挂载而未配置的插件不会打扰任何会话，除非有人
+  显式设 `mode: 'live'`。
+
+## 已知限制
+
+- 状态在内存里：断路、挂起、额度戳与波挂起随宿主重启清零；结构化日志才是
+  持久留证。
+- 晨报联动尚未接入：断路与跳过证据躺在日志流里，等读取方。
+- `live` 发送路径已实现但从未对真实会话跑过；打开开关属于转正批次，自带
+  验证清单。
+- 达到或超过 150k 水位的会话，human 与 bot 一律停靠；本插件从不把停靠的
+  会话接力到新会话。
+- 子代理子会话在范围内（设计覆盖全员）；其 `session.header.origin` 记入
+  证据，是否排除留作调参旋钮。
+- 半途静默死亡不发 `turn/end` 事件，本插件检测不到（看门狗链是另一条线）。
+- 两张名单之外的码（如 `RATE_LIMIT`，或消息不含 content_filter 的
+  `PI_AI_ERROR`）既不复活也不挂起：只有
+  设计枚举的撞墙类才停靠会话。
+- 检查点停靠原因与 goal-round-driver 的告警文案精确耦合（logger 流上的正则）；
+  驱动侧改文案会让检测静默失效，须同步更新签名。
+- 成波中的第一个错误在波成形前就已判定；若网络当时已断，损失由断路器与
+  4h x 4 额度兜住。
+- 路由切走解除依赖失败请求已折叠进会话的请求头：未观测到路由的撞墙会
+  fail-closed 维持挂起——证明 provider 已切离需要比对的两边。
+- sweep 预筛信任投影检查点，而检查点按 write-behind 窗口滞后日志（5 秒 /
+  200 事件；只在创建、`turn/end`、会话处置三点强制刷）：硬杀重启若落在孤儿
+  `turn/start` 后的该窗口内，此孤儿当次激活筛不出来；优雅重启在会话处置时
+  强制刷检、能筛出。被筛中的候选一律再经原始读确认，所以滞后只可能漏、
+  不会误复活已闭合会话。
+- sweep 对确认的孤儿不分年龄一律复活——未裁过时间窗——所以装上后的首次
+  激活会把历史积压整批错峰唤醒，同样受 150k 水位与断路器约束。

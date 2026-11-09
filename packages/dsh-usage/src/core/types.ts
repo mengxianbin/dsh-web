@@ -85,6 +85,15 @@ export interface PlanWindowView {
   name?: string
   /** Used percent 0-100, when computable. */
   percent?: number
+  /**
+   * Absolute amount consumed so far in `currency` units, when the provider
+   * reports one (OpenCode Go: USD, from console go/status micro-cents).
+   */
+  used?: number
+  /** Absolute window capacity in `currency` units, when the provider reports one. */
+  limit?: number
+  /** ISO 4217 currency of `used`/`limit`, when present. */
+  currency?: string
   /** ISO 8601 reset instant, when the provider reports one. */
   resetsAt?: string
 }

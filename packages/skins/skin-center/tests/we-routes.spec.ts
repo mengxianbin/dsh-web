@@ -800,7 +800,11 @@ describe('scene-probe cache (#817)', () => {
 
   // 258 real HTTP probes with a full library scan each: slow runners can
   // exceed the default 5s timeout, so budget this case explicitly.
-  it('evicts the oldest probe entries instead of clearing the whole cache at the cap', { timeout: 30000 }, async () => {
+  // 2026-10-26: the 30s budget proved marginal on this host (35-40s across
+  // runs under normal multi-session load, non-saturated) and 45s still left
+  // only ~12% headroom, so widen to 60s. This stays a hang guard, not a
+  // perf assertion; the assertions below are unchanged.
+  it('evicts the oldest probe entries instead of clearing the whole cache at the cap', { timeout: 60000 }, async () => {
     for (let i = 0; i < 258; i++) {
       const name = 's' + String(i).padStart(3, '0')
       makeProject(join(library, name), { title: name, type: 'scene', file: 'scene.pkg' }, {

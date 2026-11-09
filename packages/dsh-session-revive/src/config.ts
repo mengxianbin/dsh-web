@@ -1,0 +1,279 @@
+import z from 'schemastery'
+
+/**
+ * Plugin config shape. Schemastery validates shape only (absent keys pass
+ * through); every default and clamp lives in {@link resolveConfig} so the
+ * ruled values have exactly one home.
+ */
+export interface Config {
+  /** Master switch for detection and logging (default true). */
+  enabled?: boolean
+  /** `shadow` logs decisions only; `live` also nudges (default shadow). */
+  mode?: 'shadow' | 'live'
+  /** Minimum spacing between planned revivals in ms (default and floor 10s). */
+  staggerMs?: number
+  /**
+   * Replace the revive-class code list (拍板账⑨ 条件清单配置化). Absent keeps
+   * the ruled {@link REVIVE_CODES} default. The whole list is replaced, never
+   * merged: config only moves where the list lives — the ruling obligation
+   * does not move, so changing values still requires a design §4.1 statistics
+   * re-run before a new ruling. `STOP_CAUSES` is deliberately NOT configurable
+   * (the design §7 triage ruling stays in code).
+   */
+  reviveCodes?: string[]
+  /** Replace the wall-class code list (拍板账⑨); absent keeps the ruled {@link WALL_CODES} default. */
+  wallCodes?: string[]
+}
+
+export const Config: z<Config> = z.object({
+  enabled: z.boolean(),
+  mode: z.union([z.const('shadow'), z.const('live')]),
+  staggerMs: z.number(),
+  reviveCodes: z.array(z.string()),
+  wallCodes: z.array(z.string()),
+})
+
+/**
+ * The two configurable code lists (拍板账⑨): which codes classify as revive
+ * vs wall. The code defaults are the ruled design values; profile config may
+ * replace either list wholesale — config moves where the list lives, not the
+ * ruling obligation behind it.
+ */
+export interface ConditionLists {
+  revive: ReadonlySet<string>
+  wall: ReadonlySet<string>
+}
+
+/** Fully resolved runtime config. */
+export interface ResolvedConfig {
+  enabled: boolean
+  mode: 'shadow' | 'live'
+  staggerMs: number
+  /** Effective condition lists: profile config when present, else the ruled defaults. */
+  conditions: ConditionLists
+  /** Config keys that replaced a ruled default (empty = pure code defaults in force). */
+  conditionOverrides: string[]
+}
+
+// ── Ruled parameters (design session-auto-revival-design-1102 §四; 实施不改值 —
+// changing any of these requires re-running the statistics scan and a new ruling).
+/** Rolling revival quota window: 4h per session chain (分罐不分池). */
+export const QUOTA_WINDOW_MS = 4 * 60 * 60 * 1000
+/** Revivals allowed per chain inside {@link QUOTA_WINDOW_MS}. */
+export const QUOTA_MAX = 4
+/** Revive -> die again within this window trips the session breaker. */
+export const BREAKER_WINDOW_MS = 10 * 60 * 1000
+/** Same-cause errors inside this window form one wave. */
+export const WAVE_WINDOW_MS = 15 * 60 * 1000
+/** No new same-cause error for this long releases the held sessions. */
+export const WAVE_COOLDOWN_MS = 5 * 60 * 1000
+/** Configurable stagger floor: below this a config value clamps up with a warn. */
+export const STAGGER_MIN_MS = 10_000
+/** Default revival stagger (design §四: 间隔可配，初值 10s). */
+export const STAGGER_DEFAULT_MS = 10_000
+/** Context watermark: at or above this many tokens a session parks, never nudges. */
+export const CONTEXT_LIMIT_TOKENS = 150_000
+
+/**
+ * Codes whose sessions are revived (design §4.2: 只计可复活类).
+ *
+ * `content_filter` and `MALFORMED_RESPONSE` joined this list on 2026-11-08
+ * (拍板⑬ admission ruling): the corpus re-run behind it measured both as
+ * continue-recoverable — a human continue completed the next turn in 6/8
+ * content_filter sessions (55% event-level, same band as TRANSPORT's 59%)
+ * and 6/8 MALFORMED_RESPONSE errors — while the wall premise ("a revival
+ * would hit the same wall") does not hold for either: the same route
+ * recovers on a plain re-send. `content_filter` never arrives as a harness
+ * code (the harness folds it into `PI_AI_ERROR`), so {@link refineFailureCode}
+ * materializes it from the failure message before classification.
+ */
+export const REVIVE_CODES: ReadonlySet<string> = new Set([
+  'TRANSPORT',
+  'TIMEOUT',
+  'content_filter',
+  'MALFORMED_RESPONSE',
+])
+
+/**
+ * Message-level content-filter signature (2026-11-08 admission ruling): the
+ * harness classifies a provider content-filter stop through
+ * `classifyPiAiError`, whose text table has no content_filter arm, so the
+ * cause only survives in the message (`Provider finish_reason: content_filter`)
+ * under the catch-all `PI_AI_ERROR`. A match under that catch-all refines the
+ * code to `content_filter`; every other code passes through untouched.
+ * Scoped to `PI_AI_ERROR` because that is the bucket the corpus shows the
+ * filter landing in (11/11 observed cases); HTTP-level rejections keep their
+ * own codes and their own classification.
+ */
+export const CONTENT_FILTER_RE = /\bcontent_filter\b/i
+
+/**
+ * Refine a raw harness failure code with its message (2026-11-08 admission
+ * ruling): `PI_AI_ERROR` + a content_filter message → `content_filter`.
+ * Classification stays entirely in the ruled lists — this only decides
+ * which code they see.
+ * @param code - the harness failure code.
+ * @param message - the failure message, when present.
+ * @returns the refined code to classify.
+ */
+export function refineFailureCode(code: string, message: string | undefined): string {
+  if (code !== 'PI_AI_ERROR') return code
+  return message !== undefined && CONTENT_FILTER_RE.test(message) ? 'content_filter' : code
+}
+
+/**
+ * Stop causes folded into the revival flow by the 2026-11-07 triage ruling
+ * (design session-auto-revival-design-1102 §7.2): `max-tokens` is a `turn/end`
+ * reason whose turn produced output up to the ceiling — the provider answered,
+ * only the response was truncated; `durability-flush` is the goal-round-driver
+ * warn line when a checkpoint flush fails and the driver disarms. Both are
+ * synthetic (not `LlmFailure.code`s), kept out of the ruled {@link REVIVE_CODES}
+ * literal so the §4.2 accounting stays as ruled; they enter through
+ * {@link classifyFailure} and consume the same 4h x 4 can, breaker, and wave as
+ * network deaths. `MAX_TOKENS` (compaction, uppercase) must stay non-revive —
+ * the sets are case-sensitive on purpose.
+ */
+export const STOP_CAUSES: ReadonlySet<string> = new Set(['max-tokens', 'durability-flush'])
+
+/**
+ * Warn-line signature emitted by goal-round-driver when a durability flush
+ * fails; capture group 1 is the agent id, which equals the session id
+ * (AgentRegistry.enter throws unless `agent.id === agent.session.id`).
+ */
+export const DURABILITY_WARN_RE = /durability checkpoint failed for agent "([^"]+)"/
+
+/**
+ * Turn-end markers that park as evidence only (design §7.1: session
+ * resume/fork never auto-continues — they are lifecycle closers, not
+ * failures). A set check rather than literal comparisons: the published
+ * `dsh-session` types lag the harness repo and do not declare `forked` yet,
+ * while the runtime event stream already carries it.
+ */
+export const PARKED_TURN_END_REASONS: ReadonlySet<string> = new Set(['interrupted', 'forked'])
+
+/**
+ * Wall codes (design §4.2 撞墙类): zero quota consumption, no revival, the
+ * session suspends until `resetsAt`. The first entries are the design
+ * literal list minus `MALFORMED_RESPONSE` and `content_filter` (both moved
+ * to {@link REVIVE_CODES} by the 2026-11-08 admission ruling, 拍板⑬ — the
+ * corpus re-run showed continue recovers them); the following blocks map its
+ * `AUTH` and `模型配置` categories onto the concrete codes the harness emits.
+ */
+export const WALL_CODES: ReadonlySet<string> = new Set([
+  // design §4.2 literal list (minus the two admit-class codes, 拍板⑬)
+  'QUOTA',
+  'AUTH',
+  'INVALID_REQUEST',
+  'NO_ADAPTER',
+  'UNKNOWN_MODEL',
+  // design `模型配置` category -> harness model-configuration codes
+  'MODEL_UNSUPPORTED',
+  'INVALID_CONFIG',
+  'INVALID_MODEL_CONTEXT',
+  'INVALID_MODEL_INFO',
+  'INVALID_MODEL_MAX_TOKENS',
+  'INVALID_MODEL_REASONING',
+  // design `AUTH` category -> credential walls that carry their own codes
+  'INVALID_CREDENTIAL',
+  'MISSING_CREDENTIAL',
+  'ACCOUNT_SIGN_IN_REQUIRED',
+  'ACCOUNT_TOKEN_INVALID',
+])
+
+/** Failure classes of one `turn/end` error. */
+export type FailureClass = 'revive' | 'wall' | 'other'
+
+/** The ruled condition lists in force when profile config does not override them (设计裁定值 = 代码默认值). */
+export const RULED_CONDITIONS: ConditionLists = { revive: REVIVE_CODES, wall: WALL_CODES }
+
+/**
+ * Classify an `LlmFailure.code` (or a synthetic stop cause): revive-class
+ * enters the revival flow, wall-class records a zero-consumption suspension,
+ * everything else is observed and logged but never revived (design §4.2
+ * enumeration; stop causes added by design §7.2 — same chain, new causes).
+ * `conditions` defaults to the ruled lists; the policy passes the effective
+ * (possibly profile-overridden) lists. `STOP_CAUSES` folds regardless — the
+ * §7 triage ruling stays in code and is not configurable.
+ */
+export function classifyFailure(code: string, conditions: ConditionLists = RULED_CONDITIONS): FailureClass {
+  if (conditions.revive.has(code) || STOP_CAUSES.has(code)) return 'revive'
+  if (conditions.wall.has(code)) return 'wall'
+  return 'other'
+}
+
+/** Nudge text a live revival queues into the session — the human continue. */
+export const NUDGE_TEXT = '继续'
+
+/**
+ * Cause-tagged nudge texts (design §7.2(4), 2026-11-07 ruling): stop causes
+ * that disarm the goal-round-driver must tell the model to resume the goal
+ * first — the nudge turn carries direct-human authority, so `update_goal
+ * action=resume` passes `requireDirectHumanInput`. Network causes keep the
+ * plain {@link NUDGE_TEXT}: their turns never touch the driver.
+ */
+export const NUDGE_TEXT_BY_CAUSE: Readonly<Record<string, string>> = {
+  'max-tokens':
+    '继续——上一轮输出达到 token 上限被截断了，请从中断处接着做完；若这是目标会话且目标已停轮，先 update_goal action=resume 再继续',
+  'durability-flush':
+    '继续——目标会话的进度检查点写入失败、目标已停轮，先 update_goal action=resume 恢复目标再从中断处继续',
+}
+
+/** Pick the nudge text for a revive decision's cause; unknown causes get the default continue. */
+export function nudgeTextFor(code: string | undefined): string {
+  return (code !== undefined ? NUDGE_TEXT_BY_CAUSE[code] : undefined) ?? NUDGE_TEXT
+}
+
+/**
+ * Apply defaults and clamps to one config validation pass.
+ * `mode` defaults to `shadow`: the plugin only writes structured logs until
+ * the turn-on switch is explicitly set to `live`.
+ * Condition lists default to the ruled design values; a present config key
+ * replaces that list wholesale and is recorded in `conditionOverrides`.
+ * @param config - schema-validated config shape.
+ * @param warnStagger - called when `staggerMs` violates the ruled floor.
+ * @returns the resolved runtime config.
+ */
+export function resolveConfig(
+  config: Config,
+  warnStagger?: (raw: number, clamped: number) => void,
+): ResolvedConfig {
+  let staggerMs = config.staggerMs ?? STAGGER_DEFAULT_MS
+  if (!Number.isFinite(staggerMs) || staggerMs < STAGGER_MIN_MS) {
+    warnStagger?.(staggerMs, STAGGER_MIN_MS)
+    staggerMs = STAGGER_MIN_MS
+  }
+  const conditions: ConditionLists = {
+    revive: config.reviveCodes !== undefined ? new Set(config.reviveCodes) : REVIVE_CODES,
+    wall: config.wallCodes !== undefined ? new Set(config.wallCodes) : WALL_CODES,
+  }
+  const conditionOverrides: string[] = []
+  if (config.reviveCodes !== undefined) conditionOverrides.push('reviveCodes')
+  if (config.wallCodes !== undefined) conditionOverrides.push('wallCodes')
+  return {
+    enabled: config.enabled ?? true,
+    mode: config.mode ?? 'shadow',
+    staggerMs,
+    conditions,
+    conditionOverrides,
+  }
+}
+
+/**
+ * The loud startup line for a condition-list override (拍板账⑨ 判据「启动日志
+ * 响亮记 override」): names the overridden keys, prints the effective lists next
+ * to the ruled defaults so any drift is visible on every boot, and restates
+ * that config only moved where the list lives — changing values still requires
+ * a design §4.1 statistics re-run before a new ruling.
+ * @param resolved - the resolved runtime config.
+ * @returns the message when any list is overridden, `undefined` otherwise.
+ */
+export function conditionOverrideNotice(resolved: ResolvedConfig): string | undefined {
+  if (resolved.conditionOverrides.length === 0) return undefined
+  const show = (set: ReadonlySet<string>): string => (set.size === 0 ? '<empty>' : [...set].join(','))
+  return (
+    `dsh-session-revive: condition lists overridden by profile config [${resolved.conditionOverrides.join(', ')}] — ` +
+    `effective revive=[${show(resolved.conditions.revive)}] wall=[${show(resolved.conditions.wall)}]; ` +
+    `ruled defaults revive=[${show(REVIVE_CODES)}] wall=[${show(WALL_CODES)}]. ` +
+    'Config only moves where the list lives: changing values still requires a design §4.1 stats re-run.'
+  )
+}

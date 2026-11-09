@@ -1,14 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
 import {
   makeDispatchRoutes,
   makeHealthRoute,
   makeBindingsRoute,
+  makeSessionSendRoute,
+  makeSessionStopRoute,
   parseDispatchBody,
+  parseSessionSendBody,
+  parseSessionStopBody,
+  SESSION_SEND_API_PREFIX,
+  SESSION_STOP_API_PREFIX,
   type DispatchBinding,
   type DispatchBindingStore,
   type DispatchServices,
+  type SessionSendServices,
+  type SessionStopServices,
 } from '../src/host/routes.ts'
 
 /** Minimal req/res doubles: the routes only read method/url/headers/socket and write one JSON response. */
@@ -38,6 +46,7 @@ function happyServices(overrides: Partial<DispatchServices> = {}): DispatchServi
       async create() { return { sessionId: 'session-abc' } },
       async rename() { return {} },
       async prompt() { return { accepted: true } },
+      async cancel() { return { accepted: true } },
     },
     workspaces: { get: (id: string) => (id === 'ws-1' ? { id: 'ws-1' } : undefined) },
     ...overrides,
@@ -111,6 +120,7 @@ describe('dispatch route', () => {
         async create(request) { calls.push(`create:${JSON.stringify(request)}`); return { sessionId: 'session-abc' } },
         async rename(request) { calls.push(`rename:${request.title}`); return {} },
         async prompt(request) { calls.push(`prompt:${request.mode}:${request.content[0]?.text}`); return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -127,6 +137,7 @@ describe('dispatch route', () => {
         async create(request) { seen = request as unknown as Record<string, unknown>; return { sessionId: 's' } },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -145,6 +156,7 @@ describe('dispatch route', () => {
         async create() { return { sessionId: 'session-abc' } },
         async rename() { return {} },
         async prompt() { calls.push('prompt'); return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -162,6 +174,7 @@ describe('dispatch route', () => {
         async create() { return { sessionId: 'session-abc' } },
         async rename() { return {} },
         async prompt() { prompted = true; return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -178,6 +191,7 @@ describe('dispatch route', () => {
         async create() { created = true; return { sessionId: 's' } },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -225,6 +239,7 @@ describe('dispatch route', () => {
         async create() { const error = new Error('workspace "ws-1" not found') as Error & { code: string }; error.code = 'workspace/not-found'; throw error },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -300,6 +315,7 @@ describe('dispatch route taskRef bindings', () => {
         async create() { created = true; return { sessionId: 's' } },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -391,6 +407,7 @@ describe('dispatch gate serialization', () => {
         },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -446,5 +463,438 @@ describe('bindings route', () => {
   it('is registered by makeDispatchRoutes only when a store is composed', () => {
     expect(makeDispatchRoutes(happyServices())).toHaveLength(2)
     expect(makeDispatchRoutes(happyServices({ bindings: fakeBindings() }))).toHaveLength(3)
+  })
+})
+
+/** Send-services double: captures every prompt request for queue-semantics assertions. */
+function fakeSendServices(): SessionSendServices & { requests: Record<string, unknown>[] } {
+  const requests: Record<string, unknown>[] = []
+  return {
+    requests,
+    sessions: {
+      async prompt(request) {
+        requests.push(request as unknown as Record<string, unknown>)
+        return { accepted: true }
+      },
+    },
+  }
+}
+
+function sendReq(body: unknown, opts: { loopback?: boolean; url?: string } = {}): IncomingMessage {
+  return fakeReq('POST', body, { url: SESSION_SEND_API_PREFIX, ...opts })
+}
+
+describe('parseSessionSendBody', () => {
+  it('accepts a minimal request and trims sessionId', () => {
+    expect(parseSessionSendBody({ sessionId: ' session-1 ', prompt: 'hello' }))
+      .toEqual({ ok: true, value: { sessionId: 'session-1', prompt: 'hello' } })
+  })
+
+  it('rejects a non-object body', () => {
+    expect(parseSessionSendBody('nope').ok).toBe(false)
+    expect(parseSessionSendBody(null).ok).toBe(false)
+    expect(parseSessionSendBody([]).ok).toBe(false)
+  })
+
+  it('rejects a missing or blank sessionId', () => {
+    expect(parseSessionSendBody({ prompt: 'x' })).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(parseSessionSendBody({ sessionId: '  ', prompt: 'x' })).toMatchObject({ ok: false })
+  })
+
+  it('rejects a missing or blank prompt', () => {
+    expect(parseSessionSendBody({ sessionId: 's' })).toMatchObject({ ok: false, error: expect.stringContaining('prompt') })
+    expect(parseSessionSendBody({ sessionId: 's', prompt: '   ' })).toMatchObject({ ok: false })
+  })
+
+  it('rejects an oversized prompt', () => {
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x'.repeat(900_001) }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('900000') })
+  })
+
+  it('drops a caller-supplied mode field instead of carrying it into the request', () => {
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 'whatever' }))
+      .toEqual({ ok: true, value: { sessionId: 's', prompt: 'x' } })
+  })
+})
+
+describe('session-send route', () => {
+  it('queues the prompt onto the existing session, answering the sessionId', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 'session-1', prompt: 'look at this' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-1' })
+    expect(captures.requests).toHaveLength(1)
+    const request = captures.requests[0]!
+    expect(request.requestId).toMatch(/^session-send-/)
+    expect(request.sessionId).toBe('session-1')
+    expect(request.mode).toBe('queue')
+    expect(request.content).toEqual([{ type: 'text', text: 'look at this' }])
+  })
+
+  it('is queue-only: a caller-supplied mode field never reaches the prompt call', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x', mode: 'steer' }))
+    expect(captured.status).toBe(200)
+    expect(captures.requests.map(request => request.mode)).toEqual(['queue'])
+  })
+
+  it('never creates a session: the services surface exposes no create path', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    await run(handler, sendReq({ sessionId: 'session-1', prompt: 'x' }))
+    expect(Object.keys(captures.sessions)).toEqual(['prompt'])
+  })
+
+  it('rejects a non-object body with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq('nope'))
+    expect(captured.status).toBe(400)
+  })
+
+  it('rejects a missing sessionId with 400 before touching the session service', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ prompt: 'x' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('rejects a blank prompt with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: '  ' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('prompt') })
+  })
+
+  it('rejects an oversized prompt with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x'.repeat(900_001) }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('900000') })
+  })
+
+  it('rejects invalid JSON with 400', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const stream = Readable.from([Buffer.from('{not json')]) as IncomingMessage
+    stream.method = 'POST'
+    stream.url = SESSION_SEND_API_PREFIX
+    stream.headers = { host: '127.0.0.1:3080' }
+    stream.socket = { remoteAddress: '127.0.0.1' } as IncomingMessage['socket']
+    const captured = await run(handler, stream)
+    expect(captured.status).toBe(400)
+  })
+
+  it('rejects non-POST methods with 405', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const stream = fakeReq('GET', undefined, { url: SESSION_SEND_API_PREFIX })
+    const captured = await run(handler, stream)
+    expect(captured.status).toBe(405)
+  })
+
+  it('rejects non-loopback callers with 403', async () => {
+    const handler = makeSessionSendRoute(fakeSendServices()).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x' }, { loopback: false }))
+    expect(captured.status).toBe(403)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('loopback') })
+  })
+
+  it('maps a session/not-found rejection to 400 with the Host error text', async () => {
+    const services: SessionSendServices = {
+      sessions: {
+        async prompt() {
+          const error = new Error('session "gone" is not available') as Error & { code: string }
+          error.code = 'session/not-found'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionSendRoute(services).handler!
+    const captured = await run(handler, sendReq({ sessionId: 'gone', prompt: 'x' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('session "gone" is not available') })
+  })
+
+  it('maps an unmapped Host rejection to 500', async () => {
+    const services: SessionSendServices = {
+      sessions: {
+        async prompt() {
+          const error = new Error('disk exploded') as Error & { code: string }
+          error.code = 'gateway/internal'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionSendRoute(services).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x' }))
+    expect(captured.status).toBe(500)
+  })
+})
+
+function stopReq(body: unknown, opts: { loopback?: boolean; url?: string } = {}): IncomingMessage {
+  return fakeReq('POST', body, { url: SESSION_STOP_API_PREFIX, ...opts })
+}
+
+/** Stop-services double: records every cancel request for actor-isolation assertions. */
+function fakeStopServices(): SessionStopServices & { requests: { sessionId: string }[] } {
+  const requests: { sessionId: string }[] = []
+  return {
+    requests,
+    sessions: {
+      cancel(request) {
+        requests.push(request)
+        return { accepted: true }
+      },
+    },
+  }
+}
+
+describe('parseSessionStopBody', () => {
+  it('accepts a minimal request and trims sessionId', () => {
+    expect(parseSessionStopBody({ sessionId: ' session-1 ' }))
+      .toEqual({ ok: true, value: { sessionId: 'session-1' } })
+  })
+
+  it('carries an optional actor through', () => {
+    expect(parseSessionStopBody({ sessionId: 's', actor: 'successor' }))
+      .toEqual({ ok: true, value: { sessionId: 's', actor: 'successor' } })
+  })
+
+  it('rejects a non-object body', () => {
+    expect(parseSessionStopBody('nope').ok).toBe(false)
+    expect(parseSessionStopBody(null).ok).toBe(false)
+    expect(parseSessionStopBody([]).ok).toBe(false)
+  })
+
+  it('rejects a missing or blank sessionId', () => {
+    expect(parseSessionStopBody({})).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(parseSessionStopBody({ sessionId: '  ' })).toMatchObject({ ok: false })
+  })
+
+  it('rejects a non-string actor', () => {
+    expect(parseSessionStopBody({ sessionId: 's', actor: 42 })).toMatchObject({ ok: false, error: expect.stringContaining('actor') })
+  })
+})
+
+describe('session-stop route', () => {
+  it('cancels the active turn and answers accepted, without letting actor steer', async () => {
+    const captures = fakeStopServices()
+    const handler = makeSessionStopRoute(captures).handler!
+    const captured = await run(handler, stopReq({ sessionId: 'session-1', actor: 'successor' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, accepted: true })
+    // The cancel call carries the target only: actor never reaches it.
+    expect(captures.requests).toEqual([{ sessionId: 'session-1' }])
+  })
+
+  it('logs one structured audit line with actor and target', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const handler = makeSessionStopRoute(fakeStopServices()).handler!
+      const captured = await run(handler, stopReq({ sessionId: 'session-1', actor: 'successor' }))
+      expect(captured.status).toBe(200)
+      expect(spy).toHaveBeenCalledWith('[session-stop] actor=successor target=session-1')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('logs a dash placeholder when the actor is absent', async () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {})
+    try {
+      const handler = makeSessionStopRoute(fakeStopServices()).handler!
+      await run(handler, stopReq({ sessionId: 'session-1' }))
+      expect(spy).toHaveBeenCalledWith('[session-stop] actor=- target=session-1')
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  it('rejects a missing sessionId with 400 before touching cancel', async () => {
+    const captures = fakeStopServices()
+    const handler = makeSessionStopRoute(captures).handler!
+    const captured = await run(handler, stopReq({ actor: 'x' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('sessionId') })
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('rejects a non-string actor with 400 before touching cancel', async () => {
+    const captures = fakeStopServices()
+    const handler = makeSessionStopRoute(captures).handler!
+    const captured = await run(handler, stopReq({ sessionId: 's', actor: 42 }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('actor') })
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('rejects invalid JSON with 400', async () => {
+    const handler = makeSessionStopRoute(fakeStopServices()).handler!
+    const stream = Readable.from([Buffer.from('{not json')]) as IncomingMessage
+    stream.method = 'POST'
+    stream.url = SESSION_STOP_API_PREFIX
+    stream.headers = { host: '127.0.0.1:3080' }
+    stream.socket = { remoteAddress: '127.0.0.1' } as IncomingMessage['socket']
+    const captured = await run(handler, stream)
+    expect(captured.status).toBe(400)
+  })
+
+  it('rejects non-POST methods with 405', async () => {
+    const handler = makeSessionStopRoute(fakeStopServices()).handler!
+    const captured = await run(handler, fakeReq('GET', undefined, { url: SESSION_STOP_API_PREFIX }))
+    expect(captured.status).toBe(405)
+  })
+
+  it('rejects non-loopback callers with 403', async () => {
+    const captures = fakeStopServices()
+    const handler = makeSessionStopRoute(captures).handler!
+    const captured = await run(handler, stopReq({ sessionId: 's' }, { loopback: false }))
+    expect(captured.status).toBe(403)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('loopback') })
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('passes a session/not-found rejection through as 4xx with the Host error text', async () => {
+    const services: SessionStopServices = {
+      sessions: {
+        cancel() {
+          const error = new Error('session "gone" not found (not attached)') as Error & { code: string }
+          error.code = 'session/not-found'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionStopRoute(services).handler!
+    const captured = await run(handler, stopReq({ sessionId: 'gone' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('session "gone" not found (not attached)') })
+  })
+
+  it('passes the subagent ownership refusal through as 4xx', async () => {
+    const services: SessionStopServices = {
+      sessions: {
+        cancel() {
+          const error = new Error('session "child" is owned by subagent routing') as Error & { code: string }
+          error.code = 'session/agent-busy'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionStopRoute(services).handler!
+    const captured = await run(handler, stopReq({ sessionId: 'child' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('owned by subagent routing') })
+  })
+
+  it('maps an unmapped Host rejection to 500', async () => {
+    const services: SessionStopServices = {
+      sessions: {
+        cancel() {
+          const error = new Error('disk exploded') as Error & { code: string }
+          error.code = 'gateway/internal'
+          throw error
+        },
+      },
+    }
+    const handler = makeSessionStopRoute(services).handler!
+    const captured = await run(handler, stopReq({ sessionId: 's' }))
+    expect(captured.status).toBe(500)
+  })
+})
+
+describe('dispatch sessionClass (attention ledger)', () => {
+  it('accepts the three classes plus the legacy bot alias, rejects anything else', () => {
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'human' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'human' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-boss' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-boss' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' } })
+    // Legacy wire `bot` (pre-triclass callers) normalizes to bot-worker.
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot' }))
+      .toEqual({ ok: true, value: { workspaceId: 'ws-1', prompt: 'x', sessionClass: 'bot-worker' } })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 'ai' }))
+      .toMatchObject({ ok: false, error: 'sessionClass must be one of human | bot-boss | bot-worker' })
+    expect(parseDispatchBody({ workspaceId: 'ws-1', prompt: 'x', sessionClass: 1 }))
+      .toMatchObject({ ok: false, error: 'sessionClass must be one of human | bot-boss | bot-worker' })
+  })
+
+  it('declares the wire default human when the field is absent', async () => {
+    const declared: [string, string][] = []
+    const services = happyServices({
+      attention: {
+        async declare(sessionId, sessionClass) { declared.push([sessionId, sessionClass]) },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(declared).toEqual([['session-abc', 'human']])
+    // Success shape stays clean: no attention fields when nothing failed.
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+  })
+
+  it('declares a legacy bot dispatch as bot-worker, before the prompt is queued', async () => {
+    const order: string[] = []
+    const services = happyServices({
+      attention: {
+        async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+      },
+      sessions: {
+        async create() { order.push('create'); return { sessionId: 'session-abc' } },
+        async rename() { return {} },
+        async prompt() { order.push('prompt'); return { accepted: true } },
+        async cancel() { return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', sessionClass: 'bot' }))
+    expect(captured.status).toBe(200)
+    expect(order).toEqual(['create', 'declare:bot-worker', 'prompt'])
+  })
+
+  it('declares a bot-boss dispatch as bot-boss, before the prompt is queued', async () => {
+    const order: string[] = []
+    const services = happyServices({
+      attention: {
+        async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+      },
+      sessions: {
+        async create() { order.push('create'); return { sessionId: 'session-abc' } },
+        async rename() { return {} },
+        async prompt() { order.push('prompt'); return { accepted: true } },
+        async cancel() { return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it', sessionClass: 'bot-boss' }))
+    expect(captured.status).toBe(200)
+    expect(order).toEqual(['create', 'declare:bot-boss', 'prompt'])
+  })
+
+  it('reports a ledger failure as attentionRecorded:false without failing the dispatch', async () => {
+    const services = happyServices({
+      attention: {
+        async declare() { throw new Error('ledger disk full') },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toMatchObject({
+      ok: true,
+      sessionId: 'session-abc',
+      attentionRecorded: false,
+      attentionError: expect.stringContaining('ledger disk full'),
+    })
+  })
+
+  it('touches no attention service when the profile mounts none', async () => {
+    const handler = makeDispatchRoutes(happyServices())[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'do it' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
   })
 })

@@ -9,8 +9,17 @@ carry an opaque `taskRef` to record a durable task-to-session binding in the
 quick ledger (`$DSH_HOME/dispatch-bindings.json`); while that taskRef still
 has a live session the same dispatch is refused with `409`, and
 `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
-Host-only — the package declares no `dsh.client` face, so nothing appears in
-the browser roster.
+`POST /api/session-send` queues one prompt onto an existing Session
+(queue-only delivery; the wire shape has no delivery-mode field).
+`POST /api/session-stop` cancels an existing Session's active turn — the
+pending inbox survives, so the Session can be woken again through
+session-send. Every
+dispatch also declares a `sessionClass` (`human` by default; `bot-boss` for
+bot duty sessions; `bot-worker` for bot-dispatched task work; the legacy `bot`
+spelling normalizes to `bot-worker`) into the attention ledger
+(`$DSH_HOME/session-attention.json`), which applies each Session's default
+pin state exactly once. Host-only — the package declares no `dsh.client`
+face, so nothing appears in the browser roster.
 
 ## Why
 
@@ -48,6 +57,7 @@ Body (JSON, at most 1 MiB):
 | `mode` | string | no | Agent preset id passed to session create |
 | `permission` | string | no | One of `read-only`, `workspace-write`, `danger-full-access`; pinned with `/permission` before the prompt |
 | `taskRef` | string | no | Opaque caller-chosen task reference (recommended shape `<board path>#<item anchor>`); records a binding and gates re-dispatch |
+| `sessionClass` | string | no | `human`, `bot-boss`, or `bot-worker` (default `human` when absent; legacy `bot` accepted as `bot-worker`): the Session's attention class — `human` and `bot-boss` take the default pin (human-dispatched work, bot duty sessions), `bot-worker` stays unpinned (bot-dispatched task work) |
 
 Responses: `200 { ok, sessionId }`, `400` invalid body or rejected Host
 command, `403` non-loopback, `404` unknown workspace, `405` wrong method,
@@ -58,7 +68,62 @@ of two concurrent dispatches of one taskRef exactly one answers `200` and the
 other answers `409`; racing ledger appends queue behind each other without
 dropping a row. Dispatch without `taskRef` behaves exactly as before. A
 failed binding write answers `200` with `bindingRecorded: false`: the session
-is live, so the dispatch itself did not fail.
+is live, so the dispatch itself did not fail. A failed attention-ledger write
+answers `200` with `attentionRecorded: false` for the same reason.
+
+#### Attention defaults
+
+The attention ledger classifies Sessions and applies a **one-time** default
+pin: the Host startup pass pins every current workspace member that has no
+record yet (undeclared Sessions predate the ledger and count as `human`),
+the dispatch declaration applies at creation, and the first real user
+message covers anything both missed. `human` and `bot-boss` pin, `bot-worker`
+leaves the pin set
+alone. Once a Session's default has been applied (`defaultApplied: true`),
+no later pass ever changes that pin — a manual pin/unpin survives every
+restart, and subagent children, side threads, and forks (never workspace
+members) are never recorded or pinned. A corrupt ledger is quarantined to
+`<path>.corrupt-<epoch>` and rebuilt, degrading to `human` on the next
+startup pass.
+
+### `POST /api/session-send`
+
+Queue one prompt onto an existing Session — the REST mirror of typing into a
+live session's composer (cross-session delivery: one session's output becomes
+another session's input). Body (JSON, at most 1 MiB):
+
+| field | type | required | meaning |
+|-------|------|----------|---------|
+| `sessionId` | string | yes | Target existing Session (created earlier, still alive) |
+| `prompt` | string | yes | Message queued behind the current turn, exactly like a composer send |
+
+Delivery is queue-only by construction: the wire shape has no delivery-mode
+field, so no caller input can steer; a busy Session consumes the message as a
+fresh turn after the current one, an idle Session starts a turn at once.
+Responses: `200 { ok, sessionId }`, `400` invalid body or `session/*` Host
+rejection (missing, archived, or disposed session), `403` non-loopback, `405`
+wrong method. Pointer discipline for long bodies: commit the text to git
+first and send only the path plus a one-line instruction — the 900,000
+character cap is a ceiling, not the intended shape.
+
+### `POST /api/session-stop`
+
+Cancel an existing Session's active turn — the REST mirror of the Stop
+button for programmatic callers (a successor nudging a stuck predecessor, a
+watchdog unwedging a session before the save/archive hop). The Host cancel
+aborts the live turn cooperatively and keeps the pending inbox, so the
+Session can be woken again through `POST /api/session-send`; no stop-entry
+is sent, so the durable cause stays entry-less. Body (JSON, at most 1 MiB):
+
+| field | type | required | meaning |
+|-------|------|----------|---------|
+| `sessionId` | string | yes | Target existing Session whose active turn is cancelled |
+| `actor` | string | no | Audit-only label written into one structured `[session-stop]` log line; it never reaches the cancel call |
+
+Responses: `200 { ok: true, accepted: true }`, `400` invalid body or
+`session/*` Host rejection (`session/not-found` for a detached target, the
+subagent ownership refusal), `403` non-loopback, `405` wrong method. The
+`actor` is logged only: no ledger schema changes.
 
 ### `GET /api/session-dispatch/health`
 
@@ -76,11 +141,17 @@ not a task account of record — the git board stays the only authority.
 ## Layout
 
 - `src/index.ts` — plugin entry: injects `webServer`, `sessionController`,
-  `workspaceRegistry`; registers the dispatch, health, and bindings routes.
+  `workspaceRegistry`; registers the dispatch, health, bindings,
+  session-send, and session-stop routes; runs the attention startup pass and
+  the first-message classification hook.
 - `src/host/routes.ts` — body validation, the `taskRef`/binding contracts,
-  and the route factories.
+  and the route factories (dispatch, health, bindings, session-send,
+  session-stop).
 - `src/host/bindings.ts` — the quick ledger: atomic binding persistence under
   `$DSH_HOME`, live-aliveness lookup, fail-open corrupt-ledger rebuild.
+- `src/host/attention.ts` — the attention ledger: sessionClass records under
+  `$DSH_HOME`, the once-per-Session default-pin pass, workspace-membership
+  gating, fail-open corrupt-ledger rebuild.
 - `src/host/loopback.ts`, `src/host/http.ts`, `src/dsh-home.ts`,
   `src/mount-once.ts` — generated copies of the repository-shared host modules
   (edit `shared/host/*` and run `node scripts/sync-shared.mjs`).
