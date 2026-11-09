@@ -53,8 +53,8 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
 | `restoreRatio` | `0.95` | 共用下沿：三窗**全部严格** `<` 双腿一起切回（2026-10-27 修订，原 0.70） |
 | `minDwellMs` | `0` | triggered 相最短驻留；`0` = 关闭 |
 | `activeWindowMs` | `1800000` | 请求新鲜度窗口（活跃集口径） |
-| `switchTo` | `mimo` / `mimo-v2.6-flash` | 扳机目标（不带 effort → 用模型自身默认） |
-| `restoreTo` | `opencode-go` / `mimo-v2.6-flash` / effort `high` | 切回目标（还原部署默认行为） |
+| `switchTo` | `mimo` / `mimo-v2.6-flash` | 扳机目标（只写方向 provider/model；effort 由服务端记忆位经解析链给出，此处绝不写入） |
+| `restoreTo` | `opencode-go` / `mimo-v2.6-flash` | 切回目标（还原部署默认方向；effort 由服务端模型级记忆经解析链给出） |
 | `meterUrl` | `https://opencode.ai/console/api/go/status` | 计量源 |
 | `meterKeyEnv` | `OC_GO_CC_API_KEY` | Bearer key 所在环境变量名（只进内存、绝不入日志） |
 | `balanceGuardrail` | `enabled: false` | mimo 余额护栏——按 2026-10-27 裁定关闭（不设现金闸，烧到余额为止） |

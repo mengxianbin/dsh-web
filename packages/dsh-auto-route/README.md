@@ -63,8 +63,8 @@ Every ruling parameter is configurable on the plugin row; defaults are the
 | `restoreRatio` | `0.95` | Shared down-edge: all three windows must read `<` this for both legs to return (strict; was 0.70) |
 | `minDwellMs` | `0` | Shortest triggered-phase stay before a restore; `0` = off |
 | `activeWindowMs` | `1800000` | Request recency that keeps a session in the active set |
-| `switchTo` | `mimo` / `mimo-v2.6-flash` | Target on trigger (no effort → the model's own default) |
-| `restoreTo` | `opencode-go` / `mimo-v2.6-flash` / effort `high` | Target on restore (restores the deployment default behavior) |
+| `switchTo` | `mimo` / `mimo-v2.6-flash` | Target on trigger (direction only — provider/model; effort is resolved server-side, never written here) |
+| `restoreTo` | `opencode-go` / `mimo-v2.6-flash` | Target on restore (restores the deployment default direction; effort comes from the server-side model memory through the resolution chain) |
 | `meterUrl` | `https://opencode.ai/console/api/go/status` | Go meter source |
 | `meterKeyEnv` | `OC_GO_CC_API_KEY` | Env var holding the bearer key (memory only, never logged) |
 | `balanceGuardrail` | `enabled: false` | MiMo balance guardrail — disabled by the 2026-10-27 ruling (no cash gate, burn to balance) |

@@ -14,15 +14,12 @@ import z from 'schemastery'
 export interface ModelTarget {
   readonly provider: string
   readonly model: string
-  /** Optional reasoning effort; absent selects the model's own default. */
-  readonly reasoningEffort?: string
 }
 
 /** A partially-spelled target in a plugin row; missing fields fall back to the default. */
 export type ModelTargetInput = {
   readonly provider?: string
   readonly model?: string
-  readonly reasoningEffort?: string
 }
 
 /** MiMo balance guardrail — off by ruling (no cash gate). */
@@ -85,12 +82,10 @@ export const Config: z<Config> = z.object({
   switchTo: z.object({
     provider: z.string(),
     model: z.string(),
-    reasoningEffort: z.string(),
   }),
   restoreTo: z.object({
     provider: z.string(),
     model: z.string(),
-    reasoningEffort: z.string(),
   }),
   meterUrl: z.string(),
   meterKeyEnv: z.string(),
@@ -159,10 +154,9 @@ export function resolveConfig(config: Config, clampPoll?: (raw: number, clamped:
     if (provider === '' || model === '') {
       throw new RangeError(`dsh-auto-route: ${field} needs a non-empty provider and model`)
     }
-    // An explicit target keeps the fallback's effort unless it names its own;
+    // An explicit target merges over the fallback field by field;
     // omitting the whole target takes the fallback verbatim.
-    const effort = value?.reasoningEffort ?? fallback.reasoningEffort
-    return { provider, model, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+    return { provider, model }
   }
   return {
     enabled: config.enabled ?? true,
@@ -173,7 +167,7 @@ export function resolveConfig(config: Config, clampPoll?: (raw: number, clamped:
     minDwellMs: duration(config.minDwellMs, 0, 'minDwellMs'),
     activeWindowMs: duration(config.activeWindowMs, 30 * 60_000, 'activeWindowMs'),
     switchTo: target(config.switchTo, { provider: 'mimo', model: 'mimo-v2.6-flash' }, 'switchTo'),
-    restoreTo: target(config.restoreTo, { provider: 'opencode-go', model: 'mimo-v2.6-flash', reasoningEffort: 'high' }, 'restoreTo'),
+    restoreTo: target(config.restoreTo, { provider: 'opencode-go', model: 'mimo-v2.6-flash' }, 'restoreTo'),
     meterUrl: config.meterUrl ?? 'https://opencode.ai/console/api/go/status',
     meterKeyEnv: config.meterKeyEnv ?? 'OC_GO_CC_API_KEY',
     balanceGuardrail: { enabled: config.balanceGuardrail?.enabled ?? false, ...config.balanceGuardrail?.minBalance === undefined ? {} : { minBalance: config.balanceGuardrail.minBalance } },

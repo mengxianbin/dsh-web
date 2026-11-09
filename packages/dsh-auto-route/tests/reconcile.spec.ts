@@ -8,7 +8,7 @@ import type { LockStore } from '../src/lock-store.ts'
 
 const WINDOW = 30 * 60_000
 const MIMO = { provider: 'mimo', model: 'mimo-v2.6-flash' }
-const BACK = { provider: 'opencode-go', model: 'mimo-v2.6-flash', reasoningEffort: 'high' }
+const BACK = { provider: 'opencode-go', model: 'mimo-v2.6-flash' }
 const MIMO_VALUE = 'mimo/mimo-v2.6-flash'
 const GO_VALUE = 'opencode-go/mimo-v2.6-flash'
 
@@ -16,7 +16,7 @@ const GO_VALUE = 'opencode-go/mimo-v2.6-flash'
 function rig(options: { config?: Config; groups?: { id: string; models: { id: string }[] }[]; locks?: ManualLockEntry[] } = {}) {
   let now = 10_000_000
   const ratios: Record<WindowKey, number> = { fiveHour: 0.02, week: 0.03, month: 0.05 }
-  const selects: { sessionId: string; provider: string; model: string; reasoningEffort?: string }[] = []
+  const selects: { sessionId: string; provider: string; model: string }[] = []
   const saves: { provider: string; model: string }[] = []
   const failures = new Map<string, Error>()
   const logs: Record<'info' | 'warn' | 'error', string[]> = { info: [], warn: [], error: [] }
@@ -46,7 +46,6 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
         sessionId: request.sessionId,
         provider: request.provider,
         model: request.model,
-        ...(request.reasoningEffort === undefined ? {} : { reasoningEffort: request.reasoningEffort }),
       })
       return {}
     },

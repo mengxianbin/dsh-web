@@ -12,8 +12,8 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
   const ratios: Record<WindowKey, number> = { fiveHour: 0.02, week: 0.03, month: 0.05 }
   let meterError: string | undefined
   let live = options.live ?? []
-  const selects: { sessionId: string; provider: string; model: string; reasoningEffort?: string }[] = []
-  const saves: { provider: string; model: string; reasoningEffort?: string }[] = []
+  const selects: { sessionId: string; provider: string; model: string }[] = []
+  const saves: { provider: string; model: string }[] = []
   const reported: { at: number; ok: boolean; error?: string; failingSince?: number }[] = []
   const failures = new Map<string, Error>()
   const logs: Record<'info' | 'warn' | 'error', string[]> = { info: [], warn: [], error: [] }
@@ -72,7 +72,7 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
 }
 
 const MIMO = { provider: 'mimo', model: 'mimo-v2.6-flash' }
-const BACK = { provider: 'opencode-go', model: 'mimo-v2.6-flash', reasoningEffort: 'high' }
+const BACK = { provider: 'opencode-go', model: 'mimo-v2.6-flash' }
 
 /** A fold reader as the `agent/created` listener passes it to leg 1 (`provider/model` route, or no fold). */
 function fold(route: string | undefined) {

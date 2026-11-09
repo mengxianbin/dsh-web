@@ -27,7 +27,7 @@ export interface ControllerLogger {
 
 /** One programmatic model switch (structurally satisfied by sessionController). */
 export interface SwitchApi {
-  selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
+  selectModel(request: { sessionId: string; provider: string; model: string }): Promise<unknown>
 }
 
 /**
@@ -47,7 +47,7 @@ export interface CatalogApi {
 
 /** Default-model persistence (so the deployment default follows the policy). */
 export interface DefaultModelApi {
-  saveSelection(selection: { provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
+  saveSelection(selection: { provider: string; model: string }): Promise<unknown>
   /**
    * The deployment default as it currently resolves, for the reconcile
    * default-leg drift check. Optional — a save-only host skips that check.
@@ -362,7 +362,6 @@ export class AutoRouteController {
         await this.deps.defaultModel.saveSelection({
           provider: target.provider,
           model: target.model,
-          ...(target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort }),
         })
         defaultSaved = true
       } catch (error) {
@@ -452,7 +451,6 @@ export class AutoRouteController {
           sessionId,
           provider: target.provider,
           model: target.model,
-          ...(target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort }),
         })
         this.locks.confirm(sessionId, value)
         results.push({ sessionId, status: 'switched' })
@@ -571,7 +569,6 @@ export class AutoRouteController {
           await this.deps.defaultModel?.saveSelection({
             provider: target.provider,
             model: target.model,
-            ...(target.reasoningEffort === undefined ? {} : { reasoningEffort: target.reasoningEffort }),
           })
           defaultRestored = true
           if (this.lastDefaultDriftLog !== driftKey) {

@@ -12,7 +12,7 @@ describe('resolveConfig — ruling defaults (2026-10-24 参数包 · 2026-10-27 
     expect(config.minDwellMs).toBe(0)
     expect(config.activeWindowMs).toBe(30 * 60_000)
     expect(config.switchTo).toEqual({ provider: 'mimo', model: 'mimo-v2.6-flash' })
-    expect(config.restoreTo).toEqual({ provider: 'opencode-go', model: 'mimo-v2.6-flash', reasoningEffort: 'high' })
+    expect(config.restoreTo).toEqual({ provider: 'opencode-go', model: 'mimo-v2.6-flash' })
     expect(config.meterUrl).toBe('https://opencode.ai/console/api/go/status')
     expect(config.meterKeyEnv).toBe('OC_GO_CC_API_KEY')
     expect(config.balanceGuardrail).toEqual({ enabled: false })
@@ -46,7 +46,7 @@ describe('resolveConfig — ranges', () => {
     expect(() => resolveConfig({ switchTo: { provider: '', model: 'x' } })).toThrow(RangeError)
   })
 
-  it('keeps a partially-spelled target (effort falls back, model falls back)', () => {
+  it('keeps a partially-spelled target (model falls back)', () => {
     const config = resolveConfig({ switchTo: { provider: 'mimo' } })
     expect(config.switchTo).toEqual({ provider: 'mimo', model: 'mimo-v2.6-flash' })
   })
