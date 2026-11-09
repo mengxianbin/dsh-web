@@ -143,7 +143,7 @@ unconfirmed session is never nudged).
 - The `live` send path exists but has never run against a real session;
   flipping the switch belongs to a turn-on batch with its own verification.
 - Sessions at or above the 150k watermark park for both human and bot
-  classes: the bot relay branch lands with the relay line.
+  classes; this plugin never relays a parked session to a fresh body.
 - Subagent child sessions are in scope (the design covers all sessions);
   their `session.header.origin` is logged as evidence and an exclusion knob
   is deferred to tuning.

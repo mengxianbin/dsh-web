@@ -105,8 +105,8 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 - 晨报联动尚未接入：断路与跳过证据躺在日志流里，等读取方。
 - `live` 发送路径已实现但从未对真实会话跑过；打开开关属于转正批次，自带
   验证清单。
-- 达到或超过 150k 水位的会话，human 与 bot 一律停靠：bot 的 relay 分支随
-  relay 线落地。
+- 达到或超过 150k 水位的会话，human 与 bot 一律停靠；本插件从不把停靠的
+  会话接力到新会话。
 - 子代理子会话在范围内（设计覆盖全员）；其 `session.header.origin` 记入
   证据，是否排除留作调参旋钮。
 - 半途静默死亡不发 `turn/end` 事件，本插件检测不到（看门狗链是另一条线）。

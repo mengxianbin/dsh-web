@@ -245,29 +245,28 @@ describe('same-cause wave probe', () => {
     expect(p.releaseDue(T0 + MIN + WAVE_COOLDOWN_MS)).toEqual([])
   })
 
-  it('re-runs the quota check at release against the chain the reserved relay field points to', () => {
+  it('re-runs the quota check at release against the can filled while the session waited', () => {
     const p = policy()
-    // Origin O fills its can before the wave (16 min spacing keeps each alone in the window).
+    // R fills its own can before the wave (16 min spacing keeps each alone in the window).
     for (const min of [64, 48, 32, 16]) {
-      expect(lastDecision(p.onError({ sessionId: 'O', code: 'TRANSPORT', at: T0 - min * MIN }))).toMatchObject({
+      expect(lastDecision(p.onError({ sessionId: 'R', code: 'TRANSPORT', at: T0 - min * MIN }))).toMatchObject({
         action: 'revive',
         quotaUsed: [1, 2, 3, 4][[64, 48, 32, 16].indexOf(min)],
       })
     }
-    // w1 opens the window alone (revives), R joins and is held by the wave.
+    // w1 enters the window alone (revives), R joins and is held by the wave.
     expect(lastDecision(p.onError({ sessionId: 'w1', code: 'TRANSPORT', at: T0 }))).toMatchObject({ action: 'revive' })
     expect(lastDecision(p.onError({ sessionId: 'R', code: 'TRANSPORT', at: T0 + MIN }))).toMatchObject({
       action: 'hold',
       reason: 'wave-hold',
-      quotaUsed: 0,
+      quotaUsed: 4,
     })
-    p.bindRelay('R', 'O')
     const released = p.releaseDue(T0 + MIN + WAVE_COOLDOWN_MS)
-    // The chain was filled while R waited: release refuses the revival, zero further consumption.
+    // The can was filled while R waited: release refuses the revival, zero further consumption.
     expect(lastDecision(released)).toMatchObject({
       action: 'skip',
       reason: 'quota-exhausted',
-      chainId: 'O',
+      chainId: 'R',
       quotaUsed: 4,
     })
   })
@@ -305,26 +304,6 @@ describe('150k context watermark', () => {
       action: 'revive',
       contextTokens: null,
     })
-  })
-})
-
-describe('reserved relay chain field', () => {
-  it('shares one can across the bound chain while unbound sessions stay independent', () => {
-    const p = policy()
-    for (const [index, min] of [64, 48, 32, 16].entries()) {
-      expect(lastDecision(p.onError({ sessionId: 'O', code: 'TRANSPORT', at: T0 - min * MIN }))).toMatchObject({
-        action: 'revive',
-        quotaUsed: index + 1,
-      })
-    }
-    p.bindRelay('R', 'O')
-    // R alone in the wave window: its decision runs against O's full can.
-    const relay = lastDecision(p.onError({ sessionId: 'R', code: 'TRANSPORT', at: T0 }))
-    expect(relay).toMatchObject({ action: 'skip', reason: 'quota-exhausted', chainId: 'O', quotaUsed: 4 })
-    // An unbound session later keeps its own can.
-    const solo = lastDecision(p.onError({ sessionId: 'F', code: 'TRANSPORT', at: T0 + 16 * MIN }))
-    expect(solo).toMatchObject({ action: 'revive', chainId: 'F', quotaUsed: 1 })
-    expect(p.snapshot(T0 + 16 * MIN).quota).toContainEqual({ chainId: 'O', used: 4 })
   })
 })
 

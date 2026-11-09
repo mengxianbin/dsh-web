@@ -182,10 +182,12 @@ export class RevivalPolicy {
   private readonly conditions: ConditionLists
   /** Config keys that replaced a ruled default; echoed by the status snapshot. */
   private readonly conditionOverrides: string[]
-  /** Rolling consumption stamps per quota chain (v1 chain id = session id). */
+  /**
+   * Rolling consumption stamps per quota chain. Chains are session-scoped:
+   * the relay line that could merge two sessions into one chain was cut
+   * on 2026-11-09 and is never built.
+   */
   private readonly quota = new Map<string, number[]>()
-  /** Reserved for the relay line: relay session -> origin chain. v1 never writes it. */
-  private readonly relayOf = new Map<string, string>()
   private readonly waves = new Map<string, WaveState>()
   private lastPlannedAt = 0
   private readonly counters: Record<string, number> = {
@@ -268,7 +270,7 @@ export class RevivalPolicy {
     const records: PolicyRecord[] = [
       { kind: 'detect', at, sessionId, code, cls, ...(origin === undefined ? {} : { origin }) },
     ]
-    const chainId = this.chainIdOf(sessionId)
+    const chainId = sessionId
 
     if (cls === 'wall') {
       // Design §4.2: zero consumption, no revival, suspend until resetsAt.
@@ -389,7 +391,7 @@ export class RevivalPolicy {
     const { sessionId, at } = input
     const records: PolicyRecord[] = []
     const state = this.stateOf(sessionId)
-    const chainId = this.chainIdOf(sessionId)
+    const chainId = sessionId
 
     if (state.tripped) {
       records.push(this.sweepSkip(sessionId, chainId, 'breaker-stopped', at))
@@ -496,21 +498,9 @@ export class RevivalPolicy {
   /** Drop everything held or remembered for a session that is gone. */
   forget(sessionId: string): void {
     this.states.delete(sessionId)
-    this.relayOf.delete(sessionId)
-    const chainId = this.chainIdOf(sessionId)
-    // v1 chains are session-scoped, so the can dies with the session; a relay
-    // chain belongs to its origin and stays (relay line clears it later).
-    if (chainId === sessionId) this.quota.delete(chainId)
+    // Chains are session-scoped, so the can dies with the session.
+    this.quota.delete(sessionId)
     for (const wave of this.waves.values()) wave.held.delete(sessionId)
-  }
-
-  /**
-   * Reserved for the relay line: bind a relay session onto the origin's quota
-   * chain so an opened fresh body cannot refresh the old session's can
-   * (design §4.2 "relay 计入同一预算链"). v1 never calls it.
-   */
-  bindRelay(relaySessionId: string, originSessionId: string): void {
-    this.relayOf.set(relaySessionId, this.chainIdOf(originSessionId))
   }
 
   /** Bounded introspection for the status endpoint; `at` prunes the quota windows. */
@@ -559,10 +549,6 @@ export class RevivalPolicy {
       this.states.set(sessionId, state)
     }
     return state
-  }
-
-  private chainIdOf(sessionId: string): string {
-    return this.relayOf.get(sessionId) ?? sessionId
   }
 
   private waveOf(code: string, at: number): { count: number; opened: boolean } {
@@ -660,7 +646,7 @@ export class RevivalPolicy {
     const { sessionId, code, at, allowWaveHold } = input
     const records: PolicyRecord[] = []
     const state = this.stateOf(sessionId)
-    const chainId = this.chainIdOf(sessionId)
+    const chainId = sessionId
 
     if (state.tripped) {
       records.push(this.skipRecord(sessionId, chainId, 'breaker-stopped', at, code))
