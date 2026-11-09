@@ -394,14 +394,17 @@ function endorsementHolds(message: string, transcript: string): boolean {
     for (const candidate of tails) {
       const hit = /\bhashes=([^\s]*)/.exec(candidate)
       if (hit === null) continue
-      // Lexical-decoration stripping (seal-hash-backtick-1108): strip only
-      // leading/trailing backticks and whitespace, so an inline-code-wrapped
-      // DONE tail's closing backtick no longer joins the last hash. Tolerance
-      // is formatting-only, never content: every stripped item must match
-      // ^[0-9a-f]{7,40}$ before it reaches git, and any non-hex item fails
-      // closed (never silently dropped). No loose hex-substring extraction —
-      // that would downgrade 防伪.
-      const list = hit[1].split(',').filter(Boolean).map((item) => item.replace(/^[`\s]+|[`\s]+$/g, ''))
+      // Lexical-decoration stripping (seal-hash-backtick-1108 leading/trailing
+      // → seal-backtick-miditem-1108 in-item truncation): first strip leading
+      // backticks/whitespace (item-level wrapping), then truncate at the first
+      // non-hex character (mid-item sticking: a closing backtick followed by
+      // prose like 「（`save-status`」 or 「（贴行闸」 — edge stripping cannot
+      // reach the middle). Tolerance is formatting-only, never content: the
+      // truncated item must still match ^[0-9a-f]{7,40}$ before it reaches
+      // git, and any non-hex/too-short item fails closed (never silently
+      // dropped). Prefix truncation ≠ loose hex-substring extraction — no
+      // picking hex fragments out of arbitrary positions (防伪不降级).
+      const list = hit[1].split(',').filter(Boolean).map((item) => (item.replace(/^[`\s]+/, '').match(/^[0-9a-f]*/) ?? [''])[0])
       if (list.some((item) => !/^[0-9a-f]{7,40}$/.test(item))) return false
       const commits = /\bcommits=(\d+)\/(\d+)/.exec(candidate)
       if (commits === null || commits[1] !== commits[2] || Number(commits[2]) !== list.length) return false

@@ -472,3 +472,39 @@ describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtic
     expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
   })
 })
+
+describe('in-item truncation — 项内截断 (seal-backtick-miditem-1108)', () => {
+  it('operator keeps DONE green when a mid-message quoted tail sticks prose after the closing backtick', () => {
+    // Given a mid-message quoted DONE tail whose closing backtick is followed by
+    // 「（`save-status`」 prose (the session-977ed38b 2026-11-09 shape — edge
+    // stripping cannot reach the middle of the item)
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(
+        `人工交接点 1：\n1. 收口状态：\`SAVE_STATUS=DONE${declaredTail([repo.hash, repo.hash2, repo.hash], 3)}\`（\`save-status\` 脚本背书，TAIL-OK）。\n\n## ✅ 执行完成\nSAVE_STATUS=DONE${declaredTail([repo.hash, repo.hash2, repo.hash], 3)}`,
+      ),
+    ])
+    // When the seal is judged, each item truncates at its first non-hex char
+    const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
+    // Then the declared list verifies and DONE stays green (三态：中段粘连)
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it('operator gets non-green when the mid-stuck item truncates to nothing (fail-closed)', () => {
+    // Given a mid-stuck item with no hex prefix at all (pure non-hex garbage
+    // after the closing backtick) — truncation yields an empty item
+    const host = createFakeHost()
+    const repo = endorsedRepo()
+    withTranscript(host, 'session-a', [
+      sessionRoot('session-a', repo.dir),
+      assistantMsg(
+        `贴行：\`SAVE_STATUS=DONE${declaredTail([repo.hash, '（贴行闸'], 2)}\`。\n\n## ✅ 执行完成\nSAVE_STATUS=DONE${declaredTail([repo.hash, '（贴行闸'], 2)}`,
+      ),
+    ])
+    // Then the empty truncated item fails closed — never silently dropped
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+  })
+})
