@@ -30,6 +30,16 @@ export interface SwitchApi {
   selectModel(request: { sessionId: string; provider: string; model: string; reasoningEffort?: string }): Promise<unknown>
 }
 
+/**
+ * The fold reader leg 1 consumes: an opened Agent's `model` face, whose
+ * `current()` is the `pending ?? lastUsed ?? options` fold — the same
+ * projection the selector renders. `undefined` (or an agent without the
+ * face) means no fold to judge, never a blind switch.
+ */
+export interface OpenedModelFace {
+  current?(): { readonly provider: string; readonly model: string } | undefined
+}
+
 /** Model catalog shape used for the edge pre-flight. */
 export interface CatalogApi {
   modelCatalog(): Promise<{ groups: readonly { id: string; models: readonly { id: string }[] }[] }>
@@ -70,6 +80,17 @@ export interface AutoRouteDeps {
    * keeps the status-endpoint-only behavior.
    */
   onPoll?(lastPoll: { at: number; ok: boolean; error?: string; failingSince?: number }): void
+  /**
+   * Live-Agent session ids (leg 2 of the 2026-11-09 lightwatch ruling): the
+   * edge sweep surface widens from the active set to `active ∪ live`, so a
+   * session that is merely OPEN (running or not, inside the window or not)
+   * still gets swept at an edge. The host owns the subagent/archive
+   * exclusions before handing the list over; every id it returns names a
+   * live Agent, so the sweep rides the `liveAgent` fast path and resumes
+   * nothing. Omission keeps the active-set-only surface (zero behavior
+   * change for a host that wires no live set).
+   */
+  readonly liveSessions?: () => readonly string[]
 }
 
 /** Per-session result of one switch pass. */
@@ -328,7 +349,7 @@ export class AutoRouteController {
     this.targetProblem = undefined
 
     const runSessionPass = decision.action === 'switch' || (decision.action === 'restore' && wasTriggered)
-    const active = runSessionPass ? this.deps.tracker.snapshot(now, config.activeWindowMs) : []
+    const active = runSessionPass ? this.sweepSurface(now) : []
     const results = await this.sweep(active, target, decision.action)
 
     // Default follows the policy. selectModel saves it as a side effect when
@@ -376,6 +397,33 @@ export class AutoRouteController {
       `dsh-auto-route: ${decision.action} applied — effectiveSource=${this.state.effectiveSource} defaultsSource=${this.state.defaultsSource}`
       + ` active=${active.length} switched=${edge.switched} skipped=${edge.skipped} failed=${edge.failed} defaultSaved=${String(defaultSaved)}`,
     )
+  }
+
+  /**
+   * One edge's sweep surface (leg 2 of the 2026-11-09 lightwatch ruling):
+   * the active set ∪ the live-Agent set, deduped with the active ordering
+   * kept first. ONLY the surface widens here — `execute` decides which edges
+   * run a session pass at all (`switch` yes; `restore` only when the
+   * in-flight leg had engaged; `default-switch` never), and those trigger
+   * conditions are untouched. Live ids come from `deps.liveSessions` with the
+   * host's subagent/archive exclusions already applied; each names a live
+   * Agent, so `selectModel` resolves it in place and resumes nothing (zero
+   * resume is the whole point of the widening — cold sessions outside both
+   * sets stay untouched).
+   * @param now - epoch ms of this edge.
+   * @returns session ids to sweep, newest-request first then live arrivals.
+   */
+  private sweepSurface(now: number): string[] {
+    const { config, tracker, liveSessions } = this.deps
+    const surface = tracker.snapshot(now, config.activeWindowMs)
+    if (liveSessions === undefined) return surface
+    const seen = new Set(surface)
+    for (const sessionId of liveSessions()) {
+      if (seen.has(sessionId)) continue
+      seen.add(sessionId)
+      surface.push(sessionId)
+    }
+    return surface
   }
 
   /**
@@ -603,6 +651,69 @@ export class AutoRouteController {
         `dsh-auto-route: manual lock session ${sessionId} → ${selection.provider}/${selection.model}`
         + ` (${verdict}; both edges skip it until realigned)`,
       )
+    }
+  }
+
+  /**
+   * Leg 1 of the 2026-11-09 lightwatch ruling (打开即对齐): a session was
+   * opened — the host's `agent/created` listener saw `source: 'resume'` — so
+   * its Agent is provably alive and the fold reads straight from
+   * `model.current()` (`pending ?? lastUsed ?? options`, the same projection
+   * the selector renders) with ZERO resume. When that fold is off the CURRENT
+   * phase target — the same `phase`/`targets` pair `GET /api/auto-route/status`
+   * serves as `policy.phase`/`policy.targets`, read here from the identical
+   * state — one session-leg switch realigns it through the shared `sweep`
+   * machinery, so manual-lock expectation/confirm books the write as `auto`
+   * exactly like an edge does.
+   *
+   * Guards carried over unchanged (护栏沿用): dead zone (95–99) pauses the
+   * session leg; an absent fold is never judged (first request judges it);
+   * a manual lock skips until realigned; the target is pre-flighted before
+   * the write. This leg stamps no status fields — the status payload keeps
+   * its 2026-11-09 baseline shape byte for byte.
+   *
+   * Event-driven per open: no timer, no ledger scan, no periodic work.
+   * @param sessionId - the session being opened.
+   * @param model - the live agent's fold reader; absent = no fold to judge.
+   */
+  async alignOnOpen(sessionId: string, model: OpenedModelFace | undefined): Promise<void> {
+    try {
+      const { config } = this.deps
+      // Dead zone (95–99): the two latches disagree, so neither side is
+      // unambiguously "the" session target — the same pause the reconcile
+      // session leg applies (the hedge must survive).
+      if (this.state.phase !== this.state.defaultsPhase) {
+        this.deps.logger.info(`dsh-auto-route: open-align skip ${sessionId} — dead zone (session leg paused)`)
+        return
+      }
+      const fold = model?.current?.()
+      // No fold observation = no judgment (a session without one is judged
+      // on its first request, never switched blind).
+      if (fold === undefined) return
+      const target = this.state.phase === 'triggered' ? config.switchTo : config.restoreTo
+      const observed = `${fold.provider}/${fold.model}`
+      const targetValue = `${target.provider}/${target.model}`
+      // Already aligned = the common case; zero writes, zero logs.
+      if (observed === targetValue) return
+      // A case (2026-10-27): both edges skip manual locks — so does opening
+      // a session a human deliberately parked off-target.
+      if (this.locks.isLocked(sessionId)) {
+        this.deps.logger.info(`dsh-auto-route: open-align skip ${sessionId} — manual-lock (${observed} stays until realigned)`)
+        return
+      }
+      const preflight = await this.preflight(target)
+      if (!preflight.ok) {
+        this.deps.logger.warn(`dsh-auto-route: open-align ${sessionId} blocked — target ${targetValue} unavailable (${preflight.reason}); leaving ${observed}`)
+        return
+      }
+      const results = await this.sweep([sessionId], target, 'open-align')
+      const outcome = results[0]
+      this.deps.logger.info(
+        `dsh-auto-route: open-align ${sessionId} — ${observed} → ${targetValue} (${outcome?.status ?? 'failed'}${outcome?.detail === undefined ? '' : `: ${outcome.detail}`})`,
+      )
+    } catch (error) {
+      // One open must never take the host listener down with it.
+      this.deps.logger.warn(`dsh-auto-route: open-align failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 

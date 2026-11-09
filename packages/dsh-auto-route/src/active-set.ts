@@ -177,3 +177,68 @@ export class ActiveSetTracker {
     return this.entries.size
   }
 }
+
+/**
+ * The live-Agent set (leg 2 of the 2026-11-09 lightwatch ruling): sessions
+ * whose Agent currently exists in the Host, so an edge may sweep them through
+ * the `liveAgent` fast path — the Agent is provably alive, nothing is ever
+ * resumed to switch it. Membership is event-driven only (`agent/created` adds,
+ * `agent/disposed` removes): a Set walk at edge time, zero timers, zero
+ * ledger scans.
+ *
+ * Two exclusions ride the same guardrails the active set already honours:
+ * - **subagent**: refused at `add` — a `subagent`-origin header marks the
+ *   session as never directly selectable (`resolveAgent` refuses child
+ *   sessions), the same channel `recordRequest`/`markSubagent` uses.
+ * - **archive**: judged at READ through the caller's predicate, not at add —
+ *   archive state moves while an agent stays open, and an unarchived session
+ *   must rejoin the sweep surface without a re-create.
+ * @module dsh-auto-route/active-set
+ */
+export class LiveAgentSet {
+  private readonly ids = new Set<string>()
+
+  /**
+   * Record one live agent.
+   * @param sessionId - the agent's session identity.
+   * @param options - `subagent` marks the session unselectable (refused).
+   * @returns whether the session joined the set.
+   */
+  add(sessionId: string, options?: { subagent?: boolean }): boolean {
+    if (options?.subagent === true) return false
+    this.ids.add(sessionId)
+    return true
+  }
+
+  /**
+   * Drop one agent (`agent/disposed`); idempotent — a subagent child we
+   * refused at `add` removes nothing.
+   * @param sessionId - the agent's session identity.
+   */
+  remove(sessionId: string): void {
+    this.ids.delete(sessionId)
+  }
+
+  /**
+   * The sweepable live ids right now.
+   * @param isArchived - archive-state predicate; archived sessions are
+   *   excluded (unreadable archive state fails toward exclusion — the
+   *   active-set-only surface is the safe degradation).
+   * @returns live, non-archived session ids in insertion order.
+   */
+  list(isArchived?: (sessionId: string) => boolean): string[] {
+    if (isArchived === undefined) return [...this.ids]
+    return [...this.ids].filter(sessionId => {
+      try {
+        return !isArchived(sessionId)
+      } catch {
+        return false
+      }
+    })
+  }
+
+  /** Live agents tracked right now. */
+  get size(): number {
+    return this.ids.size
+  }
+}

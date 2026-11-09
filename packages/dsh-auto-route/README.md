@@ -150,6 +150,21 @@ same-origin markers); remote sockets answer `403`.
   unambiguously the in-flight target there — the hedge must survive); an
   unroutable target blocks the pass like an edge does; identical repeated
   default-restore failures log once, not every poll.
+- **Lightwatch legs (2026-11-09 ruling, 打开即对齐 + 边沿扫活集)**: two
+  event-driven additions — zero new timers, zero ledger scans. *Open-align*:
+  `agent/created` with `source: 'resume'` reads the opened agent's fold
+  (`model.current()`, `pending ?? lastUsed ?? options`) and, when it is off
+  the current phase target (`policy.phase` / `policy.targets`, the same
+  state the status endpoint serves), realigns that ONE session through the
+  same manual-lock machinery — the Agent is provably alive, so **zero
+  resume**; dead zone, manual locks, absent folds, and target pre-flight
+  guard it like the reconcile leg, and it stamps no status fields. *Edge
+  sweep surface*: the trigger/restore session passes sweep the active set ∪
+  the live-Agent set (fed only by `agent/created` / `agent/disposed`;
+  subagent children refused at add, archived sessions filtered at read
+  through the workspace registry), so an open-but-idle session is swept at
+  an edge through the live fast path instead of waiting for its next
+  request.
 - **No decision on bad data**: a failed meter poll records `lastPoll.ok:
   false` and touches nothing (reconcile included); recovery resumes on the
   next good reading.
@@ -158,16 +173,20 @@ same-origin markers); remote sockets answer `403`.
 
 ## Layout
 
-- `src/index.ts` — plugin entry: injects `webServer`, `sessionController`;
-  wires the event listeners, the controller, and the status route.
+- `src/index.ts` — plugin entry: injects `webServer`, `sessionController`,
+  `workspaceRegistry` (the leg-2 archive filter); wires the event listeners
+  (including the `agent/created`/`agent/disposed` lightwatch pair), the
+  controller, and the status route.
 - `src/policy.ts` — pure phase logic (trigger/restore edges, hysteresis,
   dwell, incomplete-reading fail-safe).
-- `src/controller.ts` — poll loop, catalog pre-flight, switch pass, default
-  save, the steady-state reconcile leg, status view.
+- `src/controller.ts` — poll loop, catalog pre-flight, switch pass, the
+  open-align leg, the live-set edge sweep surface, default save, the
+  steady-state reconcile leg, status view.
 - `src/meters.ts` — go/status fetch (unrounded ratios, no secret ever
   logged).
-- `src/active-set.ts` — running/recent/subagent activity ledger, plus the
-  selection fold (`pending`/`used`) the reconcile leg judges against.
+- `src/active-set.ts` — running/recent/subagent activity ledger, the
+  selection fold (`pending`/`used`) the reconcile leg judges against, and
+  the `LiveAgentSet` live-agent sweep surface.
 - `src/manual-lock.ts` — manual-lock ledger (A case): write expectations,
   ownership values, and the locks both edges and reconcile honor; optional
   `LockStore` persists the lock entries.

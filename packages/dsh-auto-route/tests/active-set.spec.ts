@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { ActiveSetTracker } from '../src/active-set.ts'
+import { ActiveSetTracker, LiveAgentSet } from '../src/active-set.ts'
 
 const WINDOW = 30 * 60_000
 // Realistic epoch ms: the tracker's `0` sentinel means "no request seen yet",
@@ -143,5 +143,50 @@ describe('ActiveSetTracker — selection fold for the reconcile leg (2026-11-01 
     expect(tracker.effectiveRoute('fresh')).toBe('mimo/mimo-v2.6-flash')
     // Not active yet (no request): outside the snapshot until it speaks.
     expect(tracker.snapshot(T0, WINDOW)).toEqual([])
+  })
+})
+
+describe('LiveAgentSet — the leg-2 sweep surface (2026-11-09 lightwatch ruling)', () => {
+  it('adds on create, removes on dispose, and lists in insertion order', () => {
+    const live = new LiveAgentSet()
+    expect(live.add('s-a')).toBe(true)
+    expect(live.add('s-b')).toBe(true)
+    expect(live.list()).toEqual(['s-a', 's-b'])
+    live.remove('s-a')
+    expect(live.list()).toEqual(['s-b'])
+    live.remove('s-a') // idempotent — a refused subagent child removes nothing
+    expect(live.size).toBe(1)
+  })
+
+  it('refuses subagent-origin sessions at add (resolveAgent refuses child sessions)', () => {
+    const live = new LiveAgentSet()
+    expect(live.add('s-child', { subagent: true })).toBe(false)
+    expect(live.list()).toEqual([])
+    expect(live.size).toBe(0)
+    // A normal add still lands.
+    live.add('s-open')
+    expect(live.list()).toEqual(['s-open'])
+  })
+
+  it('filters archived sessions at READ so unarchiving rejoins without a re-create', () => {
+    const live = new LiveAgentSet()
+    live.add('s-open')
+    live.add('s-archived')
+    const archived = new Set(['s-archived'])
+    expect(live.list(id => archived.has(id))).toEqual(['s-open'])
+    // Archive state moved while the agent stayed open: next read reflects it.
+    archived.delete('s-archived')
+    expect(live.list(id => archived.has(id))).toEqual(['s-open', 's-archived'])
+    // No predicate = nothing is archived (all sweepable).
+    expect(live.list()).toEqual(['s-open', 's-archived'])
+  })
+
+  it('fails toward exclusion when the archive predicate throws', () => {
+    const live = new LiveAgentSet()
+    live.add('s-a')
+    live.add('s-b')
+    // Unreadable archive state degrades to the active-set-only surface.
+    expect(live.list(() => { throw new Error('registry gone') })).toEqual([])
+    expect(live.size).toBe(2) // membership itself is untouched
   })
 })

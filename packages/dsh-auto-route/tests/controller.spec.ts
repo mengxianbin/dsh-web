@@ -7,10 +7,11 @@ import type { MeterReading, WindowKey } from '../src/meters.ts'
 const WINDOW = 30 * 60_000
 
 /** Mutable rig: fake clock, scriptable meter ratios, captured switches. */
-function rig(options: { config?: Config; groups?: { id: string; models: { id: string }[] }[] } = {}) {
+function rig(options: { config?: Config; groups?: { id: string; models: { id: string }[] }[]; live?: string[] } = {}) {
   let now = 10_000_000
   const ratios: Record<WindowKey, number> = { fiveHour: 0.02, week: 0.03, month: 0.05 }
   let meterError: string | undefined
+  let live = options.live ?? []
   const selects: { sessionId: string; provider: string; model: string; reasoningEffort?: string }[] = []
   const saves: { provider: string; model: string; reasoningEffort?: string }[] = []
   const reported: { at: number; ok: boolean; error?: string; failingSince?: number }[] = []
@@ -52,6 +53,7 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
       return { at: now, windows }
     },
     onPoll: state => { reported.push({ ...state }) },
+    liveSessions: () => live,
   })
   return {
     rig: controller, tracker, selects, saves, logs, config, reported,
@@ -63,6 +65,7 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
       else failures.set(sessionId, error)
     },
     setGroups: (next: { id: string; models: { id: string }[] }[]) => { groups = next },
+    setLive: (next: string[]) => { live = next },
     source: () => controller.status().policy.effectiveSource,
     phase: () => controller.status().policy.phase,
   }
@@ -70,6 +73,13 @@ function rig(options: { config?: Config; groups?: { id: string; models: { id: st
 
 const MIMO = { provider: 'mimo', model: 'mimo-v2.6-flash' }
 const BACK = { provider: 'opencode-go', model: 'mimo-v2.6-flash', reasoningEffort: 'high' }
+
+/** A fold reader as the `agent/created` listener passes it to leg 1 (`provider/model` route, or no fold). */
+function fold(route: string | undefined) {
+  return route === undefined
+    ? { current: () => undefined }
+    : { current: () => ({ provider: route.split('/')[0], model: route.split('/')[1] }) }
+}
 
 describe('auto-route closed loop — ruling thresholds over synthetic readings', () => {
   it('baseline → trigger at any window ≥0.99 → recovery <all → restore', async () => {
@@ -388,5 +398,144 @@ describe('manual locks (A case, 2026-10-27 人工锁定优先)', () => {
     expect(env.rig.status().policy.manualLocks).toEqual([])
     await env.rig.tick()
     expect(env.selects).toEqual([])
+  })
+})
+
+describe('lightwatch leg 2 — edges sweep 活跃集 ∪ 存活 Agent 集 (2026-11-09)', () => {
+  it('the trigger edge sweeps the active set UNION the live set, deduped', async () => {
+    const env = rig({ live: ['s-idle-open', 's-active'] })
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    // Active ordering first, live-only ids appended, overlap swept once.
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-active', 's-idle-open'])
+    expect(env.rig.status().policy.lastTrigger).toMatchObject({ switched: 2, skipped: 0, failed: 0 })
+    // The live set feeds the SWEEP only — the status activeSet payload keeps
+    // its tracker-only shape (zero field regression).
+    expect(env.rig.status().policy.activeSet.tracked).toBe(1)
+  })
+
+  it('the restore edge after a trigger sweeps the live set too', async () => {
+    const env = rig({ live: ['s-idle-open'] })
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-active', 's-idle-open'])
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick()
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-active', 's-idle-open', 's-active', 's-idle-open'])
+    expect(env.selects.at(-1)).toEqual({ sessionId: 's-idle-open', ...BACK })
+  })
+
+  it('trigger conditions untouched: default-switch and default-only restore never sweep', async () => {
+    const env = rig({ live: ['s-idle-open'] })
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.96 })
+    await env.rig.tick() // default-switch: no session pass at all, live or not
+    expect(env.selects).toEqual([])
+    env.advance(30_000)
+    env.setRatios({ fiveHour: 0.05, week: 0.3, month: 0.4 })
+    await env.rig.tick() // default-only restore (wasTriggered=false): no sweep
+    expect(env.selects).toEqual([])
+    expect(env.saves.at(-1)).toEqual(BACK) // the default still comes home
+    expect(env.rig.status().policy.lastRestore).toMatchObject({ switched: 0 })
+  })
+
+  it('live-sweep failures classify like any other session (subagent skip / fail)', async () => {
+    const env = rig({ live: ['s-child', 's-boom'] })
+    env.failSelectFor('s-child', new Error('session "s-child" is owned by subagent routing'))
+    env.failSelectFor('s-boom', new Error('session/model-unavailable: resolver exploded'))
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.rig.status().policy.lastTrigger).toMatchObject({ switched: 0, skipped: 1, failed: 1 })
+    expect(env.rig.status().policy.lastOutcome?.results).toEqual([
+      { sessionId: 's-child', status: 'skipped', detail: expect.stringContaining('subagent') },
+      { sessionId: 's-boom', status: 'failed', detail: expect.stringContaining('resolver exploded') },
+    ])
+  })
+
+  it('omitting liveSessions keeps the active-set-only surface (backward-compatible deps)', async () => {
+    const env = rig()
+    delete (env.rig as unknown as { deps: Record<string, unknown> }).deps.liveSessions
+    env.tracker.recordRequest('s-active', 10_000_000)
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick()
+    expect(env.selects.map(s => s.sessionId)).toEqual(['s-active'])
+  })
+})
+
+describe('lightwatch leg 1 — 打开即对齐 (agent/created source=resume, 2026-11-09)', () => {
+  it('aligns a drifted fold to the current phase target; the status payload stays byte-identical', async () => {
+    const env = rig()
+    const before = JSON.stringify(env.rig.status())
+    await env.rig.alignOnOpen('s-open', fold('mimo/mimo-v2.6-flash')) // baseline → restoreTo
+    expect(env.selects).toEqual([{ sessionId: 's-open', ...BACK }])
+    expect(env.logs.info.join('\n')).toContain(
+      'open-align s-open — mimo/mimo-v2.6-flash → opencode-go/mimo-v2.6-flash (switched)',
+    )
+    // This leg stamps no status fields: zero regression against the baseline.
+    expect(JSON.stringify(env.rig.status())).toBe(before)
+  })
+
+  it('an already-aligned fold is a silent no-op', async () => {
+    const env = rig()
+    await env.rig.alignOnOpen('s-open', fold('opencode-go/mimo-v2.6-flash'))
+    expect(env.selects).toEqual([])
+    expect(env.logs.info.join('\n')).not.toContain('open-align')
+    expect(env.logs.warn).toEqual([])
+  })
+
+  it('follows the phase — a drifted fold on a triggered phase aligns to switchTo', async () => {
+    const env = rig()
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick() // phase=triggered → target = switchTo (no effort)
+    await env.rig.alignOnOpen('s-open', fold('opencode-go/mimo-v2.6-flash'))
+    expect(env.selects).toEqual([{ sessionId: 's-open', ...MIMO }])
+  })
+
+  it('skips a manual-locked session (a human parked it off-target)', async () => {
+    const env = rig()
+    env.rig.onSelectionEvent('s-open', MIMO) // baseline: divergent human pick → lock
+    expect(env.rig.status().policy.manualLocks).toHaveLength(1)
+    await env.rig.alignOnOpen('s-open', fold('mimo/mimo-v2.6-flash'))
+    expect(env.selects).toEqual([])
+    expect(env.logs.info.join('\n')).toContain('open-align skip s-open — manual-lock')
+    expect(env.rig.status().policy.manualLocks).toHaveLength(1) // lock untouched
+  })
+
+  it('pauses in the 95–99 dead zone (session-leg guard carried over)', async () => {
+    const env = rig()
+    env.setRatios({ week: 0.96 })
+    await env.rig.tick() // default-switch: defaultsPhase=triggered, phase=baseline
+    await env.rig.alignOnOpen('s-open', fold('opencode-go/mimo-v2.6-flash'))
+    expect(env.selects).toEqual([])
+    expect(env.logs.info.join('\n')).toContain('dead zone')
+  })
+
+  it('never judges an absent fold (the first request judges it, never blind)', async () => {
+    const env = rig()
+    await env.rig.alignOnOpen('s-open', fold(undefined))
+    await env.rig.alignOnOpen('s-open', undefined)
+    expect(env.selects).toEqual([])
+    expect(env.logs.warn).toEqual([])
+  })
+
+  it('preflight-blocks an unroutable target without stamping targetProblem', async () => {
+    const env = rig({ groups: [{ id: 'mimo', models: [{ id: 'mimo-v2.5' }] }, { id: 'opencode-go', models: [{ id: 'deepseek-v4-flash' }] }] })
+    await env.rig.alignOnOpen('s-open', fold('mimo/mimo-v2.6-flash'))
+    expect(env.selects).toEqual([])
+    expect(env.rig.status().policy.targetProblem).toBeUndefined()
+    expect(env.logs.warn.join('\n')).toContain('open-align s-open blocked')
+  })
+
+  it("the align write books as the controller's own — the durable echo never locks", async () => {
+    const env = rig()
+    env.setRatios({ week: 0.995 })
+    await env.rig.tick() // phase=triggered
+    await env.rig.alignOnOpen('s-open', fold('opencode-go/mimo-v2.6-flash'))
+    expect(env.selects).toHaveLength(1)
+    env.rig.onSelectionEvent('s-open', MIMO) // the model/selection echo of our write
+    expect(env.rig.status().policy.manualLocks).toEqual([])
   })
 })

@@ -9,7 +9,7 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-session'
 import { Config, resolveConfig } from './config.ts'
 import { mountOnce } from './mount-once.ts'
-import { ActiveSetTracker } from './active-set.ts'
+import { ActiveSetTracker, LiveAgentSet } from './active-set.ts'
 import { AutoRouteController, type CatalogApi, type DefaultModelApi, type SwitchApi } from './controller.ts'
 import { fetchGoMeters } from './meters.ts'
 import { makeStatusRoute } from './host/routes.ts'
@@ -29,7 +29,11 @@ export { POLL_STATE_FILE, removePollState, writePollState, type PollStateSnapsho
 export type { ReconcileRecord, TargetProblem } from './controller.ts'
 
 export const name = 'dsh-auto-route'
-export const inject = ['webServer', 'sessionController']
+// `workspaceRegistry` joins the inject list for the leg-2 archive filter
+// (2026-11-09 lightwatch ruling): session-controller itself injects it, so a
+// host that can mount `sessionController` always provides it — fail-closed on
+// the guardrail rather than silently sweeping archived sessions.
+export const inject = ['webServer', 'sessionController', 'workspaceRegistry']
 
 /**
  * Extract `provider/model` from a `request/header` event's payload; the
@@ -41,6 +45,32 @@ function routeOfRequestHeader(event: unknown): string | undefined {
   const config = data?.header?.config
   if (typeof config?.provider !== 'string' || typeof config?.model !== 'string') return undefined
   return `${config.provider}/${config.model}`
+}
+
+/**
+ * Minimal face of a created/ resumed agent for the lightwatch legs. The
+ * compile face (published `@deepseek-ai/dsh-agent` 0.1.2-rc.1) predates both
+ * the `model` fold reader and the `agent/created` `source` field that the
+ * RUNNING harness (workspace `0.2.2-alpha.2`) carries — both are read through
+ * this structural shape, so the listener stays typed without pinning the
+ * stale published surface.
+ */
+interface OpenedAgentFace {
+  id: string
+  model?: { current?(): { readonly provider: string; readonly model: string } | undefined }
+  session?: { header?: { origin?: unknown } }
+}
+
+/** `agent/created` payload as the lightwatch listener reads it. */
+interface OpenedCreatedPayload {
+  agent: OpenedAgentFace
+  /** `SessionStartSource` on the RUNNING harness; absent on the compile face. */
+  source?: string
+}
+
+/** Read face of the workspace registry's archive list (leg-2 filter). */
+interface ArchivedRegistryFace {
+  archivedSessionIds?: readonly string[]
 }
 
 /**
@@ -78,6 +108,21 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
   })
   ctx.effect(() => {
     const tracker = new ActiveSetTracker()
+    // Leg-2 sweep surface (2026-11-09 lightwatch ruling): live Agents, fed
+    // only by the agent/created + agent/disposed pair below.
+    const live = new LiveAgentSet()
+    // Archive filter judged at READ: a session can be archived or unarchived
+    // while its agent stays open, and unreadable registry state fails toward
+    // exclusion (the active-set-only surface is the safe degradation — never
+    // sweep a session we cannot vouch for).
+    const registry = (ctx as Context & { workspaceRegistry?: ArchivedRegistryFace }).workspaceRegistry
+    const isArchived = (sessionId: string): boolean => {
+      try {
+        return registry?.archivedSessionIds?.includes(sessionId) ?? true
+      } catch {
+        return true
+      }
+    }
     const logger = {
       info: (message: string) => { ctx.logger.info(message) },
       warn: (message: string) => { ctx.logger.warn(message) },
@@ -117,6 +162,10 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
       // Per-tick poll verdict → `<dsh-home>/auto-route-poll-state.json`
       // (2026-11-04 ruling: the 安康盾 sustained-failure plane reads it).
       onPoll: writePollState,
+      // Leg 2 (2026-11-09 lightwatch ruling): edges sweep active ∪ live;
+      // subagent children never join `live` and archived ids are filtered
+      // here, so the controller only ever sees sweepable sessions.
+      liveSessions: () => live.list(isArchived),
       ...(defaultModel === undefined ? {} : { defaultModel }),
     })
     // Durable model/selection events classify auto vs human (A case: a human
@@ -133,6 +182,31 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
       tracker.recordSelection(String(session.id), `${provider}/${model}`)
       controller.onSelectionEvent(String(session.id), { provider, model })
     })
+    // Leg 1 + live-set feed (2026-11-09 lightwatch ruling, 打开即对齐): an
+    // opened session arrives as `agent/created` with `source: 'resume'`
+    // (RUNTIME payload — harness `runtime-types.ts` SessionStartSource; the
+    // published compile face predates the field, read through the face
+    // above). The Agent is provably alive, so the fold reads through
+    // `agent.model.current()` and the align writes through selectModel with
+    // ZERO resume. Every created agent also joins the leg-2 sweep surface —
+    // subagent children refused at add (`resolveAgent` refuses child
+    // sessions, the same origin channel `session/event` uses); archived
+    // sessions filtered at read via `isArchived`.
+    const offAgentCreated = ctx.on('agent/created', (payload: OpenedCreatedPayload) => {
+      const sessionId = String(payload.agent.id)
+      const subagent = payload.agent.session?.header?.origin === 'subagent'
+      live.add(sessionId, { subagent })
+      if (payload.source !== 'resume' || subagent || isArchived(sessionId)) return
+      // Async per the ruling's disclosed residual 2 (open→秒发 race): the
+      // listener never blocks the open; a failure warns and lets the 45s
+      // reconcile leg keep its兜底 role.
+      void controller.alignOnOpen(sessionId, payload.agent.model).catch((error: unknown) => {
+        logger.warn(`dsh-auto-route: open-align listener failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    })
+    const offAgentDisposed = ctx.on('agent/disposed', (payload) => {
+      live.remove(String(payload.agent.id))
+    })
     controller.start()
     const disposeRoute = ctx.webServer.register(makeStatusRoute(controller))
     return () => {
@@ -143,6 +217,8 @@ export const apply = mountOnce('dsh-auto-route', (ctx: Context, config?: Config)
       try { offRequest() } catch { /* listener already gone during shutdown */ }
       try { offStatus() } catch { /* listener already gone during shutdown */ }
       try { offSelection() } catch { /* listener already gone during shutdown */ }
+      try { offAgentCreated() } catch { /* listener already gone during shutdown */ }
+      try { offAgentDisposed() } catch { /* listener already gone during shutdown */ }
       try { disposeRoute() } catch { /* route fiber already gone during shutdown */ }
     }
   }, 'dsh-auto-route: policy controller')

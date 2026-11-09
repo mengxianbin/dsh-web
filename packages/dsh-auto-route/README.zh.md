@@ -121,20 +121,31 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-auto-route
   会话留给它的首次请求（绝不盲切）；95–99 死区内会话腿暂停（两条 latch 都不是
   干净的在途目标——对赌必须活下来）；目标不可路由时整趟阻断（与边同语义）；
   重复的同形默认写回失败只记一次日志，不逐轮刷屏。
+- **轻值守双腿（2026-11-09 裁定，打开即对齐 + 边沿扫活集）**：两条事件驱动
+  新增——零新定时器、零台账扫描。*打开即对齐*：`agent/created` 带
+  `source: 'resume'` 时读取被打开 agent 的折叠路由（`model.current()`，
+  `pending ?? lastUsed ?? options`），偏离当前相位目标（`policy.phase` /
+  `policy.targets`，与状态端点同源）就把**那一个**会话走同一套人工锁定机器
+  切回——agent 必活，**零 resume**；死区、人工锁、无折叠值、目标预检四道护栏
+  与对账腿同语义，且不写任何状态字段。*边沿扫面*：trigger/restore 的会话趟扫
+  活跃集 ∪ 存活 Agent 集（只由 `agent/created` / `agent/disposed` 喂养；子代理
+  入集即拒、归档会话经 workspace registry 读时过滤），打开但闲置的会话在边沿
+  走 live 快路径被扫，不再等下一次请求。
 - **坏数据不决策**：计量轮询失败只记 `lastPoll.ok: false`、状态分毫不动
   （对账同样停手）；下一次好读数照常决策。
 - 策略状态在内存中：宿主重启后回到 `baseline`，首次轮询即从实况读数重推相位。
 
 ## 目录
 
-- `src/index.ts` — 插件入口：注入 `webServer`、`sessionController`；接事件、
-  控制器与状态路由。
+- `src/index.ts` — 插件入口：注入 `webServer`、`sessionController`、
+  `workspaceRegistry`（腿 2 归档过滤）；接事件（含 `agent/created` /
+  `agent/disposed` 轻值守对钩）、控制器与状态路由。
 - `src/policy.ts` — 纯相位逻辑（扳机/切回边、滞回、驻留、不完整读数保守不切）。
-- `src/controller.ts` — 轮询环、目录预检、切换批、默认保存、稳态对账腿、
-  状态视图。
+- `src/controller.ts` — 轮询环、目录预检、切换批、打开即对齐腿、活集边沿扫面、
+  默认保存、稳态对账腿、状态视图。
 - `src/meters.ts` — go/status 抓取（未取整比值；秘密永不入日志）。
-- `src/active-set.ts` — 运行/新鲜/子代理活动台账，加对账腿所依赖的选择折叠
-  （`pending`/`used`）。
+- `src/active-set.ts` — 运行/新鲜/子代理活动台账，对账腿所依赖的选择折叠
+  （`pending`/`used`），以及 `LiveAgentSet` 存活 agent 扫面。
 - `src/manual-lock.ts` — 人工锁定台账（A 案）：写入期望、所有权值、两条沿与
   对账共守的锁；可选 `LockStore` 持久化锁条目。
 - `src/lock-store.ts` — `FileLockStore`：锁条目的原子、版本化、fail-open JSON
