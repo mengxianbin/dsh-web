@@ -212,6 +212,51 @@ function judge(text: string): { verdict: SealVerdict; detail: string } | null {
 // ---- Analysis ----
 
 /**
+ * One memoized verdict for one transcript file (seal-analyzeseal-cache-1110):
+ * the stamp that was observed **before** the read pairs with the result the
+ * read produced, so an append that lands mid-read can only cause the next
+ * call to miss and recompute — never to serve pre-append content under a
+ * post-append stamp.
+ */
+interface SealMemoEntry {
+  readonly mtimeMs: number
+  readonly size: number
+  readonly result: SealCheckResult
+}
+
+/**
+ * Transcript path -> last verdict for that file, bounded LRU (insertion
+ * order, a hit is re-inserted, the oldest entry drops at the cap). The cap
+ * sits above the live session count (~1900) so ordinary traffic never
+ * evicts, while a churn of ids cannot grow the map without bound.
+ */
+const sealMemo = new Map<string, SealMemoEntry>()
+const SEAL_MEMO_MAX = 4096
+let sealMemoHits = 0
+let sealMemoMisses = 0
+
+/** Drop every memoized verdict and zero the counters (a full reset for tests). */
+export function clearSealMemo(): void {
+  sealMemo.clear()
+  sealMemoHits = 0
+  sealMemoMisses = 0
+}
+
+/** Memo counters (hits/misses count stamp-eligible calls only); diagnostics for tests. */
+export function sealMemoStats(): { hits: number; misses: number; size: number } {
+  return { hits: sealMemoHits, misses: sealMemoMisses, size: sealMemo.size }
+}
+
+function memoPut(file: string, stamp: { readonly mtimeMs: number; readonly size: number }, result: SealCheckResult): void {
+  sealMemo.delete(file)
+  sealMemo.set(file, { mtimeMs: stamp.mtimeMs, size: stamp.size, result })
+  if (sealMemo.size > SEAL_MEMO_MAX) {
+    const oldest = sealMemo.keys().next()
+    if (!oldest.done) sealMemo.delete(oldest.value)
+  }
+}
+
+/**
  * Run the six-value grouping for one session. `dir` comes from the sessions-root
  * directory index (`host/session-files.ts`); `undefined` (no dir) and every
  * read/decode failure degrade to `UNKNOWN`.
@@ -219,12 +264,62 @@ function judge(text: string): { verdict: SealVerdict; detail: string } | null {
  * `followUpCount` (stale rows only) counts the chat messages — `user/message`
  * plus `assistant/message` events — that occur after the last sentinel-bearing
  * assistant message: "save 后续聊 N 条" for the one-line pass-through notice.
+ *
+ * Result memo (seal-analyzeseal-cache-1110): both channels of contract C1 call
+ * this one function — the `POST /seal-check` endpoint through
+ * `service.sealCheck` and the archive gate directly — so a memo here is
+ * automatically shared by the whole endpoint face (板行动作③). The key is the
+ * transcript's absolute path plus its `mtime + size` observed **before** the
+ * read; an append changes both, so the next call recomputes with zero explicit
+ * invalidation (same invalidation rule as the seal-light per-session cache:
+ * 转录 append 即作废重算). Read/decode failures are never memoized — they are
+ * transient (lock, torn open) and must retry on the next call. The endorsement
+ * recheck's git verdict rides the memo for the window (same trade the
+ * seal-light design records): a git-state change without a transcript write
+ * keeps the previous reading, and the failure direction is conservative — an
+ * unendorsed DONE stays blocked until the next append, never a false green.
  */
 export function analyzeSeal(id: string, dir: string | undefined): SealCheckResult {
   if (dir === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
   const file = latestTranscriptPath(dir)
   if (file === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
 
+  // Stamp before read, on purpose: a stamp taken after the read could pair a
+  // post-append key with pre-append content and serve that stale verdict
+  // forever; a pre-append key with post-append content only forces the next
+  // call to recompute (the safe direction).
+  let stamp: { readonly mtimeMs: number; readonly size: number } | undefined
+  try {
+    const stat = statSync(file)
+    stamp = { mtimeMs: stat.mtimeMs, size: stat.size }
+  } catch {
+    // No stamp -> no memo: a stat failure must never pin a verdict.
+  }
+
+  if (stamp !== undefined) {
+    const hit = sealMemo.get(file)
+    if (hit !== undefined && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size) {
+      sealMemoHits += 1
+      // Refresh the LRU position; the id is re-stamped so one file can never
+      // answer under another session's id.
+      sealMemo.delete(file)
+      sealMemo.set(file, hit)
+      return { ...hit.result, id }
+    }
+    sealMemoMisses += 1
+  }
+
+  const result = deriveSeal(id, file, stamp)
+  if (stamp !== undefined && result.detail !== DETAIL.decodeFail) memoPut(file, stamp, result)
+  return result
+}
+
+/** The uncached derivation: full read + decode + grouping for one transcript file. */
+function deriveSeal(
+  id: string,
+  file: string,
+  stamp: { readonly mtimeMs: number; readonly size: number } | undefined,
+): SealCheckResult {
   let text: string
   try {
     text = decodeBuffer(file, readFileSync(file))
@@ -274,12 +369,10 @@ export function analyzeSeal(id: string, dir: string | undefined): SealCheckResul
 
   // LEGACY cut: the file's last write before the sentinel era makes any
   // unsealed read a legacy save session (default-pass, no verdict asserted).
-  let lastTs = 0
-  try {
-    lastTs = statSync(file).mtimeMs
-  } catch {
-    // stat failure -> 0 -> judged by the strict modern rules (conservative).
-  }
+  // The stamp was taken before the read (analyzeSeal); a missing stamp reads
+  // 0 -> judged by the strict modern rules (conservative), same as a stat
+  // failure did before the memo existed.
+  const lastTs = stamp?.mtimeMs ?? 0
   const legacy = lastTs > 0 && lastTs < SENTINEL_ERA_START
   const legacyRow = (): SealCheckResult => ({ id, verdict: 'LEGACY', detail: DETAIL.legacy })
 
