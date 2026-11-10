@@ -44,6 +44,7 @@ import {
   type LedgerSource,
 } from './ledger.ts'
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
+import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { TtlMemo } from './ttl-memo.ts'
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
@@ -74,6 +75,11 @@ interface LiveStoreFace {
 
 export interface ArchiveServiceOptions {
   dshHome?: string
+  /**
+   * The turn-end seal compute seam (seal-light-host-state-1109 护栏 ②): specs
+   * inject a deterministic fake; production defaults to the off-loop worker.
+   */
+  sealCompute?: SealStateOptions['compute']
 }
 
 /**
@@ -206,10 +212,14 @@ export class ArchiveService {
   private readonly busy = new Set<string>()
   private cycleRunning = false
   private schedulerTimer: ReturnType<typeof setTimeout> | undefined
+  /** The turn-end seal sync, alive exactly while this service is mounted. */
+  private sealState: SealStateSync | undefined
+  private readonly sealCompute: SealStateOptions['compute']
 
   constructor(ctx: Context, options: ArchiveServiceOptions = {}) {
     this.ctx = ctx
     this.dshHome = options.dshHome ?? resolveDshHome()
+    this.sealCompute = options.sealCompute
     this.ledgerPath = join(this.dshHome, 'dsh-session-archive', 'archive-ledger.json')
     this.statePath = join(this.dshHome, 'dsh-session-archive', 'state.json')
   }
@@ -239,10 +249,22 @@ export class ArchiveService {
     }
     this.loaded = true
     this.armScheduler(true)
+    // Turn-end seal sync (seal-light-host-state-1109 裁点1A): computes once
+    // per turn end off the event loop, records the verdict, and lets the
+    // `seal` projection carry it to the Host — soft-registered through
+    // ctx.inject, so a host without the projection registry simply never
+    // mounts the key.
+    this.sealState = createSealStateSync(this.ctx, {
+      resolveDir: (id) => this.dirIndex.get().byId.get(id),
+      ...(this.sealCompute === undefined ? {} : { compute: this.sealCompute }),
+    })
+    this.sealState.start()
   }
 
   stop(): void {
     this.disposed = true
+    this.sealState?.stop()
+    this.sealState = undefined
     if (this.schedulerTimer !== undefined) clearTimeout(this.schedulerTimer)
     this.schedulerTimer = undefined
   }

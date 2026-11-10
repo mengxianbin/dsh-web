@@ -238,3 +238,44 @@ export interface PlanMismatchBody {
   readonly error: 'plan-mismatch'
   readonly plan: DeletePlanView
 }
+
+/**
+ * The archive-seal verdict this plugin computes at turn end and records for
+ * the Host to carry (seal-light-host-state-1109 裁点1A): a structural payload
+ * shaped to the Host's `SessionSealState` — the Host never interprets these
+ * fields, it only shuttles them onto `api-session/status` frames and
+ * `SessionSummary.projections.seal`.
+ */
+export interface SealVerdictPayload {
+  /** The six-value group (contract C1 vocabulary). */
+  readonly verdict: string
+  /** Machine breakdown (contract C1 detail vocabulary). */
+  readonly detail?: string
+  /** Chat messages after the last sentinel; stale rows only. */
+  readonly followUpCount?: number
+}
+
+declare module '@deepseek-ai/dsh-session/types' {
+  interface PluginRecordMap {
+    /** Latest turn-end seal verdict; appended by the seal-state sync, folded by the `seal` projection. */
+    'plugin:session-archive/seal': SealVerdictPayload
+  }
+}
+
+declare module '@deepseek-ai/dsh-session-projection/types' {
+  interface SessionProjectionMap {
+    /**
+     * The archive-seal verdict folded from `plugin:session-archive/seal`
+     * records: `null` until the turn-end compute lands one. Registered by
+     * this plugin (裁点1A 插件算 host 持); the key rides Session summaries
+     * (`wire.summary` default true) so `session/list` reconciles the pushed
+     * status frame (裁点3A). Structurally identical to the Host's declaration
+     * in session-controller types — keep the two shapes equal.
+     */
+    seal: SealVerdictPayload | null
+  }
+  interface SessionProjectionStateMap {
+    /** Host fold state for `seal`: the latest payload, or `null` before the first record. */
+    seal: SealVerdictPayload | null
+  }
+}
