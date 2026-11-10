@@ -1,8 +1,16 @@
+/**
+ * The host half's own surface: the family-shared harness-home resolution it
+ * still carries as a synced copy, the schema defaults the effective settings
+ * fall back to, and the preset directory the declaration reads.
+ */
+
+import { existsSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import process from 'node:process'
-import { dshHome } from './index.ts'
+import { dshHome } from './dsh-home.ts'
+import { Config, DEFAULT_CONFIG, bundledPresetDir, resolveConfig } from './index.ts'
 
 /** Run `body` with the given DSH_HOME overrides, restoring the env afterwards. */
 function withEnv(values: Record<string, string | undefined>, body: () => void): void {
@@ -63,5 +71,89 @@ describe('dshHome', () => {
     withEnv({ DSH_HOME: 'data/home' }, () => {
       expect(dshHome()).toBe(join(process.cwd(), 'data', 'home'))
     })
+  })
+})
+
+describe('resolveConfig', () => {
+  it('operator gets the schema defaults for an activation with no config', () => {
+    // Given an activation the Host passed no config to, When the operator
+    // reads the effective settings, Then every field is the schema default.
+    expect(resolveConfig(undefined)).toEqual(DEFAULT_CONFIG)
+    expect(resolveConfig({})).toEqual(DEFAULT_CONFIG)
+    // The schema and the reader agree on every default the settings card shows:
+    // the Host hands the activation the schema's own output, whose volatile
+    // fields are references, and the reader resolves them back to values.
+    expect(resolveConfig(Config({}))).toEqual(DEFAULT_CONFIG)
+  })
+
+  it('operator sees a committed volatile write through the held reference', () => {
+    // Given a volatile field the Host hands over as a stable reference, When
+    // the operator commits a write and reads again, Then the read moves with it.
+    let committed = false
+    const live = { get: () => committed }
+    const config = { announceToAgent: live, enabled: { get: () => true } }
+    expect(resolveConfig(config).announceToAgent).toBe(false)
+    committed = true
+    expect(resolveConfig(config).announceToAgent).toBe(true)
+  })
+
+  it('operator gets a plain profile-patch value as it is', () => {
+    // Given a config written as plain values, When the operator reads the
+    // effective settings, Then each one passes through unchanged.
+    expect(resolveConfig({
+      enabled: false,
+      announceToAgent: true,
+      presentation: 'ptc',
+      dispatcher: true,
+    })).toEqual({
+      enabled: false,
+      announceToAgent: true,
+      presentation: 'ptc',
+      dispatcher: true,
+    })
+  })
+
+  it('operator gets the dispatcher switch ON by default, as a volatile field', () => {
+    // Given the shipped schema, When the operator reads the effective settings,
+    // Then the dispatcher block is appended by default: a session that never
+    // touches the switch runs as a dispatcher, and switching it off is what
+    // returns the bare persona. The field is volatile like every other
+    // preset-shaping key, so the Host serves it as this entry's settings form
+    // and commits a write in place instead of remounting the row.
+    expect(DEFAULT_CONFIG.dispatcher).toBe(true)
+    expect(resolveConfig({}).dispatcher).toBe(true)
+    expect(resolveConfig(Config({})).dispatcher).toBe(true)
+    let committed = false
+    expect(resolveConfig({ dispatcher: { get: () => committed } }).dispatcher).toBe(false)
+    committed = true
+    expect(resolveConfig({ dispatcher: { get: () => committed } }).dispatcher).toBe(true)
+  })
+
+  it('operator sees dispatcher and presentation as independent settings', () => {
+    // Given the two orthogonal settings (dispatcher changes the PROMPT, its
+    // appended rule block; presentation changes the WIRE, the tool surface),
+    // When the operator reads every combination, Then each field resolves to
+    // the value it was given with no cross-talk between them.
+    for (const presentation of ['ptc', 'native'] as const) {
+      for (const dispatcher of [true, false]) {
+        expect(resolveConfig({ presentation, dispatcher })).toMatchObject({ presentation, dispatcher })
+      }
+    }
+    // Pre-0.2.1 profiles persisted `presentation: 'both'` (the former default);
+    // both the schema and the reader normalize it to `'ptc'` so upgrading never
+    // degrades the row at startup.
+    expect(resolveConfig(Config({ presentation: 'both' })).presentation).toBe('ptc')
+    expect(resolveConfig({ presentation: 'both' }).presentation).toBe('ptc')
+  })
+})
+
+describe('bundledPresetDir', () => {
+  it('operator has the bundled preset directory the declaration reads', () => {
+    // Given the installed package, When the operator resolves the bundled
+    // preset directory, Then it holds the composition and its local plugins.
+    const dir = bundledPresetDir()
+    expect(existsSync(join(dir, 'agent.cordis.yml'))).toBe(true)
+    expect(existsSync(join(dir, 'preset.yml'))).toBe(true)
+    expect(existsSync(join(dir, 'minimal-prompt.mjs'))).toBe(true)
   })
 })
