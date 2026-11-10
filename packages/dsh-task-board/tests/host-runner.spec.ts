@@ -463,7 +463,10 @@ describe('HostExecutionRunner', () => {
     await expect(runner.listRunning()).resolves.toEqual({ known: true, count: 1, items })
     expect(gateway.invoke).toHaveBeenCalledTimes(1)
     expect(gateway.invoke.mock.calls[0]?.[0]).toMatchObject({ namespace: 'session', method: 'list' })
-    expect(gateway.invoke.mock.calls[0]?.[0].args).toEqual({ _request: {} })
+    // Explicit thin scope on the wire (F′ flip, session-list-full-slim-1110 P2).
+    expect(gateway.invoke.mock.calls[0]?.[0].args).toEqual({
+      _request: { includeArchived: false, includeSubagents: false, trimHeavyProjections: true },
+    })
   })
 
   it('logs swallowed gateway failures while keeping the roster unknown and the outcome pending', async () => {
