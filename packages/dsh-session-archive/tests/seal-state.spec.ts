@@ -106,7 +106,7 @@ describe('sessionSealProjection fold', () => {
 })
 
 /** A minimal host: real detached Sessions, a recording registry stand-in, fold-through stateOf. */
-function makeHarness() {
+function makeHarness(sessionsStore?: { get(id: string): unknown }) {
   const ctx = new Context()
   const session = Session.create(SessionId('session-seal-sync'))
   let registered: typeof sessionSealProjection | undefined
@@ -126,9 +126,9 @@ function makeHarness() {
     stateOf: (target: Session, key: string) => (key === 'seal' ? stateOf() : undefined),
     onChanged: () => () => undefined,
   } as never)
-  ctx.provide('sessions', {
+  ctx.provide('sessions', (sessionsStore ?? {
     get: (id: string) => (id === String(session.id) ? session : undefined),
-  } as never)
+  }) as never)
   return { ctx, session, records, stateOf, registered: () => registered }
 }
 
@@ -224,6 +224,54 @@ describe('createSealStateSync', () => {
     await vi.waitFor(() => { expect(compute).toHaveBeenCalledTimes(2) })
     await vi.waitFor(() => { expect(stateOf()).toEqual({ verdict: 'DONE', detail: 'sentinel-ok' }) })
     expect(records()).toBe(1)
+    sync.stop()
+    await ctx.fiber.dispose()
+  })
+
+  it('operator records the turn end when the host forbids direct sessions property reads', async () => {
+    // Given a host whose fiber rejects `ctx.sessions` with cordis' inject
+    // error (the 2026-11-11 production crash shape), When a turn end computes,
+    // Then the verdict still records through the inject-free ctx.get probe.
+    const { ctx, session, records, stateOf, registered } = makeHarness()
+    const hostile = new Proxy(ctx, {
+      get(target: Context, property: string | symbol): unknown {
+        if (property === 'sessions') {
+          throw new Error('cannot get property "sessions" without inject')
+        }
+        const value = Reflect.get(target, property)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'DONE', detail: 'sentinel-ok' }))
+    const sync = createSealStateSync(hostile, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(hostile, session, 1)
+    await vi.waitFor(() => { expect(records()).toBe(1) })
+    expect(stateOf()).toEqual({ verdict: 'DONE', detail: 'sentinel-ok' })
+    sync.stop()
+    await ctx.fiber.dispose()
+  })
+
+  it('operator skips the record when the sessions store replaced the computed session', async () => {
+    // Given a sessions store that answers a different object for the id
+    // (session disposed or replaced while the worker ran), When the turn-end
+    // compute settles, Then the stale guard returns before any record lands.
+    const { ctx, session, records, registered } = makeHarness({ get: () => ({}) })
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'DONE', detail: 'sentinel-ok' }))
+    const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(ctx, session, 1)
+    await vi.waitFor(() => { expect(compute).toHaveBeenCalledTimes(1) })
+    // Drain the post-compute microtasks so the guard has run before asserting
+    // the negative (vi.waitFor only observes the positive compute call).
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(records()).toBe(0)
     sync.stop()
     await ctx.fiber.dispose()
   })
