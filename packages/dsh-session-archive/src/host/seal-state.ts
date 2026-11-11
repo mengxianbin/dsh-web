@@ -160,7 +160,16 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
     }
     if (stopped) return
     // The session may have been disposed or replaced while the worker ran.
-    if (ctx.sessions.get(session.id) !== session) return
+    // Probe via ctx.get (reflect store, no inject gate): the plugin's inject
+    // list never declared 'sessions', and a direct `ctx.sessions` throws
+    // "without inject" — fatal to the host (2026-11-11). No store ⇒ record
+    // anyway; appendPluginRecord's preconditions below are the backstop.
+    try {
+      const store = (ctx as unknown as { get(name: string): unknown }).get('sessions') as { get?(id: string): unknown } | undefined
+      if (typeof store?.get === 'function' && store.get(session.id) !== session) return
+    } catch {
+      // Unreadable store: fail open — same shape as the stateOf read below.
+    }
     const payload: SealVerdictPayload = {
       verdict: result.verdict,
       ...(result.detail === undefined ? {} : { detail: result.detail }),
