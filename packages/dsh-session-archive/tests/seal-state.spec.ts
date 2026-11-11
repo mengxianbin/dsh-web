@@ -6,6 +6,10 @@
  * @module tests/seal-state.spec
  */
 
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { Session, appendPluginRecord } from '@deepseek-ai/dsh-session'
@@ -16,7 +20,45 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SealCheckResult } from '../src/core/types.ts'
 import { assistantMsg, createFakeHost, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
 
-const SAVE_DONE = '三刀全落，status 干净。\n\n## ✅ 执行完成\nSAVE_STATUS=DONE'
+interface EndorsedRepo {
+  dir: string
+  hash: string
+}
+
+let repoCache: EndorsedRepo | undefined
+
+/**
+ * A real git repo whose commit sits behind an origin remote-tracking ref
+ * (hermetic endorsement fixture, same shape as seal-lastline.spec): the
+ * 1107 声明-核验 recheck fail-closes an unbacked DONE to no-endorsement, so
+ * the worker e2e transcript carries a declared `hashes=` list whose single
+ * hash this repo backs.
+ */
+function endorsedRepo(): EndorsedRepo {
+  if (repoCache !== undefined) return repoCache
+  const dir = mkdtempSync(join(tmpdir(), 'seal-state-'))
+  const run = (args: string[]): string => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+  run(['init', '-q'])
+  run(['config', 'user.email', 'seal@test'])
+  run(['config', 'user.name', 'seal'])
+  writeFileSync(join(dir, 'seed.txt'), 'seed\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'seed'])
+  const hash = run(['rev-parse', 'HEAD']).trim()
+  run(['update-ref', 'refs/remotes/origin/main', hash])
+  repoCache = { dir, hash }
+  return repoCache
+}
+
+/** Root event carrying the session cwd so `repoCandidates` resolves the fixture repo first. */
+function sessionRoot(id: string, cwd: string): Record<string, unknown> {
+  return { type: 'session', version: 4, id, cwd }
+}
+
+/** Endorsed DONE tail (seal-declare-verify-1107: `commits=1/1` + declared live hash). */
+function endorsedDone(repo: EndorsedRepo): string {
+  return `三刀全落（\`a1\` / \`b2\` / \`c3\`），status 干净。\n\n## ✅ 执行完成\nSAVE_STATUS=DONE commits=1/1 pushed=1/1 merged=1/1 pushedMain=1/1 marker=clean hashes=${repo.hash}`
+}
 
 /** A record event exactly as the fold reads one back. */
 function sealRecord(data: unknown): SessionEvent {
@@ -193,10 +235,11 @@ function dirOf(host: FakeHost, id: string): string {
 
 describe('computeSealInWorker (default off-loop path)', () => {
   it('operator gets DONE through the worker script for a real sentinel transcript', async () => {
-    // Given a session dir with a DONE sentinel transcript, When the worker
-    // compute runs, Then it answers the DONE grouping off this thread.
+    // Given a session dir with an endorsed DONE sentinel transcript, When the
+    // worker compute runs, Then it answers the DONE grouping off this thread.
+    const repo = endorsedRepo()
     const host = createFakeHost()
-    writeTranscript(host, 'session-worker', [userMsg('收口'), assistantMsg(SAVE_DONE)])
+    writeTranscript(host, 'session-worker', [sessionRoot('session-worker', repo.dir), userMsg('收口'), assistantMsg(endorsedDone(repo))])
     const result = await computeSealInWorker('session-worker', dirOf(host, 'session-worker'))
     expect(result).toEqual({ id: 'session-worker', verdict: 'DONE', detail: 'sentinel-ok' })
   }, 20_000)

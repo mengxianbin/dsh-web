@@ -290,7 +290,7 @@ export class ArchiveService {
     // ctx.inject, so a host without the projection registry simply never
     // mounts the key.
     this.sealState = createSealStateSync(this.ctx, {
-      resolveDir: (id) => this.dirIndex.get().byId.get(id),
+      resolveDir: async (id) => (await this.dirIndex.get()).byId.get(id),
       ...(this.sealCompute === undefined ? {} : { compute: this.sealCompute }),
     })
     this.sealState.start()

@@ -89,8 +89,12 @@ export function computeSealInWorker(id: string, dir: string | undefined): Promis
 
 /** Collaborators of one sync instance. */
 export interface SealStateOptions {
-  /** The sessions-root directory for an id, from the archive service's dir index. */
-  readonly resolveDir: (sessionId: string) => string | undefined
+  /**
+   * The sessions-root directory for an id, from the archive service's dir
+   * index. May answer asynchronously: the merged install lineage serves the
+   * index through an async TTL memo (`DirIndexCache.get(): Promise<...>`).
+   */
+  readonly resolveDir: (sessionId: string) => string | undefined | Promise<string | undefined>
   /**
    * The compute seam: defaults to the off-loop worker. Specs inject a
    * synchronous fake to drive the scheduling deterministically.
@@ -138,7 +142,14 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
 
   const computeOne = async (session: Session): Promise<void> => {
     const id = String(session.id)
-    const dir = options.resolveDir(id)
+    let dir: string | undefined
+    try {
+      dir = await options.resolveDir(id)
+    } catch {
+      // A failed index scan degrades exactly like an unknown id: compute
+      // with no dir, which the worker answers as UNKNOWN (fail-visible).
+      dir = undefined
+    }
     let result: SealCheckResult
     try {
       result = await compute(id, dir)
