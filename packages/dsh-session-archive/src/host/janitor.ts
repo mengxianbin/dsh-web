@@ -10,7 +10,7 @@
  * @module @linxin666/dsh-session-archive/host/janitor
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -44,10 +44,12 @@ import {
   type LedgerSource,
 } from './ledger.ts'
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
+import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
-import { TtlMemo } from './ttl-memo.ts'
-import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
+import { AsyncTtlMemo } from './ttl-memo.ts'
+import { InventoryResponseCache, type InventoryResponseServe } from './inventory-response-cache.ts'
+import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
 
@@ -171,6 +173,24 @@ const DIR_INDEX_TTL_MS = 2_000
  */
 const PROJCACHE_INDEX_TTL_MS = 2_000
 
+/**
+ * How long one whole inventory response may be served as fresh before a
+ * background refresh runs (stale reads keep answering verbatim — see
+ * `inventory-response-cache.ts`).
+ *
+ * Sized by the taskbot cadence, not the panel's: `archive-janitor` polls
+ * every 10 minutes behind a 10-second HTTP timeout, and one rebuild costs
+ * 11–21 s warm (up to 35 s, 500 at the 30 s route timeout — forensics
+ * `archive-lag-forensics-1110.md` §八), so a window shorter than the poll
+ * interval makes every other janitor round pay a rebuild it cannot survive.
+ * 15 minutes covers two full janitor intervals with margin; mutations still
+ * invalidate explicitly, so this plugin's own archive/restore/delete results
+ * are refreshed behind the very next read. State changed by anything other
+ * than this plugin (feed activity, another client) surfaces on GET within
+ * the window plus one rebuild; mutating routes never read this cache.
+ */
+const INVENTORY_RESPONSE_TTL_MS = 15 * 60_000
+
 export class ArchiveService {
   private readonly ctx: Context
   private readonly dshHome: string
@@ -197,11 +217,26 @@ export class ArchiveService {
    * harness file only changes when another writer touches it, while every pass
    * re-reads and re-parses the whole document; the delete pipeline invalidates
    * the memo after it rewrites the index, so a removed session's facts cannot
-   * resurface from memory.
+   * resurface from memory. Async since 0.4.12: the read+parse yields the event
+   * loop instead of holding it, and concurrent passes coalesce into one parse.
    */
-  private readonly projcacheIndex = new TtlMemo<ProjcacheIndex>({
+  private readonly projcacheIndex = new AsyncTtlMemo<ProjcacheIndex>({
     ttlMs: PROJCACHE_INDEX_TTL_MS,
     load: () => readProjcacheIndex(this.dshHome),
+  })
+  /**
+   * The cached whole inventory response the route serves. Mutating operations
+   * invalidate it when they release the operation lock (every one of them
+   * changes archive state, or may have changed it partially before failing),
+   * so the next GET rebuilds; reads that start during an operation serve the
+   * pre-operation snapshot until it ends.
+   */
+  private readonly responseCache = new InventoryResponseCache({
+    ttlMs: INVENTORY_RESPONSE_TTL_MS,
+    build: async () => {
+      const inventory = await this.inventory()
+      return { payload: JSON.stringify(inventory), generatedAt: Date.now() }
+    },
   })
 
   private loaded = false
@@ -332,7 +367,7 @@ export class ArchiveService {
   // Sources and protection
   // ------------------------------------------------------------------
 
-  private sources(): InventorySources {
+  private async sources(): Promise<InventorySources> {
     const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
     const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[] }>('workspaceRegistry')
     return {
@@ -341,8 +376,10 @@ export class ArchiveService {
       dshHome: this.dshHome,
       ledger: this.ledger,
       projcacheFiles: this.projcacheFiles,
-      dirIndex: this.dirIndex.get(),
-      projcacheIndex: this.projcacheIndex.get(),
+      dirIndex: await this.dirIndex.get(),
+      // Awaited here (not in buildInventory): the memo's derivation is async
+      // since the projection-cache index stopped being read synchronously.
+      projcacheIndex: await this.projcacheIndex.get(),
     }
   }
 
@@ -413,7 +450,7 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async inventory(): Promise<InventoryView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const workspaces: WorkspaceView[] = built.workspaces
     return {
       generatedAt: Date.now(),
@@ -422,6 +459,17 @@ export class ArchiveService {
       archivedSessionIds: built.archivedSessionIds,
       auto: this.autoView(),
     }
+  }
+
+  /**
+   * The inventory document as the route serves it: one rebuild serialized
+   * once, then the same bytes served verbatim inside the TTL window
+   * ({@link InventoryResponseCache}). Mutating operations invalidate the
+   * window; `hit`/`ageMs` travel to the wire as `x-dsh-inventory-cache` and
+   * `age` so a cache hit is observable without parsing the body.
+   */
+  inventoryCached(): Promise<InventoryResponseServe> {
+    return this.responseCache.serve()
   }
 
   autoView(): AutoStateView {
@@ -437,13 +485,15 @@ export class ArchiveService {
    * The six-value seal grouping for a batch of ids — the single implementation
    * behind both archive channels (contract C1: 分组实现全插件仅此一份): the
    * native dialog consumes it through `POST /seal-check`, the REST hard gate
-   * calls `analyzeSeal` directly through {@link archive}. Location reuses the
-   * sessions-root directory index; an id with no locatable transcript answers
-   * `UNKNOWN` (fail-closed, never a silent pass).
+   * calls `analyzeSeal` directly through {@link archive}. Location probes
+   * only the named ids against the sessions root (targeted read — no full
+   * `indexSessionDirs` walk, no `dirSize`, see {@link resolveSessionDirs});
+   * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
+   * a silent pass).
    */
   sealCheck(ids: readonly string[]): SealCheckResult[] {
-    const index = this.dirIndex.get()
-    return ids.map((id) => analyzeSeal(id, index.byId.get(id)))
+    const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
+    return ids.map((id) => analyzeSeal(id, dirs.get(id)))
   }
 
   // ------------------------------------------------------------------
@@ -457,21 +507,58 @@ export class ArchiveService {
     const run = (async () => fn())()
     const release = (): void => {
       this.lockHeld = false
+      // Every locked operation changes archive state (or changed it partially
+      // before failing), so the cached whole response is dropped here, once,
+      // and the next inventory GET rebuilds. Reads that started during the
+      // operation keep serving the pre-operation snapshot until it ends.
+      this.responseCache.invalidate()
     }
     run.then(release, release)
     return run
   }
 
-  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, gate?: ArchiveGate): Promise<BatchResponse> {
+  /**
+   * Archive a batch of sessions. Every call passes the triclass identity
+   * gate first (user ruling, 2026-10-29): the actor resolves against the
+   * attention ledger and each target decides on its own — a denied id gets
+   * `skipped / identity-denied` with both classes in `detail`, the rest of
+   * the batch proceeds (no taint). The actor is persisted into every ledger
+   * entry it archives, so attribution reads from the ledger instead of
+   * transcript archaeology. When a seal gate is passed, it decides per id
+   * after the identity gate (contract C2: green/stale archive, true red and
+   * UNKNOWN refuse with `seal-required`, no batch contagion either).
+   * @param ids - canonical session ids.
+   * @param source - ledger source tag (`manual` from the REST route).
+   * @param currentSessionId - caller's currently open session (auto path protection).
+   * @param actor - who ordered this archive (deciding session id or channel
+   * name); absent resolves to no identity, which the gate always refuses —
+   * the route 400s before this can happen.
+   * @param gate - archive seal gate (contract C2); absent = no seal reads.
+   */
+  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string, gate?: ArchiveGate): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
+      // Identity gate, resolved once per batch from the dispatch plugin's
+      // attention ledger ($DSH_HOME/session-attention.json).
+      const identity = await readIdentityTable(this.dshHome)
+      const actorClass = resolveActorClass(actor, identity)
       for (const id of ids) {
         const row = byId.get(id)
         if (row === undefined) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
+          continue
+        }
+        const targetClass: IdentityClass = identity.get(id) ?? 'human'
+        if (!mayArchive(actorClass, targetClass)) {
+          results.push({
+            id,
+            status: 'skipped',
+            reason: 'identity-denied',
+            detail: `actor ${actorClass ?? 'unclassified'} cannot archive ${targetClass} session`,
+          })
           continue
         }
         if (row.archived) {
@@ -520,6 +607,7 @@ export class ArchiveService {
             source: entrySource,
             ...(entryReason !== undefined ? { reason: entryReason } : {}),
             ...(entrySeal !== undefined ? { seal: entrySeal } : {}),
+            ...(actor !== undefined ? { actor } : {}),
           }
           results.push({ id, status: 'ok' })
         } catch (error) {
@@ -536,7 +624,7 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
       const toUnarchive: string[] = []
       for (const id of ids) {
@@ -596,7 +684,7 @@ export class ArchiveService {
     options: { reason?: string; seal?: string } = {},
   ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
     const now = Date.now()
-    const index = this.dirIndex.get()
+    const index = await this.dirIndex.get()
     const results: ArchiveOverrideRow[] = []
     let changed = false
     for (const id of ids) {
@@ -645,7 +733,7 @@ export class ArchiveService {
    */
   async deleteSessions(ids: readonly string[], options: { currentSessionId?: string; expectedTotal?: number; source?: 'manual' | 'auto' } = {}): Promise<BatchResponse> {
     return this.withLock(async () => {
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const protectedMap = this.protectedReason(options.currentSessionId, built.rows)
       const plan = planDelete(built.rows, ids, protectedMap)
       // A mismatch only matters when the host would delete MORE than the user
@@ -762,9 +850,14 @@ export class ArchiveService {
     // first, so a pass that follows a physical delete cannot answer with the
     // removed sessions' facts even while the window is still open.
     if (ids.size > 0) this.projcacheIndex.invalidate()
-    try {
-      if (existsSync(indexPath)) {
-        const parsed = JSON.parse(this.readSync(indexPath)) as { tables?: { sessions?: Record<string, unknown> } }
+    // The index read is async since 0.4.12: the document is multi-megabyte,
+    // and this scrub runs inside the delete pipeline on the shared event
+    // loop — a synchronous read+parse here stalled every request while a
+    // batch deleted. Missing (undefined) and corrupt both leave it alone.
+    const raw = await this.readFile(indexPath)
+    if (raw !== undefined) {
+      try {
+        const parsed = JSON.parse(raw) as { tables?: { sessions?: Record<string, unknown> } }
         const sessions = parsed.tables?.sessions
         if (sessions !== undefined) {
           for (const id of ids) {
@@ -776,9 +869,9 @@ export class ArchiveService {
           // success; a fire-and-forget write raced the caller's readers.
           await writeJsonAtomic(indexPath, parsed)
         }
+      } catch {
+        // A corrupt index is left alone; the harness owns it.
       }
-    } catch {
-      // A corrupt index is left alone; the harness owns it.
     }
     const perSessionDir = join(this.dshHome, 'storages', 'session_projcache', 'sessions')
     try {
@@ -794,17 +887,12 @@ export class ArchiveService {
     }
   }
 
-  private readSync(path: string): string {
-    // Small synchronous read for the scrub; failure paths are guarded.
-    return readFileSync(path, 'utf8')
-  }
-
   // ------------------------------------------------------------------
   // Automatic policies
   // ------------------------------------------------------------------
 
   async autoPreview(): Promise<AutoPreviewView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const now = Date.now()
     const protectedSet = new Set(this.protectedReason(undefined, built.rows).keys())
     const archiveCandidates = this.config.autoArchiveEnabled
@@ -849,7 +937,7 @@ export class ArchiveService {
       const startedAt = Date.now()
       try {
         if (kind === 'archive') {
-          const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+          const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
           const protectedSet = new Set(this.protectedReason(currentSessionId, built.rows).keys())
           const candidates = autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now: startedAt, protectedIds: protectedSet })
           const response = await this.archiveInternal(candidates.map((entry) => entry.id), 'auto', built.nativeIds)
@@ -858,7 +946,7 @@ export class ArchiveService {
           await this.flushState()
           return stats
         }
-        const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+        const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
         const protectedMap = this.protectedReason(currentSessionId, built.rows)
         const protectedSet = new Set(protectedMap.keys())
         // Backfill first, against the same rows this cycle plans with: the
@@ -904,7 +992,7 @@ export class ArchiveService {
   private cycleObservedArchives(): Promise<number> {
     return this.withLock(async () => {
       const now = Date.now()
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       return (await this.recordObservedArchives(built, now)).length
     })
   }
@@ -1013,7 +1101,7 @@ export class ArchiveService {
 
   async preview(id: string): Promise<SessionPreviewView> {
     const controller = this.serviceFace<{ inspect?(sessionId: string, signal?: AbortSignal): Promise<{ meta?: { createdAt?: number; cwd?: string }; events?: readonly unknown[] }> }>('sessionController')
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const row: ArchiveSessionRow | undefined = built.rows.find((entry) => entry.id === id)
     if (row === undefined) {
       throw new Error('session not found')

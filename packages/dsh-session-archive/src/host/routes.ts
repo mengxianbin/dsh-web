@@ -6,7 +6,7 @@
  * @module @linxin666/dsh-session-archive/host/routes
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { BatchRequestBody } from '../core/types.ts'
 import { BusyError, PlanMismatchError, type ArchiveService } from './janitor.ts'
@@ -55,6 +55,7 @@ function batchBody(body: unknown): BatchRequestBody {
   return {
     ids: idList(record.ids),
     ...(typeof record.currentSessionId === 'string' ? { currentSessionId: record.currentSessionId } : {}),
+    ...(typeof record.actor === 'string' && record.actor.trim() !== '' ? { actor: record.actor.trim().slice(0, 200) } : {}),
     ...(typeof record.expectedTotal === 'number' && Number.isFinite(record.expectedTotal) ? { expectedTotal: Math.round(record.expectedTotal) } : {}),
   }
 }
@@ -68,6 +69,21 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.message.slice(0, 300) : String(error)
 }
 
+/**
+ * Write one pre-serialized JSON body with the family default headers. The
+ * cached inventory route serves bytes it serialized once at rebuild time;
+ * re-stringifying them per request would defeat the cache on the response
+ * side (the stringify is a measured cost of a full pass).
+ */
+function writeRawJson(res: ServerResponse, status: number, payload: string, headers: OutgoingHttpHeaders): void {
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'referrer-policy': 'no-referrer',
+    ...headers,
+  })
+  res.end(payload)
+}
+
 export function makeInventoryRoute(service: ArchiveService): WebRoute {
   return {
     kind: 'exact',
@@ -75,8 +91,26 @@ export function makeInventoryRoute(service: ArchiveService): WebRoute {
     handler: async (req, res) => {
       if (!fenced(req, res)) return
       try {
-        const inventory = await service.inventory()
-        writeJson(res, 200, inventory, { 'cache-control': 'no-store' })
+        // Whole-response TTL cache (task #inventory-perf-1030, sizing +
+        // stale-while-revalidate reworked by #inventory-offhost-1110): one
+        // rebuild is serialized once and served verbatim; past the window or
+        // after a mutation the retained bytes still answer immediately while
+        // a single-flight background rebuild refreshes them, so no reader
+        // ever pays the 11 s+ rebuild (the taskbot janitor's 10 s timeout
+        // died on every miss). The wire stays `no-store` — the browser must
+        // always ask this server, and the server-side cache is the single
+        // freshness authority (the plugin invalidates it after every
+        // archive/restore/delete it performs). `x-dsh-inventory-cache`
+        // (hit/stale/miss) and `age` make the window observable without
+        // parsing the body.
+        const served = await service.inventoryCached()
+        writeRawJson(res, 200, served.payload, {
+          'cache-control': 'no-store',
+          'x-dsh-inventory-cache': served.stale ? 'stale' : served.hit ? 'hit' : 'miss',
+          // Whole seconds, per the HTTP `age` header convention (typed as a
+          // string by @types/node, which the wire agrees with).
+          age: String(Math.floor(served.ageMs / 1000)),
+        })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })
       }
@@ -106,7 +140,12 @@ export function makePreviewRoute(service: ArchiveService): WebRoute {
   }
 }
 
-function batchRoute(service: ArchiveService, path: string, run: (body: BatchRequestBody) => Promise<{ results: unknown; freedBytes: number }>): WebRoute {
+function batchRoute(
+  service: ArchiveService,
+  path: string,
+  run: (body: BatchRequestBody) => Promise<{ results: unknown; freedBytes: number }>,
+  options: { requireActor?: boolean } = {},
+): WebRoute {
   return {
     kind: 'exact',
     path,
@@ -129,6 +168,13 @@ function batchRoute(service: ArchiveService, path: string, run: (body: BatchRequ
       }
       if (body.ids.length > 20_000) {
         writeJson(res, 413, { ok: false, error: 'too many session ids' })
+        return
+      }
+      // Who ordered this archive must be stated up front (triclass ruling,
+      // 2026-10-29): a missing actor is a caller-fixable 400, mirroring the
+      // seal gate's required-field pattern, never a silent human default.
+      if (options.requireActor === true && body.actor === undefined) {
+        writeJson(res, 400, { ok: false, error: 'actor is required: pass the deciding session id or a channel name (e.g. manual)' })
         return
       }
       try {
@@ -176,7 +222,7 @@ export function makeSealCheckRoute(service: ArchiveService): WebRoute {
         return
       }
       try {
-        const results = service.sealCheck(ids)
+        const results = await service.sealCheck(ids)
         writeJson(res, 200, { results }, { 'cache-control': 'no-store' })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })
@@ -214,6 +260,15 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
         writeJson(res, 413, { ok: false, error: 'too many session ids' })
         return
       }
+      // Identity gate + actor audit trail (triclass ruling, 2026-10-29): the
+      // body names who ordered the archive (400 without it), and the service
+      // refuses — per id, without batch taint — every target that actor's class
+      // may not archive (`identity-denied`), then persists `actor` into the
+      // ledger entry.
+      if (body.actor === undefined) {
+        writeJson(res, 400, { ok: false, error: 'actor is required: pass the deciding session id or a channel name (e.g. manual)' })
+        return
+      }
       const forced = record.force === true
       const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
       if (forced && reason === '') {
@@ -221,7 +276,7 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
         return
       }
       try {
-        const response = await service.archive(body.ids, 'manual', body.currentSessionId, forced ? { force: { reason } } : {})
+        const response = await service.archive(body.ids, 'manual', body.currentSessionId, body.actor, forced ? { force: { reason } } : {})
         writeJson(res, 200, response, { 'cache-control': 'no-store' })
       } catch (error) {
         if (error instanceof BusyError) {

@@ -24,6 +24,7 @@ export type OpReason =
   | 'missing-seam'
   | 'busy'
   | 'seal-required'
+  | 'identity-denied'
   | 'error'
 
 /**
@@ -37,7 +38,12 @@ export type OpReason =
 export type SealVerdict = 'DONE' | 'N_A' | 'UNSEALED' | 'NEUTRAL' | 'LEGACY' | 'UNKNOWN'
 
 /** Machine detail codes an `UNSEALED` verdict may carry (contract C1). */
-export type SealUnsealedDetail = 'sentinel-pending' | 'save-tail-no-sentinel' | 'save-trace-no-sentinel' | 'sentinel-stale'
+export type SealUnsealedDetail =
+  | 'sentinel-pending'
+  | 'save-tail-no-sentinel'
+  | 'save-trace-no-sentinel'
+  | 'sentinel-stale'
+  | 'work-trace-no-sentinel'
 
 /** One row served by `POST /seal-check` (contract C1). */
 export interface SealCheckResult {
@@ -173,6 +179,15 @@ export interface BatchRequestBody {
   readonly ids: readonly string[]
   /** Client-declared current session; the host protects it defensively too. */
   readonly currentSessionId?: string
+  /**
+   * Who ordered this archive: the deciding session id (`session-…`) or a
+   * human channel name (`manual`, …). Required by `POST /archive` (400
+   * without it); the host resolves it against the attention identity table
+   * and refuses ids the actor's class may not archive (triclass decision
+   * table, 2026-10-29 ruling). It is also persisted into the archive ledger
+   * entry as `actor`.
+   */
+  readonly actor?: string
   /**
    * Client-computed expected delete total (direct + descendants). When the
    * host plan disagrees the route answers 409 with the host plan so the UI

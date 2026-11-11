@@ -12,38 +12,40 @@
  * window is short and the owner must invalidate explicitly after it removes
  * session storage itself. Nothing here polls or accumulates: one entry, and a
  * scan is always one call away. The window rule itself lives in
- * {@link TtlMemo}, which the projection-cache index memo shares.
+ * {@link AsyncTtlMemo}, which joins concurrent readers onto one in-flight
+ * scan so a burst of requests never fans out into competing full-tree walks.
  *
  * @module @linxin666/dsh-session-archive/host/dir-index-cache
  */
 
 import type { SessionDirIndex } from './session-files.ts'
-import { TtlMemo } from './ttl-memo.ts'
+import { AsyncTtlMemo } from './ttl-memo.ts'
 
 /** Collaborators of one cache instance. */
 export interface DirIndexCacheOptions {
   /** How long a scan may be reused, in milliseconds. */
   ttlMs: number
-  /** Performs the real directory scan. */
-  scan: () => SessionDirIndex
+  /** Performs the real directory scan; async so it never blocks the event loop. */
+  scan: () => Promise<SessionDirIndex>
   /** Clock reading; defaults to wall time. Injected for deterministic tests. */
   now?: () => number
 }
 
 /**
  * One-entry, time-bounded memo for the sessions-root directory index. The scan
- * runs at most once per window per instance, and {@link invalidate} forces the
- * next read to rescan (the owner calls it after its own removals).
+ * runs at most once per window per instance (concurrent readers join the
+ * in-flight scan), and {@link invalidate} forces the next read to rescan (the
+ * owner calls it after its own removals).
  */
 export class DirIndexCache {
-  private readonly memo: TtlMemo<SessionDirIndex>
+  private readonly memo: AsyncTtlMemo<SessionDirIndex>
 
   constructor(options: DirIndexCacheOptions) {
-    this.memo = new TtlMemo({ ttlMs: options.ttlMs, load: options.scan, now: options.now })
+    this.memo = new AsyncTtlMemo({ ttlMs: options.ttlMs, load: options.scan, now: options.now })
   }
 
   /** The current index: the retained scan while it is fresh, else a new one. */
-  get(): SessionDirIndex {
+  get(): Promise<SessionDirIndex> {
     return this.memo.get()
   }
 

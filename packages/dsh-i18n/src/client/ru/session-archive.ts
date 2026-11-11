@@ -99,6 +99,8 @@ export const ru: Record<string, string> = {
   'arch.reason.unreadable': 'Данные сессии нечитаемы',
   'arch.reason.missing-seam': 'Текущая среда SDK не поддерживает операцию',
   'arch.reason.busy': 'Выполняется другая операция',
+  'arch.reason.seal-required': 'Сессия не запечатана (проверка сентинела не пройдена); пропущена воротами архивации с проверкой запечатания',
+  'arch.reason.identity-denied': 'Идентичность вызывающего не вправе архивировать эту сессию (таблица решений)',
   'arch.reason.error': 'Операция не удалась',
   'arch.preview.title': 'Просмотр сессии',
   'arch.preview.messages': 'Всего сообщений: {n}',

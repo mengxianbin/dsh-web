@@ -9,8 +9,12 @@
  */
 
 import { afterAll, describe, expect, it } from 'vitest'
+import { execFileSync } from 'node:child_process'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService } from '../src/host/janitor.ts'
@@ -48,6 +52,40 @@ const SAVE_DONE = '## ✅ 执行完成\nSAVE_STATUS=DONE'
 const SAVE_TAIL = '## ✅ 执行完成\n保存状态：执行中，稍后继续'
 const CLEAN = '普通回复，无任何保存信号。'
 
+interface EndorsedRepo {
+  dir: string
+  hash: string
+}
+
+let repoCache: EndorsedRepo | undefined
+
+/** A real git repo whose single commit sits behind an origin remote-tracking ref (hermetic endorsement fixture). */
+function endorsedRepo(): EndorsedRepo {
+  if (repoCache !== undefined) return repoCache
+  const dir = mkdtempSync(join(tmpdir(), 'seal-gate-endorse-'))
+  const run = (args: string[]): string => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
+  run(['init', '-q'])
+  run(['config', 'user.email', 'seal@test'])
+  run(['config', 'user.name', 'seal'])
+  writeFileSync(join(dir, 'seed.txt'), 'seed\n')
+  run(['add', '.'])
+  run(['commit', '-q', '-m', 'seed'])
+  const hash = run(['rev-parse', 'HEAD']).trim()
+  run(['update-ref', 'refs/remotes/origin/main', hash])
+  repoCache = { dir, hash }
+  return repoCache
+}
+
+/** Transcript root event carrying the session cwd — the real transcript shape. */
+function sessionRoot(id: string, cwd: string): Record<string, unknown> {
+  return { type: 'session', version: 4, id, cwd }
+}
+
+/** An endorsed DONE report: 落点头 hash earlier in the message, the endorsement line last. */
+function endorsedDone(hash: string): string {
+  return `落点头 \`${hash}\` 已推 origin。\n\nSAVE_STATUS=DONE commits=1/1 pushedBranch=1/1 merged=1/1 pushedMain=1/1 auditCleaned=yes dirty=0`
+}
+
 /** A fake host with one session per seal shape: green / stale / red / unknown / neutral. */
 function gateHost(): FakeHost {
   const ids = ['session-green', 'session-stale', 'session-red', 'session-unknown', 'session-neutral']
@@ -55,7 +93,8 @@ function gateHost(): FakeHost {
     feedItems: ids.map((sessionId) => ({ sessionId, updatedAt: 1 })),
     persistedIds: ids,
   })
-  writeTranscript(host, 'session-green', [assistantMsg(SAVE_DONE)])
+  const repo = endorsedRepo()
+  writeTranscript(host, 'session-green', [sessionRoot('session-green', repo.dir), assistantMsg(endorsedDone(repo.hash))])
   writeTranscript(host, 'session-stale', [
     userMsg('save'),
     assistantMsg(SAVE_DONE),
@@ -129,7 +168,7 @@ describe('POST /archive — gate path 1: green passes', () => {
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
     expect(host.registry.archivedSessionIds).toEqual(['session-green'])
@@ -144,13 +183,14 @@ describe('POST /archive — gate path 2: sentinel-stale passes with accounting',
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-stale', status: 'ok' }])
     expect(service.ledgerSnapshot().entries['session-stale']).toEqual({
       archivedAt: expect.any(Number),
       source: 'manual',
       seal: 'stale',
+      actor: 'manual',
     })
   })
 })
@@ -163,6 +203,7 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-green', 'session-red', 'session-unknown'],
+      actor: 'manual',
     })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
@@ -182,7 +223,7 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'] })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-pending', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'sentinel-pending' } },
@@ -199,6 +240,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-red'],
+      actor: 'manual',
       force: true,
       reason: '板行[x] git 收口证据，任务书授权强归',
     })
@@ -209,6 +251,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
       source: 'override',
       reason: '板行[x] git 收口证据，任务书授权强归',
       seal: 'UNSEALED:save-tail-no-sentinel',
+      actor: 'manual',
     })
   })
 
@@ -219,6 +262,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
       ids: ['session-green', 'session-stale', 'session-red'],
+      actor: 'manual',
       force: true,
       reason: 'taskbot:taskRef=板行#anchor 板行[x] 受命收口',
     })
@@ -248,10 +292,35 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], force: 'yes', reason: 'not-boolean' })
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], actor: 'manual', force: 'yes', reason: 'not-boolean' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' } },
+    ])
+    expect(host.registry.archivedSessionIds).toEqual([])
+  })
+})
+
+describe('endorsement downgrade at the endpoints (seal-noendorse-green-1106)', () => {
+  it('operator reads a bare DONE as non-green at seal-check and the archive gate refuses it', async () => {
+    // Given a last assistant message asserting DONE with no commits= endorsement
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-bare', updatedAt: 1 }], persistedIds: ['session-bare'] })
+    writeTranscript(host, 'session-bare', [assistantMsg('收口完成。\n\nSAVE_STATUS=DONE')])
+    const service = gateService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+
+    // When the operator reads the seal over HTTP
+    const check = await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'] })
+    // Then the row is non-green with the scanner's no-endorsement reading
+    expect(check.status).toBe(200)
+    expect(check.body.results).toEqual([{ id: 'session-bare', verdict: 'UNSEALED', detail: 'no-endorsement' }])
+
+    // And the archive gate asks for confirmation instead of passing it free
+    const archived = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-bare'], actor: 'manual' })
+    expect(archived.status).toBe(200)
+    expect(archived.body.results).toEqual([
+      { id: 'session-bare', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'no-endorsement' } },
     ])
     expect(host.registry.archivedSessionIds).toEqual([])
   })
