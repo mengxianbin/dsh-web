@@ -1,0 +1,13 @@
+# Bundle patch for the dsh-win-bash plugin: one host-half row that registers the
+# win_bash tool. The row id stays in this package's own namespace (the loader
+# keeps ONE entry per id across every bundle, later wins, and a shared id is a
+# silent loss), and the row's name is exactly the package name.
+#
+# The row is disabled on every non-Windows host: the vendored payload is a
+# Windows x64 MSYS2 build and the tool refuses to fall back to a bash found on
+# PATH, so on POSIX the row mounts nothing and costs nothing. The loader
+# evaluates the !!js tag in the host process.
+- insert:
+    - id: dsh-win-bash
+      name: '@linxin666/dsh-win-bash'
+      disabled: !!js process.platform !== 'win32'
