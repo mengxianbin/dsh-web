@@ -33,7 +33,7 @@
  */
 
 import { fileURLToPath } from 'node:url'
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { AgentPresetRegistry, PresetDefinition } from '@deepseek-ai/dsh-agent-preset-registry'
 // Type-only: pulls the `ctx.agentPresets` Context merge and the registry types.
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
@@ -64,6 +64,17 @@ export const PRESENTATION_OPTIONS = ['ptc', 'native'] as const
 
 /** One wire presentation. */
 export type Presentation = (typeof PRESENTATION_OPTIONS)[number]
+
+/**
+ * Stable reference to a volatile config field — cosmokit's `Volatile` shape
+ * (`get()` returns the committed snapshot). Declared locally because cordis
+ * only re-exports it from 4.1.0; this package pins cordis 4.0.2, the peer
+ * floor of @deepseek-ai/dsh-client-ui-slots 0.1.x that keeps its module
+ * augmentation on the single hoisted slots instance the locales read.
+ */
+export interface Volatile<T> {
+  get(): T
+}
 
 /**
  * One activation field as the Host hands it over: a stable reference whose

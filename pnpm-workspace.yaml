@@ -11,6 +11,16 @@ autoInstallPeers: false
 # 链接到 workspace 工程（版本同源），profile 里的 git 安装仍走 npm registry。
 linkWorkspacePackages: true
 
+# 全家桶收敛 @deepseek-ai/schemastery 单版本：rc.5 系（ui-settings 等）钉
+# ~3.18.5、caret 系解析到 3.19.0，双实例的 declare global 互染会让 dsh-usage
+# 的 Config 声明发射报 TS2883/TS2742（linked-build 连败根因之一）。
+# cordis 同理收敛 4.0.2：caret（^4.0.2）会解析到 4.1.0，peer 变体会让
+# ui-slots 落成与 hidden hoist 不同的物理实例——各包 declare module 互看不见
+# （LocaleNamespaceMap 键不可见 TS2345）。
+overrides:
+  '@deepseek-ai/schemastery': 3.19.0
+  '@deepseek-ai/cordis': 4.0.2
+
 allowBuilds:
   # The cloudflared postinstall downloads the platform binary (the auto-tunnel
   # feature ships its own tunnel client — users install nothing).
