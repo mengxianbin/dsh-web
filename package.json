@@ -19,6 +19,8 @@
     "build": "node scripts/build-stamp.mjs run -- \"pnpm -r build\"",
     "dev:watch": "node scripts/dev-watch.mjs",
     "test": "pnpm -r test",
+    "heavy:build": "node \"D:/tech/deepseek-harness/node_modules/tsx/dist/cli.mjs\" \"D:/tech/deepseek-harness/scripts/heavy-io-gate.ts\" \"pnpm build\"",
+    "heavy:test": "node \"D:/tech/deepseek-harness/node_modules/tsx/dist/cli.mjs\" \"D:/tech/deepseek-harness/scripts/heavy-io-gate.ts\" \"pnpm test\"",
     "test:desktop": "node --test desktop/tests/*.test.mjs",
     "typecheck": "pnpm -r typecheck",
     "aggregate:check": "node scripts/aggregate.mjs --check",
