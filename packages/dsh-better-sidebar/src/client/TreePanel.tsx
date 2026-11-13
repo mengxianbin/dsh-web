@@ -27,7 +27,6 @@ import type { BetterSidebarService } from './service.ts'
 import { ancestorDirs } from './state.ts'
 import { FileTree } from './FileTree.tsx'
 import { DEFAULT_FILE_TREE_SORT, type FileTreeSort } from './file-tree-sort.ts'
-import { IconUploadOutline16 } from './icons.tsx'
 import type { OpenInApp } from './open-in-app.ts'
 import type { OpenWithTarget } from './open-with.ts'
 import { t } from './locales.ts'
@@ -301,18 +300,7 @@ export function TreePanel(props: {
             />
           )}
         />
-        <IconButton
-          label={t('uploadFiles')}
-          icon={<IconUploadOutline16 size={14} />}
-          disabled={busy}
-          onClick={() => { fileInputRef.current?.click() }}
-        />
-        <IconButton
-          label={t('uploadFolder')}
-          icon={<IconFolderOpenRegular size={14} />}
-          disabled={busy}
-          onClick={() => { folderInputRef.current?.click() }}
-        />
+        {/* PATCHED-20261113-②（复打 PATCHED-20261023）：面板头「上传文件」「上传文件夹」两键整删——隐藏 input 与拖拽上传通道保留 */}
         <input
           ref={fileInputRef}
           type="file"

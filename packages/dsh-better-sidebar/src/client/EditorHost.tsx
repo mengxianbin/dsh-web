@@ -25,19 +25,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createElement } from 'react'
 import clsx from 'clsx'
-import { IconCheckOutlineRegular, IconFolderOpenRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconCheckOutlineRegular, IconChevronDownOutlineRegular, IconFolderOpenRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { VscLinkExternal } from 'react-icons/vsc'
 import type { Context } from '../context-types.ts'
 import { api, mediaUrl, type SessionScope } from './api.ts'
 import { BinaryDownload } from './binary-download.tsx'
 import { planFirstMatch, planFsReadOutcome, type EditorLoadAction } from './editor-load.ts'
 import { clearEditorDirty, setEditorDirty } from './editor-dirty.ts'
-import { baseName } from './FileTree.tsx'
+import { AppGlyph, baseName } from './FileTree.tsx'
 import { createFrameBatcher } from './frame-batcher.ts'
 import { openClaimedNativeFile, openSidebarFile } from './sidebar-file.ts'
 import { openWithSshActive, openWithUrl, parseOpenWithConfig, resolveOpenWithTargets } from './open-with.ts'
 import { fileOpKey, useFileOpStream } from './ops-stream.ts'
 import { updatePluginSettings } from './plugin-settings.ts'
-import { createOpenInApp } from './open-in-app.ts'
+import { createOpenInApp, type OpenInAppEntry } from './open-in-app.ts'
 import { TreePanel } from './TreePanel.tsx'
 import { t } from './locales.ts'
 import { relativeTo } from './paths.ts'
@@ -192,6 +193,30 @@ export function EditorHost(props: {
   // target list, a URL vocabulary or a spawn route — the host reports which
   // applications are actually installed for THIS path.
   const openInApp = useMemo(() => createOpenInApp(ctx), [ctx])
+  // PATCHED-20261113-④（复打 PATCHED-20261023-④，含⑤ 面板宽度）：编辑器头「打开应用」控件组状态——失败红字 + 在应用中打开下拉。
+  // 两 effect（账本④ 原语义）：换 tab/path 自动关菜单；loading 态拉取宿主
+  // OS handler 列表（isDefault 项过滤——默认已有主键直达，与右键子菜单同语义）。
+  const [openAppError, setOpenAppError] = useState<string | null>(null)
+  const [appMenu, setAppMenu] = useState<'closed' | 'loading' | 'empty' | OpenInAppEntry[]>(() => 'closed')
+  useEffect(() => {
+    setAppMenu('closed')
+  }, [tab.id, path])
+  useEffect(() => {
+    if (appMenu !== 'loading') return
+    let alive = true
+    void openInApp.fileApps(path).then(entries => {
+      if (!alive) return
+      if (entries === null) {
+        setAppMenu('empty')
+        return
+      }
+      const rows = entries.filter(entry => !entry.isDefault)
+      setAppMenu(rows.length > 0 ? rows : 'empty')
+    })
+    return () => {
+      alive = false
+    }
+  }, [appMenu, openInApp, path])
   // The plugin's own service (native-tab opens, "open to the side"): absent in
   // stripped-down hosts, where every flow degrades to the bottom workbench.
   const service = ctx.get('betterSidebar')
@@ -537,7 +562,6 @@ export function EditorHost(props: {
 
   const treeOpen = treeOpenOf(tab)
   /** Persist the panel flag on the tab (survives reloads with the layout). */
-  const toggleTree = (): void => { patchMeta(ctx, tab, scope.sessionId, { treeOpen: !treeOpen }) }
   const saveLabel = toolbar === null ? ''
     : toolbar.saveState === 'saving' ? t('loading')
       : toolbar.saveState === 'saved' ? t('saved')
@@ -636,16 +660,123 @@ export function EditorHost(props: {
             <IconRefreshOutlineRegular size={14} />
           </button>
         )}
-        <button
-          type="button"
-          className={clsx(css.iconButton, treeOpen && css.editorTreeToggleActive)}
-          aria-label={t('editorTreeToggle')}
-          title={t('editorTreeToggle')}
-          aria-pressed={treeOpen}
-          onClick={toggleTree}
-        >
-          <IconFolderOpenRegular size={14} />
-        </button>
+        {/* PATCHED-20261113-①（复打 PATCHED-20261022）：编辑器头「文件树面板」开关按钮整删（resize 分隔条 aria-label 保留） */}
+        {toolbar !== null && !isDir && (
+          <>
+            <span style={{ position: 'relative' }}>
+              <button
+                type="button"
+                className={css.iconButton}
+                aria-label={t('openInAppDefault')}
+                title={t('openInAppDefault')}
+                onClick={() => {
+                  void openInApp.open(path).then(ok => {
+                    setOpenAppError(ok ? null : t('openInAppFailed', { path }))
+                  })
+                }}
+              >
+                <VscLinkExternal size={14} />
+              </button>
+              <button
+                type="button"
+                className={css.iconButton}
+                aria-label={t('openWithMenu')}
+                title={t('openWithMenu')}
+                onClick={() => { setAppMenu(current => (current === 'closed' ? 'loading' : 'closed')) }}
+              >
+                <IconChevronDownOutlineRegular size={14} />
+              </button>
+              {appMenu !== 'closed' && (
+                <>
+                  <div
+                    style={{ position: 'fixed', inset: 0, zIndex: 999 }}
+                    onMouseDown={() => { setAppMenu('closed') }}
+                  />
+                  <div
+                    role="menu"
+                    style={{
+                      position: 'absolute',
+                      top: '100%',
+                      right: 0,
+                      zIndex: 1000,
+                      boxSizing: 'border-box',
+                      width: 300,
+                      maxHeight: '60vh',
+                      overflowY: 'auto',
+                      background: 'var(--dsw-alias-bg-layer-2)',
+                      border: '1px solid var(--dsw-alias-border-l2)',
+                      borderRadius: 8,
+                      boxShadow: 'var(--dsw-shadow-lv3)',
+                      padding: 4,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2,
+                    }}
+                  >
+                    {appMenu === 'loading' && (
+                      <div style={{ padding: '6px 10px', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>
+                        {t('loading')}
+                      </div>
+                    )}
+                    {appMenu === 'empty' && (
+                      <div style={{ padding: '6px 10px', color: 'var(--dsw-alias-label-tertiary)', fontSize: 12 }}>
+                        {t('openInAppEmpty')}
+                      </div>
+                    )}
+                    {Array.isArray(appMenu) && appMenu.map(entry => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          width: '100%',
+                          minWidth: 0,
+                          padding: '6px 10px',
+                          background: 'transparent',
+                          border: 'none',
+                          borderRadius: 6,
+                          color: 'var(--dsw-alias-label-primary)',
+                          fontSize: 12,
+                          textAlign: 'left',
+                          cursor: 'pointer',
+                        }}
+                        onClick={() => {
+                          setAppMenu('closed')
+                          void openInApp.open(path, entry.id).then(ok => {
+                            setOpenAppError(ok ? null : t('openInAppFailed', { path }))
+                          })
+                        }}
+                      >
+                        <AppGlyph entry={entry} />
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {entry.name}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </span>
+            <button
+              type="button"
+              className={css.iconButton}
+              aria-label={t('revealInFileManager')}
+              title={t('revealInFileManager')}
+              onClick={() => {
+                void openInApp.reveal(path).then(ok => {
+                  setOpenAppError(ok ? null : t('openInAppFailed', { path }))
+                })
+              }}
+            >
+              <IconFolderOpenRegular size={14} />
+            </button>
+            {openAppError !== null && (
+              <span className={clsx(css.editorStatus, css.editorStatusError)}>{openAppError}</span>
+            )}
+          </>
+        )}
       </div>
       <div className={css.editorBody}>
         <div className={css.editorMain}>

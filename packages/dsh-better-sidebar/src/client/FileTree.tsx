@@ -223,7 +223,7 @@ interface RowActions {
 
 /** One open-in-app entry's leading glyph: the host's icon route / data URL,
  *  or a generic mark when the host has no icon for it. */
-function AppGlyph(props: { entry: OpenInAppEntry }): ReactNode {
+export function AppGlyph(props: { entry: OpenInAppEntry }): ReactNode {
   const { icon } = props.entry
   if (icon === null || icon === '') return <IconCodeOutlineRegular size={14} />
   return <img className={css.explorerAppIcon} src={icon} alt="" width={14} height={14} />
