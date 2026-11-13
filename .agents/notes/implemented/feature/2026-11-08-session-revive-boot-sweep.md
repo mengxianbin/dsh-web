@@ -13,7 +13,7 @@ when the session is next resumed (design doc
 listener waits forever and the session stays dead. The 2026-11-08 ruling flips
 the design — 重启要自动复活，并且重启这一次不算额度 — so activation needs an
 active scan for those orphan turns, and that batch of revives must not consume
-the 4h x 4 quota while the breaker, the stagger, the 300k watermark, and the
+the 4h x 4 quota while the breaker, the stagger, the 1M watermark, and the
 wave probe still bound it.
 
 ## Decision
@@ -39,7 +39,7 @@ wave probe still bound it.
   (`turn/start` opens, `turn/end` closes). That is the only source that
   distinguishes an unclosed turn from a committed `interrupted` closer, and it
   folds the last `assistant/message` usage (`inputTokens + cacheReadTokens`)
-  into `policy.recordUsage` so the 300k watermark actually bounds sweep
+  into `policy.recordUsage` so the 1M watermark actually bounds sweep
   revives. An `isAttached` re-check after the read keeps a session a human
   opened mid-sweep from being double-driven.
 - **Attribution is structural, not heuristic**: every in-process stop commits
@@ -50,7 +50,7 @@ wave probe still bound it.
   (参数零改).
 - **`RevivalPolicy.onBootSweep`** (`src/policy.ts`) runs the error-path gates
   minus the quota can: tripped and breaker checks, wall suspension (expired
-  holds fall through exactly like the error path), the 300k watermark, and the
+  holds fall through exactly like the error path), the 1M watermark, and the
   global stagger slot for `plannedAt`; `lastRevivalAt` arms the breaker so a
   sweep revival that dies again inside 10 minutes trips through the normal
   path. It never stamps `quota`, never touches `counters`, and its parks use
@@ -123,7 +123,7 @@ persistence seam failing closed, the attached-race skip, the pre-abort quiet
 stop, and per-session read-failure containment. `tests/policy.spec.ts` grew to
 34 tests with a boot-sweep block covering byte-identical `counters`/`quota` on
 both revive and park, breaker arming plus trip plus stopped re-entry, the whole
-4h x 4 can left for the error path, the 300k watermark park, stagger spacing,
+4h x 4 can left for the error path, the 1M watermark park, stagger spacing,
 and wall-suspension hold/fall-through. The three package gates (typecheck,
 vitest 62 passed, build) are green; no test touches a real session lifecycle,
 so the sandbox rule was never engaged.

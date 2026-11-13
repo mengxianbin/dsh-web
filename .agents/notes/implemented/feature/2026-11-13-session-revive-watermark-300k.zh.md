@@ -8,10 +8,10 @@ Status: implemented
 
 ## Decision
 
-- **`CONTEXT_LIMIT_TOKENS` 从 150_000 移到 300_000**（`src/config.ts:87`），与压缩阈值同水位。闸的语义不变——达到或超过该线即零消耗停靠，低于该线其余闸照常裁决——但这条线现在落在压缩器接手的地方：压缩器处理得动的会话自动叫醒，停靠只拦真正超大（≥300k）的上下文。
+- **`CONTEXT_LIMIT_TOKENS` 从 150_000 移到 300_000**（`src/config.ts`，现位于 :89），与压缩阈值同水位。闸的语义不变——达到或超过该线即零消耗停靠，低于该线其余闸照常裁决——但这条线现在落在压缩器接手的地方：压缩器处理得动的会话自动叫醒，停靠只拦真正超大（当时 ≥300k；该值后于 2026-11-14 由 [水位抬升](2026-11-14-session-revive-watermark-1m.md) 移到 1M，仅对这一个值推翻本裁定）。
 - **这是 §四 裁定参数里唯一移动的一个。** 常量上的 JSDoc 记录了裁定（2026-11-13，用户选「A」）以及原冻结条款为何对这个值不再适用；§四 其余数字（4h × 4 额度、10 分钟断路器、波窗/冷却、错峰地板）原样未动，水位仍是不可配置的可 grep 字面量。
 - **一个常量、两处检查点**：boot sweep（`src/policy.ts:436`）与错误路径（`src/policy.ts:690`）都读 `CONTEXT_LIMIT_TOKENS`，一处改动两处生效——重启复活与错误复活之间不会出现行为分叉。
-- **文档与测试随值走**：README 双语与 `package.json` description 都写 300k，README 配对哈希重录，水位测试的边界改从 `CONTEXT_LIMIT_TOKENS` 派生、不再硬编码 160k/140k——下次改值只动一行。
+- **文档与测试随值走**：README 双语与 `package.json` description 当时都写 300k（自 [2026-11-14 抬升](2026-11-14-session-revive-watermark-1m.md) 起写 1M），README 配对哈希重录，水位测试的边界改从 `CONTEXT_LIMIT_TOKENS` 派生、不再硬编码 160k/140k——下次改值只动一行。
 - **m-note 设计档承载裁定**：`content/tech/ai/dsh/session-auto-revival-design-1102.md` §4.2 同批加 2026-11-13 改判随注；本改动是一次裁定的 dsh-web 半边。
 
 ## Alternatives considered
@@ -22,10 +22,10 @@ Status: implemented
 
 ## Consequences
 
-- 150k–300k 之间的会话在每条复活路径（boot sweep、错误路径、撞墙释放）上改为自动叫醒、不再停靠；停靠集合缩小到只剩 ≥300k 上下文（迄今未观测到——最大 299,772）。
+- 150k–300k 之间的会话在每条复活路径（boot sweep、错误路径、撞墙释放）上改为自动叫醒、不再停靠；停靠集合缩小到只剩 ≥300k 上下文（迄今未观测到——最大 299,772；该线本身后于 2026-11-14 移到 1M，见 [水位抬升](2026-11-14-session-revive-watermark-1m.md)）。
 - 只有用户重启 dsh web 宿主后才生效：插件 `lib/` 已重建，但运行中的宿主在重启前继续服务旧 bundle——按仓规重启归用户，AI 从不发起。
 - 其余闸（额度、断路、波、错峰）与零消耗停靠契约不变；状态端点与日志行形状不变，消费方不受影响。
-- 重启后行为判据：下次 boot sweep 的停靠数应从 8–11 掉向 0，任何残留停靠必须带 `contextTokens ≥ 300000`。
+- 重启后行为判据：下次 boot sweep 的停靠数应从 8–11 掉向 0，任何残留停靠必须带 `contextTokens ≥ 300000`（自 [2026-11-14 抬升](2026-11-14-session-revive-watermark-1m.md) 起阈值为 1000000）。
 
 ## Testing
 

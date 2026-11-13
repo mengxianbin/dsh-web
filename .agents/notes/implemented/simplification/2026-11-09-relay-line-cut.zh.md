@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-从包里移除预留的 relay 线。`RevivalPolicy` 删掉 `relayOf` 映射、`bindRelay` 与 `chainIdOf`；额度链坍缩到会话 id（`chainId` 保留为记录与快照的字段名，恒等于会话 id）。`forget` 无条件删除会话自己的额度罐，因为链随会话。波释放测试改为填被挂起会话自己的罐，不再借源链；`reserved relay chain field` describe 块随能力一并移除。README 已知限制行改为当前契约：本插件从不把停靠的会话接力到新会话。上下文水位闸未被本砍单触及（当时为 150k；2026-11-13 由 [水位抬升](../feature/2026-11-13-session-revive-watermark-300k.md) 抬到 300k）——被砍的只有 150k 选路分界与 relay 线。
+从包里移除预留的 relay 线。`RevivalPolicy` 删掉 `relayOf` 映射、`bindRelay` 与 `chainIdOf`；额度链坍缩到会话 id（`chainId` 保留为记录与快照的字段名，恒等于会话 id）。`forget` 无条件删除会话自己的额度罐，因为链随会话。波释放测试改为填被挂起会话自己的罐，不再借源链；`reserved relay chain field` describe 块随能力一并移除。README 已知限制行改为当前契约：本插件从不把停靠的会话接力到新会话。上下文水位闸未被本砍单触及（当时为 150k；2026-11-13 由 [水位抬升](../feature/2026-11-13-session-revive-watermark-300k.md) 抬到 300k，2026-11-14 再由 [水位抬升](../feature/2026-11-14-session-revive-watermark-1m.md) 抬到 1M）——被砍的只有 150k 选路分界与 relay 线。
 
 ## Alternatives considered
 

@@ -24,7 +24,7 @@ sessions were classified `other`: observed, skipped, never continued.
 
 - **Both codes move from `WALL_CODES` to `REVIVE_CODES`** in `src/config.ts`
   (design §4.2 amendment, 拍板⑬). They consume the same 4h x 4 can, breaker,
-  waves, stagger, and 300k watermark as network deaths; the wall list keeps
+  waves, stagger, and 1M watermark as network deaths; the wall list keeps
   the codes the corpus still measures as non-recoverable.
 - **Message-level refinement before classification**: `refineFailureCode()`
   maps `PI_AI_ERROR` + a message matching `/\bcontent_filter\b/i` to

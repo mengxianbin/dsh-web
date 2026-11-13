@@ -74,17 +74,19 @@ export const STAGGER_DEFAULT_MS = 10_000
 /**
  * Context watermark: at or above this many tokens a session parks, never nudges.
  *
- * Raised from 150_000 to 300_000 on 2026-11-13 (user ruling "A"): the two
- * reasons the 150k line existed are both gone — overflow avoidance is owned
- * by the 300k compaction threshold (thresholdRatio 0.3 of the 1M window),
- * and the >=150k relay routing was retired by the 2026-11-09 relay line cut
- * (dsh-web `736a419d5`). The gate now parks only at or above the compaction
- * threshold, so every session the compactor can handle wakes automatically
- * instead of queueing for a manual continue. This is the one ruled parameter
- * of §四 that moved: the ruling that froze the rest is the same clause, and
- * the new ruling (2026-11-13) supersedes it for this value alone.
+ * Raised from 300_000 to 1_000_000 on 2026-11-14 (user ruling): the 300k line
+ * still parked sessions the compactor handles — the boot sweep on 2026-11-13
+ * 23:56 held a 312,397-token orphan at `context-limit` while its surface was
+ * only ~195k, and the session needed a manual attach to wake. Compaction owns
+ * overflow at 300k (thresholdRatio 0.3 of the 1M window), so at the full 1M
+ * window this line no longer fires in practice and every session the
+ * compactor can handle wakes automatically; the literal stays as the
+ * fail-safe for a genuinely full context. This is the one ruled parameter of
+ * §四 that moved (150k -> 300k on 2026-11-13, -> 1M on 2026-11-14): the
+ * ruling that froze the rest is the same clause, and each new ruling
+ * supersedes it for this value alone.
  */
-export const CONTEXT_LIMIT_TOKENS = 300_000
+export const CONTEXT_LIMIT_TOKENS = 1_000_000
 
 /**
  * Codes whose sessions are revived (design §4.2: 只计可复活类).
