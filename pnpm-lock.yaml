@@ -1512,9 +1512,9 @@ importers:
 
   packages/dsh-usage:
     dependencies:
-      schemastery:
-        specifier: ^3.18.0
-        version: 3.18.0
+      '@deepseek-ai/schemastery':
+        specifier: 3.19.0
+        version: 3.19.0
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.2
@@ -1532,8 +1532,8 @@ importers:
         specifier: ^0.1.2-rc.1
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(react@18.3.1)
       '@deepseek-ai/dsh-client-ui-settings':
-        specifier: ^0.1.2-rc.1
-        version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)
+        specifier: ^0.2.1-rc.3
+        version: 0.2.1-rc.5(@deepseek-ai/cordis@4.0.2)
       '@deepseek-ai/dsh-client-ui-slots':
         specifier: ^0.1.2-rc.1
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)
@@ -1552,9 +1552,6 @@ importers:
       '@deepseek-ai/dsh-settings':
         specifier: ^0.1.2-rc.1
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-brand@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-session@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))))(@deepseek-ai/schemastery@3.19.0)
-      '@linxin666/dsh-pet':
-        specifier: workspace:*
-        version: link:../dsh-pet
       '@testing-library/dom':
         specifier: ^10.4.1
         version: 10.4.1
@@ -1567,6 +1564,9 @@ importers:
       '@types/react':
         specifier: ~18.3.1
         version: 18.3.31
+      '@types/react-dom':
+        specifier: ^18.3.5
+        version: 18.3.7(@types/react@18.3.31)
       jsdom:
         specifier: 29.1.1
         version: 29.1.1

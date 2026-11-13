@@ -3,9 +3,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { once } from 'node:events'
 import type { AddressInfo } from 'node:net'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { emptyTotals, type UsageOverviewView } from '../src/core/types.ts'
+import { emptyTotals, type UsageDayView, type UsageOverviewView } from '../src/core/types.ts'
 import type { UsageService } from '../src/host/usage-service.ts'
-import { makeUsageOverviewRoute, makeUsageRefreshRoute, USAGE_API_PREFIX } from '../src/host/routes.ts'
+import { makeUsageDayRoute, makeUsageOverviewRoute, makeUsageRefreshRoute, USAGE_API_PREFIX } from '../src/host/routes.ts'
+
+/** Host context double: no remote-web-ui pairing service, so the fence is loopback-only. */
+const HOST_CTX = { get: () => undefined } as never
 
 /**
  * Route-surface tests: the loopback fence, the POST-only refresh method
@@ -20,8 +23,14 @@ const OVERVIEW: UsageOverviewView = {
   usage: { today: { date: '2026-08-29', totals: emptyTotals(), providers: [] }, days: [] },
 }
 
-function stubService(overrides: Partial<Pick<UsageService, 'overview' | 'refresh'>> = {}): UsageService {
-  return { overview: () => OVERVIEW, refresh: async () => {}, ...overrides } as unknown as UsageService
+const DAY: UsageDayView = {
+  date: '2026-08-28',
+  totals: { ...emptyTotals(), inputTokens: 120, outputTokens: 30, calls: 2 },
+  providers: [{ provider: 'deepseek', totals: { ...emptyTotals(), inputTokens: 120, outputTokens: 30, calls: 2 }, models: [] }],
+}
+
+function stubService(overrides: Partial<Pick<UsageService, 'overview' | 'day' | 'refresh'>> = {}): UsageService {
+  return { overview: () => OVERVIEW, day: () => DAY, refresh: async () => {}, ...overrides } as unknown as UsageService
 }
 
 let server: Server
@@ -31,8 +40,9 @@ let refreshes = 0
 beforeAll(async () => {
   refreshes = 0
   const routes: WebRoute[] = [
-    makeUsageOverviewRoute(stubService()),
-    makeUsageRefreshRoute(stubService({ refresh: async () => { refreshes += 1 } })),
+    makeUsageOverviewRoute(HOST_CTX, stubService()),
+    makeUsageDayRoute(HOST_CTX, stubService()),
+    makeUsageRefreshRoute(HOST_CTX, stubService({ refresh: async () => { refreshes += 1 } })),
   ]
   server = createServer((req, res) => {
     const pathname = (req.url ?? '').split('?')[0]!
@@ -64,6 +74,25 @@ describe('usage routes', () => {
     expect(await res.json()).toEqual(OVERVIEW)
   })
 
+  it('user gets one retained day served for a date query', async () => {
+    // Given a loopback request for a day the ledger recorded
+    const res = await fetch(url(USAGE_API_PREFIX + '/day?date=2026-08-28'))
+    // When the day route answers
+    // Then the day's per-provider totals come back under the day envelope, uncached
+    expect(res.status).toBe(200)
+    expect(res.headers.get('cache-control')).toBe('no-store')
+    expect(await res.json()).toEqual({ ok: true, day: DAY })
+  })
+
+  it('operator gets 400 for a date query that is not a real local day', async () => {
+    // Given date queries that are a rollover, free text, and missing
+    const queries = ['?date=2026-02-30', '?date=yesterday', '']
+    // When the day route answers each
+    const statuses = await Promise.all(queries.map(async (query) => (await fetch(url(USAGE_API_PREFIX + '/day' + query))).status))
+    // Then all three are refused instead of folding into a bogus day bucket
+    expect(statuses).toEqual([400, 400, 400])
+  })
+
   it('answers 405 when the refresh endpoint is not POSTed', async () => {
     const res = await fetch(url(USAGE_API_PREFIX + '/refresh'))
     expect(res.status).toBe(405)
@@ -78,7 +107,7 @@ describe('usage routes', () => {
   })
 
   it('answers 500 when the refresh cycle fails', async () => {
-    const routes = [makeUsageRefreshRoute(stubService({ refresh: async () => { throw new Error('probe boom') } }))]
+    const routes = [makeUsageRefreshRoute(HOST_CTX, stubService({ refresh: async () => { throw new Error('probe boom') } }))]
     const state = { status: 0, body: '' }
     const res = {
       writeHead: (status: number) => { state.status = status },
@@ -103,13 +132,41 @@ describe('usage routes', () => {
     const lanRequest = { method: 'GET', socket: { remoteAddress: '192.168.1.9' }, headers: { host: '192.168.1.9:3080' } }
 
     const overview = probe()
-    void makeUsageOverviewRoute(stubService()).handler(lanRequest as never, overview.res as never)
+    void makeUsageOverviewRoute(HOST_CTX, stubService()).handler(lanRequest as never, overview.res as never)
     expect(overview.state.status).toBe(403)
     expect(overview.state.body).toContain('loopback-only')
 
     const refresh = probe()
-    void makeUsageRefreshRoute(stubService()).handler({ ...lanRequest, method: 'POST' } as never, refresh.res as never)
+    void makeUsageRefreshRoute(HOST_CTX, stubService()).handler({ ...lanRequest, method: 'POST' } as never, refresh.res as never)
     expect(refresh.state.status).toBe(403)
+
+    const day = probe()
+    void makeUsageDayRoute(HOST_CTX, stubService()).handler({ ...lanRequest, url: '/api/dsh-usage/day?date=2026-08-28' } as never, day.res as never)
+    expect(day.state.status).toBe(403)
+    expect(day.state.body).toContain('loopback-only')
+  })
+
+  it('admits a paired LAN device through the family pairing fence (issue #1592)', () => {
+    const state = { status: 0, body: '' }
+    const res = {
+      writeHead: (code: number) => { state.status = code },
+      end: (chunk?: string) => { state.body = chunk ?? '' },
+    }
+    // remote-web-ui exposes ctx.remoteWebUiPairing; a paired cookie passes the
+    // shared fence, an unpaired LAN request is still refused.
+    const paired = { get: (name: string, strict?: boolean) => (name === 'remoteWebUiPairing' ? { isPairedDevice: () => true } : undefined) } as never
+    const request = { method: 'GET', socket: { remoteAddress: '192.168.1.9' }, headers: { host: '192.168.1.9:3080' } }
+    void makeUsageOverviewRoute(paired, stubService()).handler(request as never, res as never)
+    expect(state.status).toBe(200)
+
+    const unpaired = { get: (name: string) => (name === 'remoteWebUiPairing' ? { isPairedDevice: () => false } : undefined) } as never
+    const refused = { status: 0, body: '' }
+    void makeUsageOverviewRoute(unpaired, stubService()).handler(request as never, {
+      writeHead: (code: number) => { refused.status = code },
+      end: (chunk?: string) => { refused.body = chunk ?? '' },
+    } as never)
+    expect(refused.status).toBe(403)
+    expect(refused.body).toContain('loopback-only')
   })
 
   it('fences cross-site browser requests even from a loopback socket', () => {
@@ -123,7 +180,7 @@ describe('usage routes', () => {
       socket: { remoteAddress: '127.0.0.1' },
       headers: { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' },
     }
-    void makeUsageOverviewRoute(stubService()).handler(request as never, res as never)
+    void makeUsageOverviewRoute(HOST_CTX, stubService()).handler(request as never, res as never)
     expect(state.status).toBe(403)
   })
 })
