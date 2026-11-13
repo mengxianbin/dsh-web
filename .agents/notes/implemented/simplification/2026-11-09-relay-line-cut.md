@@ -8,7 +8,7 @@ The first cut of `dsh-session-revive` reserved a relay line: `RevivalPolicy.bind
 
 ## Decision
 
-Remove the reserved relay line from the package. `RevivalPolicy` loses the `relayOf` map, `bindRelay`, and `chainIdOf`; quota chains collapse onto the session id (`chainId` remains the record and snapshot field name, now always equal to the session id). `forget` deletes the session's can unconditionally because chains are session-scoped. The wave-release test now fills the held session's own can instead of borrowing an origin chain, and the `reserved relay chain field` describe block leaves with the capability. The README known-limitation line states the current contract: this plugin never relays a parked session to a fresh body. The 150k context watermark gate is untouched — only the 150k routing split and the relay line were cut.
+Remove the reserved relay line from the package. `RevivalPolicy` loses the `relayOf` map, `bindRelay`, and `chainIdOf`; quota chains collapse onto the session id (`chainId` remains the record and snapshot field name, now always equal to the session id). `forget` deletes the session's can unconditionally because chains are session-scoped. The wave-release test now fills the held session's own can instead of borrowing an origin chain, and the `reserved relay chain field` describe block leaves with the capability. The README known-limitation line states the current contract: this plugin never relays a parked session to a fresh body. The context watermark gate is untouched by this cut (150k at the time; raised to 300k on 2026-11-13 by the [watermark raise](../feature/2026-11-13-session-revive-watermark-300k.md)) — only the 150k routing split and the relay line were cut.
 
 ## Alternatives considered
 

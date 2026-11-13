@@ -71,8 +71,20 @@ export const WAVE_COOLDOWN_MS = 5 * 60 * 1000
 export const STAGGER_MIN_MS = 10_000
 /** Default revival stagger (design §四: 间隔可配，初值 10s). */
 export const STAGGER_DEFAULT_MS = 10_000
-/** Context watermark: at or above this many tokens a session parks, never nudges. */
-export const CONTEXT_LIMIT_TOKENS = 150_000
+/**
+ * Context watermark: at or above this many tokens a session parks, never nudges.
+ *
+ * Raised from 150_000 to 300_000 on 2026-11-13 (user ruling "A"): the two
+ * reasons the 150k line existed are both gone — overflow avoidance is owned
+ * by the 300k compaction threshold (thresholdRatio 0.3 of the 1M window),
+ * and the >=150k relay routing was retired by the 2026-11-09 relay line cut
+ * (dsh-web `736a419d5`). The gate now parks only at or above the compaction
+ * threshold, so every session the compactor can handle wakes automatically
+ * instead of queueing for a manual continue. This is the one ruled parameter
+ * of §四 that moved: the ruling that froze the rest is the same clause, and
+ * the new ruling (2026-11-13) supersedes it for this value alone.
+ */
+export const CONTEXT_LIMIT_TOKENS = 300_000
 
 /**
  * Codes whose sessions are revived (design §4.2: 只计可复活类).

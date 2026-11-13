@@ -21,7 +21,7 @@ harness 根本不产出 `content_filter` 这个失败码——`classifyPiAiError
 
 - **两码从 `WALL_CODES` 移入 `REVIVE_CODES`**（`src/config.ts`，设计 §4.2
   修订，拍板⑬）。它们与网络死因共用同一条 4h x 4 额度、断路器、波、错峰与
-  150k 水位；撞墙名单保留语料实测仍不可恢复的码。
+  300k 水位；撞墙名单保留语料实测仍不可恢复的码。
 - **分类前做消息级精化**：`refineFailureCode()` 把 `PI_AI_ERROR` + 消息命中
   `/\bcontent_filter\b/i` 映射为 `content_filter`，其余码原样通过；
   `src/index.ts` 把精化后的码喂进 `policy.onError`。范围刻意只限这一个兜底桶
