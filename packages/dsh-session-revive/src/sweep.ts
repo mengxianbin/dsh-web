@@ -123,7 +123,7 @@ export interface SweepScan {
  *   them (no synthetic closers — that is what distinguishes an orphan from a
  *   session already resumed after an interruption).
  * @returns whether the log ends inside a turn, plus the last observed context
- *   size for the 150k watermark gate.
+ *   size for the 300k watermark gate.
  */
 export function scanOpenTurn(events: readonly SessionEvent[]): SweepScan {
   let open = false

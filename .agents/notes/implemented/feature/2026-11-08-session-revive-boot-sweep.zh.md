@@ -11,7 +11,7 @@ Status: implemented
 `agent-loop` 的 `resumeWith`）：干坐着的被掐会话一个事件都不发，监听永远
 等不到，会话就一直死着。2026-11-08 裁定翻转了设计——重启要自动复活，并且
 重启这一次不算额度——所以激活时需要一次对孤儿轮的主动扫描，且这批复活不消耗
-4h x 4 额度，同时仍受断路器、错峰、150k 水位与同因探针约束。
+4h x 4 额度，同时仍受断路器、错峰、300k 水位与同因探针约束。
 
 ## Decision
 
@@ -32,7 +32,7 @@ Status: implemented
   `handle.read()` 给出未平衡事件流，在这里前向配平（`turn/start` 开、
   `turn/end` 合）。这是唯一能区分「未闭合 turn」与「已提交 interrupted
   closer」的来源；读取同时把最后一条 `assistant/message` 的 usage
-  （`inputTokens + cacheReadTokens`）折进 `policy.recordUsage`，让 150k
+  （`inputTokens + cacheReadTokens`）折进 `policy.recordUsage`，让 300k
   水位真正约束 sweep 复活。读完后的 `isAttached` 复查保证 sweep 途中被人
   打开的会话不会被二次驱动。
 - **归因是结构事实、不是启发式**：所有进程内停轮都会提交 `turn/end`（人为
@@ -41,7 +41,7 @@ Status: implemented
   中间只可能由进程中途死亡造成——即重启。不引入任何时间窗（参数零改）。
 - **`RevivalPolicy.onBootSweep`**（`src/policy.ts`）走错误路径的闸、只去掉
   额度罐：tripped 与断路器检查、撞墙挂起（过期挂起与错误路径同样放行）、
-  150k 水位、全局错峰槽决定 `plannedAt`；写 `lastRevivalAt` 武装断路器，
+  300k 水位、全局错峰槽决定 `plannedAt`；写 `lastRevivalAt` 武装断路器，
   sweep 复活 10 分钟内再死会经正常路径跳闸。它不盖额度戳、不碰
   `counters`，停靠走 `sweepSkip` 而非 `skipRecord`，所以 status 的
   `counters`/`quota` 逐字节不变（拍板⑪ status 零增）——决策行本身就是留证。
@@ -96,6 +96,6 @@ Status: implemented
 跳过、预中止静默退出、单会话读失败不弃整轮。`tests/policy.spec.ts` 增至
 34 个测试，boot-sweep 组覆盖 revive 与停靠两种情况下 `counters`/`quota`
 逐字节不变、断路器武装加跳闸加停用后再入、整个 4h x 4 罐留给错误路径、
-150k 水位停靠、错峰间距、撞墙挂起的保持与过期放行。三门（typecheck、
+300k 水位停靠、错峰间距、撞墙挂起的保持与过期放行。三门（typecheck、
 vitest 62 通过、build）全绿；没有任何测试触碰真实会话生命周期，沙箱规则
 未被触发。

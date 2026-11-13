@@ -1,7 +1,7 @@
 {
   "name": "dsh-session-revive",
   "version": "0.1.0",
-  "description": "Shadow-first automatic session revival for DSH Web: observes turn/end errors with a TRANSPORT or TIMEOUT code, applies the ruled per-session 4h x 4 revival quota, a 10-minute circuit breaker, same-cause wave holds and the 150k context watermark, and records every decision as a structured log. Shadow mode (the default) acts on nothing. Host-side only, no npm release — install with `dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive`.",
+  "description": "Shadow-first automatic session revival for DSH Web: observes turn/end errors with a TRANSPORT or TIMEOUT code, applies the ruled per-session 4h x 4 revival quota, a 10-minute circuit breaker, same-cause wave holds and the 300k context watermark, and records every decision as a structured log. Shadow mode (the default) acts on nothing. Host-side only, no npm release — install with `dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive`.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

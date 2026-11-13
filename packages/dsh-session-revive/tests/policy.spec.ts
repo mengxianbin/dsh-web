@@ -272,31 +272,31 @@ describe('same-cause wave probe', () => {
   })
 })
 
-describe('150k context watermark', () => {
+describe('300k context watermark', () => {
   it('parks at or above the limit with evidence and revives below it', () => {
     const parked = policy()
-    parked.recordUsage('big', 160_000)
+    parked.recordUsage('big', CONTEXT_LIMIT_TOKENS)
     expect(lastDecision(parked.onError({ sessionId: 'big', code: 'TRANSPORT', at: T0 }))).toMatchObject({
       action: 'skip',
       reason: 'context-limit',
-      contextTokens: 160_000,
+      contextTokens: CONTEXT_LIMIT_TOKENS,
       quotaUsed: 0,
     })
     const allowed = policy()
-    allowed.recordUsage('ok', 140_000)
+    allowed.recordUsage('ok', CONTEXT_LIMIT_TOKENS - 10_000)
     expect(lastDecision(allowed.onError({ sessionId: 'ok', code: 'TRANSPORT', at: T0 }))).toMatchObject({
       action: 'revive',
-      contextTokens: 140_000,
+      contextTokens: CONTEXT_LIMIT_TOKENS - 10_000,
     })
   })
 
   it('folds the latest usage (shrink un-parks) and leaves an unread watermark open', () => {
     const p = policy()
-    p.recordUsage('shrunk', 160_000)
-    p.recordUsage('shrunk', 149_999)
+    p.recordUsage('shrunk', CONTEXT_LIMIT_TOKENS)
+    p.recordUsage('shrunk', CONTEXT_LIMIT_TOKENS - 1)
     expect(lastDecision(p.onError({ sessionId: 'shrunk', code: 'TRANSPORT', at: T0 }))).toMatchObject({
       action: 'revive',
-      contextTokens: 149_999,
+      contextTokens: CONTEXT_LIMIT_TOKENS - 1,
     })
     // 16 min later the first error has aged out of the wave window, so the
     // second session decides on its own merits (unread watermark: no boundary).
@@ -521,15 +521,15 @@ describe('墙随路由走: a model/selection releases a wall suspension (拍板�
     expect(snap.quota).toContainEqual({ chainId: 'A', used: 1 }) // no second stamp
   })
 
-  it('150k 水位照旧: the release parks at the watermark instead of nudging', () => {
+  it('300k 水位照旧: the release parks at the watermark instead of nudging', () => {
     const p = policy()
-    p.recordUsage('A', 200_000)
+    p.recordUsage('A', CONTEXT_LIMIT_TOKENS)
     wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 })
     const records = p.onModelSelection({ sessionId: 'A', provider: 'mimo', at: T0 + 30_000 })
     expect(lastDecision(records)).toMatchObject({
       action: 'skip',
       reason: 'context-limit',
-      contextTokens: 200_000,
+      contextTokens: CONTEXT_LIMIT_TOKENS,
     })
     expect(p.snapshot(T0 + 30_000).suspended).toBe(0)
     expect(p.snapshot(T0 + 30_000).quota).toEqual([])
@@ -667,7 +667,7 @@ describe('boot sweep (拍板⑪ restart revival, zero quota)', () => {
     })
   })
 
-  it('the 150k watermark parks an oversized orphan with evidence and zero account movement', () => {
+  it('the 300k watermark parks an oversized orphan with evidence and zero account movement', () => {
     const p = policy()
     p.recordUsage('S', CONTEXT_LIMIT_TOKENS)
     const before = p.snapshot(T0)

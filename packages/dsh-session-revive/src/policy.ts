@@ -166,7 +166,7 @@ interface WaveState {
 
 /**
  * Pure revival policy: quota window, wall suspension, circuit breaker,
- * same-cause waves with cooldown release, the 150k watermark, and the global
+ * same-cause waves with cooldown release, the 300k watermark, and the global
  * stagger slot. Time is explicit — every entry point takes the event
  * timestamp — so tests drive it with a fake clock and the host only supplies
  * `event.time` / `Date.now()`. State updates are identical in shadow and
@@ -321,7 +321,7 @@ export class RevivalPolicy {
    * session whose provider left the walled route has lost the wall's subject —
    * the hold releases and the session rejoins the normal revival flow,
    * consuming exactly one quota stamp through the unchanged gates (stagger,
-   * breaker, 150k watermark; a new route that also walls is capped by the
+   * breaker, 300k watermark; a new route that also walls is capped by the
    * quota can + the 10-minute breaker). A selection that keeps the provider —
    * or a wall whose route was never observed (fail closed) — keeps the
    * zero-consumption hold (§4.2 row 2 as-is); sessions that are not
@@ -373,7 +373,7 @@ export class RevivalPolicy {
 
   /**
    * One confirmed boot-sweep orphan (拍板⑪ 重启自动复活 + 重启这一次不算额度):
-   * the same gates as a fresh revival — breaker, wall suspension, the 150k
+   * the same gates as a fresh revival — breaker, wall suspension, the 300k
    * watermark, and the global stagger slot — but the quota can is neither
    * read nor stamped and the ruled account's `counters` stay untouched, so a
    * sweep leaves the status snapshot byte-identical (status counters/quota
@@ -430,7 +430,7 @@ export class RevivalPolicy {
       state.wallRoute = undefined
     }
 
-    // 150k watermark: the sweep folds the orphan's last observed usage before
+    // 300k watermark: the sweep folds the orphan's last observed usage before
     // deciding, so an oversized orphan parks with evidence instead of waking
     // into a context overflow (an unknown watermark adds no boundary).
     if (state.contextTokens !== undefined && state.contextTokens >= CONTEXT_LIMIT_TOKENS) {
@@ -685,7 +685,7 @@ export class RevivalPolicy {
       state.wallRoute = undefined
     }
 
-    // 150k watermark: park with evidence; an unknown watermark (no usage seen
+    // 300k watermark: park with evidence; an unknown watermark (no usage seen
     // yet) does not add the boundary (design: 读不到不加该分界).
     if (state.contextTokens !== undefined && state.contextTokens >= CONTEXT_LIMIT_TOKENS) {
       records.push(
