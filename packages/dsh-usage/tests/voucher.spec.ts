@@ -101,8 +101,12 @@ describe('minting is an accounting decision, not a probe decision', () => {
     // Given the relay route whose ledger rows now mint
     // When the adapter table is asked what it can probe
     // Then no adapter claims the route, so minting reaches no credential or balance endpoint
-    expect(adapterFor('mimo')).toBeUndefined()
-    expect(voucherData(windowOf([row('mimo', 1_000_000, 2)]))?.tokens).toBe(1_000_000)
+    // FORK fixture: upstream used 'mimo' as its unknown-route exemplar; this
+    // fork's adapter table claims mimo (platform balance, 2026-10-25), so the
+    // unclaimed exemplar becomes 'relay-gateway' — the minting and the
+    // adapterFor() blindness are unchanged.
+    expect(adapterFor('relay-gateway')).toBeUndefined()
+    expect(voucherData(windowOf([row('relay-gateway', 1_000_000, 2)]))?.tokens).toBe(1_000_000)
   })
 })
 

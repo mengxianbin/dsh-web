@@ -720,9 +720,18 @@ describe('persistence', () => {
 describe('DSH 0.1.7 foreign settings resolution (#1739)', () => {
   it('operator sees apiKeyEnv for pi-ai provider resolved from settings.describe() with volatile unwrap', async () => {
     // Given an OpenCode Go endpoint and DSH 0.1.7 SettingsForms describe providing volatile profiles
+    // FORK body: the opencode-go plan probe rides console/api/go/status
+    // absolute meters since 2026-10-24 (adapters.ts OPENCODE_GO); upstream's
+    // usage.rolling shape no longer parses. 10% derives from used/limit.
     stubFetch(() => jsonResponse({
-      usage: {
-        rolling: { percent: 10, resetsAt: '2026-09-27T12:00:00Z' },
+      access: {
+        meters: {
+          fiveHour: {
+            limitMicroCents: 100_000_000,
+            usedMicroCents: 10_000_000,
+            resetsAt: '2026-09-27T12:00:00Z',
+          },
+        },
       },
     }))
     const llm = {
