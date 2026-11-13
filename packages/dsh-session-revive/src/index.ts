@@ -4,7 +4,7 @@
  * account: rolling 4h x 4 quota per session chain, wall-class codes suspend
  * at zero cost until resetsAt, a 10-minute breaker stops a session that dies
  * again right after a revival, same-cause waves hold sessions until a 5-minute
- * quiet period then release them staggered, and the 300k context watermark
+ * quiet period then release them staggered, and the 1M context watermark
  * parks oversized sessions. Two stop causes join the same account per the
  * 2026-11-07 triage ruling (design §7): a `max-tokens` turn end (the provider
  * answered, the output was truncated) and the goal-round-driver's durability
@@ -343,7 +343,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       },
       isAttached: (sessionId) => (ctx.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId) !== undefined,
       decide: (sessionId, at, contextTokens) => {
-        // Fold the orphan's last observed usage first so the 300k watermark
+        // Fold the orphan's last observed usage first so the 1M watermark
         // gate actually bounds this revival (an unknown watermark adds no
         // boundary, per the design).
         if (contextTokens !== undefined) policy.recordUsage(sessionId, contextTokens)

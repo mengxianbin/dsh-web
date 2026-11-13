@@ -272,7 +272,7 @@ describe('same-cause wave probe', () => {
   })
 })
 
-describe('300k context watermark', () => {
+describe('1M context watermark', () => {
   it('parks at or above the limit with evidence and revives below it', () => {
     const parked = policy()
     parked.recordUsage('big', CONTEXT_LIMIT_TOKENS)
@@ -521,7 +521,7 @@ describe('墙随路由走: a model/selection releases a wall suspension (拍板�
     expect(snap.quota).toContainEqual({ chainId: 'A', used: 1 }) // no second stamp
   })
 
-  it('300k 水位照旧: the release parks at the watermark instead of nudging', () => {
+  it('1M 水位照旧: the release parks at the watermark instead of nudging', () => {
     const p = policy()
     p.recordUsage('A', CONTEXT_LIMIT_TOKENS)
     wall(p, 'A', T0, 'deepseek', { retryAfterMs: 60_000 })
@@ -667,7 +667,7 @@ describe('boot sweep (拍板⑪ restart revival, zero quota)', () => {
     })
   })
 
-  it('the 300k watermark parks an oversized orphan with evidence and zero account movement', () => {
+  it('the 1M watermark parks an oversized orphan with evidence and zero account movement', () => {
     const p = policy()
     p.recordUsage('S', CONTEXT_LIMIT_TOKENS)
     const before = p.snapshot(T0)

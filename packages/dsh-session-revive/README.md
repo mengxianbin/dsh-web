@@ -9,7 +9,7 @@ since the 2026-11-08 admission ruling) applies the ruled per-session revival
 account —
 rolling 4h x 4 quota per chain, wall-class suspension at zero cost until
 `resetsAt`, a 10-minute circuit breaker, same-cause wave holds released
-staggered after a 5-minute quiet period, and the 300k context watermark.
+staggered after a 5-minute quiet period, and the 1M context watermark.
 Two stop causes join the same account per the 2026-11-07 triage ruling
 (design §7): a `max-tokens` turn end (the provider answered, the output hit
 the ceiling) and the goal-round-driver's durability flush failure (observed
@@ -39,7 +39,7 @@ Host-only — the package declares no `dsh.client` face.
 - Releases a wall suspension when the route moves (2026-11-07 ruling): a
   durable `model/selection` whose provider leaves the walled route clears the
   hold and rejoins the flow as one quota-consuming revive — stagger, breaker,
-  and the 300k watermark unchanged; an unchanged provider (or an unobserved
+  and the 1M watermark unchanged; an unchanged provider (or an unobserved
   wall route) keeps the zero-consumption hold.
 - Folds the two stop causes (design §7.2) into the same revival flow: a
   `max-tokens` turn end first clears any stale suspension (the provider did
@@ -56,14 +56,14 @@ Host-only — the package declares no `dsh.client` face.
   complete.
 - Runs the ruled account before every revival: breaker first (a re-death
   within 10 minutes of a revival stops that session for good), then
-  suspension, the 300k watermark, the wave hold, and the rolling 4h x 4
+  suspension, the 1M watermark, the wave hold, and the rolling 4h x 4
   chain quota.
 - Sweeps for restart orphans at activation (2026-11-08 ruling, design
   §4.2): the harness `turnBoundary` projection screens the session list for
   an open final turn, every candidate is confirmed by a raw stored-log read
   (the only source that distinguishes an open turn from a committed
   `interrupted` closer), and each confirmed orphan is nudged through the
-  same staggered path — breaker-armed and 300k-watermark-checked, but
+  same staggered path — breaker-armed and 1M-watermark-checked, but
   quota-exempt, so status `counters`/`quota` never move. The sweep cannot
   wait for events: the `interrupted` closer is only written at the next
   resume (design §4.2 条3).
@@ -142,7 +142,7 @@ unconfirmed session is never nudged).
   lives in the log stream, waiting for a reader.
 - The `live` send path exists but has never run against a real session;
   flipping the switch belongs to a turn-on batch with its own verification.
-- Sessions at or above the 300k watermark park for both human and bot
+- Sessions at or above the 1M watermark park for both human and bot
   classes; this plugin never relays a parked session to a fresh body.
 - Subagent child sessions are in scope (the design covers all sessions);
   their `session.header.origin` is logged as evidence and an exclusion knob
@@ -170,5 +170,5 @@ unconfirmed session is never nudged).
   the lag can only miss, never revive a closed session.
 - The sweep revives every confirmed orphan regardless of age — no time window
   is ruled — so the first activation after install wakes the historical
-  backlog in one staggered batch, bounded by the 300k watermark and the
+  backlog in one staggered batch, bounded by the 1M watermark and the
   breaker like any other revival.

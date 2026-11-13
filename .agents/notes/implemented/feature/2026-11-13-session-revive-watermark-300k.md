@@ -8,10 +8,10 @@ The revival plugin parks any orphan at or above its context watermark, and the 1
 
 ## Decision
 
-- **`CONTEXT_LIMIT_TOKENS` moves 150_000 → 300_000** (`src/config.ts:87`), aligned with the compaction threshold. The gate keeps its semantics — at or above the line a session parks at zero account movement, below it the remaining gates decide as before — but the line now sits where the compactor takes over: sessions it can handle wake automatically, and the park only catches what is genuinely oversized (≥300k).
+- **`CONTEXT_LIMIT_TOKENS` moves 150_000 → 300_000** (`src/config.ts`, now at :89), aligned with the compaction threshold. The gate keeps its semantics — at or above the line a session parks at zero account movement, below it the remaining gates decide as before — but the line now sits where the compactor takes over: sessions it can handle wake automatically, and the park only catches what is genuinely oversized (≥300k at the time; the value later moved to 1M on 2026-11-14 by the [watermark raise](2026-11-14-session-revive-watermark-1m.md), which supersedes it for this value alone).
 - **This is the one §四 ruled parameter that moved.** The JSDoc on the constant records the ruling (2026-11-13, user choice "A") and why the original freeze clause no longer applies to this value; every other §四 number (4h × 4 quota, 10-minute breaker, wave window/cooldown, stagger floor) is untouched, and the watermark stays a non-configurable grep-assertable literal.
 - **One constant, both check sites**: the boot sweep (`src/policy.ts:436`) and the error path (`src/policy.ts:690`) both read `CONTEXT_LIMIT_TOKENS`, so the single edit moves both — no behavior fork between restart-revival and error-revival.
-- **Docs and tests follow the value**: the README pair and the `package.json` description say 300k, the README pairing hashes are re-recorded, and the watermark tests derive their boundaries from `CONTEXT_LIMIT_TOKENS` instead of hard-coded 160k/140k, so the next value move touches one line.
+- **Docs and tests follow the value**: the README pair and the `package.json` description said 300k (they say 1M since the [2026-11-14 raise](2026-11-14-session-revive-watermark-1m.md)), the README pairing hashes are re-recorded, and the watermark tests derive their boundaries from `CONTEXT_LIMIT_TOKENS` instead of hard-coded 160k/140k, so the next value move touches one line.
 - **The m-note design doc carries the ruling**: `content/tech/ai/dsh/session-auto-revival-design-1102.md` §4.2 takes the matching 2026-11-13 re-judgment note in the same batch; this change is the dsh-web half of one ruling.
 
 ## Alternatives considered
@@ -22,10 +22,10 @@ The revival plugin parks any orphan at or above its context watermark, and the 1
 
 ## Consequences
 
-- Sessions between 150k and 300k now auto-revive on every revival path (boot sweep, error path, wall release) instead of parking; the parked set shrinks to ≥300k contexts only (none observed so far — max 299,772).
+- Sessions between 150k and 300k now auto-revive on every revival path (boot sweep, error path, wall release) instead of parking; the parked set shrinks to ≥300k contexts only (none observed so far — max 299,772; the line itself later moved to 1M — see the [2026-11-14 raise](2026-11-14-session-revive-watermark-1m.md)).
 - Takes effect only after the user restarts the dsh web host: the plugin `lib/` is rebuilt, but a running host keeps the old bundle until restart — restart is user-owned per repo rule, never AI-initiated.
 - The remaining gates (quota, breaker, wave, stagger) and the zero-account park contract are unchanged; the status endpoint and log line shapes are unchanged, so no consumer breaks.
-- Post-restart verification: the next boot sweep's parked count should drop from 8–11 toward 0, and any remaining park must show `contextTokens ≥ 300000`.
+- Post-restart verification: the next boot sweep's parked count should drop from 8–11 toward 0, and any remaining park must show `contextTokens ≥ 300000` (the threshold is 1000000 since the [2026-11-14 raise](2026-11-14-session-revive-watermark-1m.md)).
 
 ## Testing
 
