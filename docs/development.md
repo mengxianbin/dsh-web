@@ -33,6 +33,12 @@ pnpm docs:check       # 文档一致性（链接 / README / i18n 配对）
 全量跑所有门禁（typecheck / build / test / aggregate / market /
 skin-center / docs / emoji）。
 
+> **`pnpm install` 会改写跟踪构建物（2026-11-03 实测）**：workspace 包带 `prepare`
+> （如 `packages/dsh-web-all` 重建 `lib/client.js{,.map}`，且这两个是**跟踪文件**）时，
+> 任何 `pnpm install` 都会弄脏它们。提交前 `git status` 见到此类改动先
+> `git checkout -- <文件>` 复位、随即按名点 add 入暂存（复位与暂存之间别再跑 install，
+> 否则又脏）——否则 7MB 构建物会随批入仓。
+
 ## 常见任务
 
 ### 审核远程 PR

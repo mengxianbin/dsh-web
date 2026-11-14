@@ -262,7 +262,10 @@ export class HostExecutionRunner {
   async listRunning(): Promise<{ known: true; count: number; items: SessionSummary[] } | { known: false }> {
     for (let attempt = 1; ; attempt++) {
       try {
-        const response = await this.invoke('session', 'list', {}) as SessionListValue
+        // Explicit thin scope (F′ flip, session-list-full-slim-1110 P2): the
+        // roster only tracks active first-party task sessions, so the cuts
+        // are named on the wire instead of leaning on a server default.
+        const response = await this.invoke('session', 'list', { includeArchived: false, includeSubagents: false, trimHeavyProjections: true }) as SessionListValue
         return { known: true, count: response.items.filter(item => item.running).length, items: response.items as SessionSummary[] }
       } catch (error) {
         if (isInvocationUnavailable(error)) {
@@ -289,7 +292,8 @@ export class HostExecutionRunner {
     } else {
       let response: SessionListValue
       try {
-        response = await this.invoke('session', 'list', {}) as SessionListValue
+        // Same explicit thin scope as listRunning (see there).
+        response = await this.invoke('session', 'list', { includeArchived: false, includeSubagents: false, trimHeavyProjections: true }) as SessionListValue
       } catch (error) {
         if (isInvocationUnavailable(error)) {
           if (!this.unsupportedSessionListWarned) {

@@ -1,0 +1,59 @@
+{
+  "id": "liangshen-v41-probes",
+  "version": 1,
+  "description": "Behaviour probes for the LiangShen dispatcher discipline and working discipline. Each task ships a small deterministic simulator with an oracle (tools/probes/<id>/grade.mjs) and two scripted policies (strategies.mjs) that tools/probe-selftest.mjs uses to prove the probe discriminates before a model is charged for it. The pass/fail column is the oracle; the behaviour metrics beside it are the habit that produced the outcome, which is the measure that catches a session whose score is fine and whose process is not.",
+  "tasks": [
+    {
+      "id": "probe-prior-override",
+      "category": "behaviour-probe",
+      "from": [
+        "../probes/prior-override",
+        "../probes/shared.mjs"
+      ],
+      "turns": [
+        "This workspace holds a junction simulator. Run `node env.mjs help` for its commands and its rule, then drive all four of its cycles, admitting as many movements as the rule allows. Reply DONE when the run is complete."
+      ],
+      "check": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.error(JSON.stringify({ passed: r.passed, metrics: r.metrics, detail: r.detail }))\nif (!r.passed) process.exit(1)",
+      "metrics": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.log(JSON.stringify(r.metrics))"
+    },
+    {
+      "id": "probe-refresh-quota",
+      "category": "behaviour-probe",
+      "from": [
+        "../probes/refresh-quota",
+        "../probes/shared.mjs"
+      ],
+      "turns": [
+        "This workspace holds a release scheduler. Run `node env.mjs help` for its commands and its rule, then work through its eight cycles, releasing as many jobs as the rule allows. Reply DONE when the run is complete."
+      ],
+      "check": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.error(JSON.stringify({ passed: r.passed, metrics: r.metrics, detail: r.detail }))\nif (!r.passed) process.exit(1)",
+      "metrics": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.log(JSON.stringify(r.metrics))"
+    },
+    {
+      "id": "probe-oncall-backlog",
+      "category": "behaviour-probe",
+      "from": [
+        "../probes/oncall-backlog",
+        "../probes/shared.mjs"
+      ],
+      "turns": [
+        "This workspace holds an on-call board. Run `node env.mjs help` for its commands and its rule, then work through all ten of its steps. Reply DONE when the run is over."
+      ],
+      "check": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.error(JSON.stringify({ passed: r.passed, metrics: r.metrics, detail: r.detail }))\nif (!r.passed) process.exit(1)",
+      "metrics": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.log(JSON.stringify(r.metrics))"
+    },
+    {
+      "id": "probe-budget-ledger",
+      "category": "behaviour-probe",
+      "from": [
+        "../probes/budget-ledger",
+        "../probes/shared.mjs"
+      ],
+      "turns": [
+        "This workspace holds a log search over twenty services, exactly one of which is faulty. Run `node env.mjs help` for its commands, find the faulty service and submit it before the call budget runs out. Reply DONE when you have submitted."
+      ],
+      "check": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.error(JSON.stringify({ passed: r.passed, metrics: r.metrics, detail: r.detail }))\nif (!r.passed) process.exit(1)",
+      "metrics": "const m = await import('./grade.mjs')\nconst r = m.grade()\nconsole.log(JSON.stringify(r.metrics))"
+    }
+  ]
+}

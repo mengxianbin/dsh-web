@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { adapterFor, isDeepSeekProviderRoute, providerErrorMessage, PROVIDER_ADAPTERS } from '../src/core/adapters.ts'
+import { adapterFor, balanceAppliesToRoute, isDeepSeekProviderRoute, originOf, providerErrorMessage, PROVIDER_ADAPTERS } from '../src/core/adapters.ts'
 
 describe('adapterFor', () => {
   it('serves every documented route id', () => {
@@ -29,6 +29,103 @@ describe('adapterFor', () => {
         seen.add(id)
       }
     }
+  })
+
+  it('operator keeps every family-only id out of the probe directory', () => {
+    // Given every adapter in the directory
+    const probed = new Set(PROVIDER_ADAPTERS.flatMap((adapter) => adapter.ids))
+    const familyOnly = new Set<string>()
+    // When the family-only ids are compared against the probed ids and
+    // against each other
+    for (const adapter of PROVIDER_ADAPTERS) {
+      for (const id of adapter.familyOnlyIds ?? []) {
+        // Then a family-only id claims no probe and belongs to one family,
+        // so accounting and probing can never disagree about a route
+        expect(probed.has(id), id).toBe(false)
+        expect(familyOnly.has(id), id).toBe(false)
+        familyOnly.add(id)
+      }
+    }
+  })
+})
+
+// #1772: the signed-in DeepSeek account route (llm-deepseek-account registers
+// `deepseek-account`) bills the same account as the official route, so the
+// family must own it for pricing and the whale-yuan bank. It holds no API key,
+// so the balance probe must not reach it: adding it to `ids` would let
+// credential resolution fall back to the family DEEPSEEK_API_KEY and print
+// the API-key account's money under the account route's name.
+describe('isDeepSeekProviderRoute (family membership wider than the probe directory)', () => {
+  it('user signed in to a DeepSeek account has their route recognized as the official family', () => {
+    // Given the account route and the two API-key routes
+    // When family membership is decided
+    // Then all three belong to the official DeepSeek family, so their calls
+    // are priced and mint whale yuan instead of falling outside both
+    expect(isDeepSeekProviderRoute('deepseek-account')).toBe(true)
+    expect(isDeepSeekProviderRoute('deepseek-official')).toBe(true)
+    expect(isDeepSeekProviderRoute('deepseek')).toBe(true)
+  })
+
+  it('operator sees the account route stay out of the probe directory', () => {
+    // Given a user signed in to a DeepSeek account on the account route
+    // When the route is resolved for probing, credential fallback, alias
+    // folding and the renderable provider row
+    // Then no adapter serves it, so it can never inherit the official
+    // API-key account's balance
+    expect(adapterFor('deepseek-account')).toBeUndefined()
+  })
+
+  it('operator sees no adapter claim the account route for probing', () => {
+    // Given the full adapter directory
+    // When each adapter is asked for the account route
+    // Then none claims it, so pricing and probing agree about the family
+    const claimants = PROVIDER_ADAPTERS.filter((adapter) => adapterFor('deepseek-account') === adapter)
+    expect(claimants).toEqual([])
+  })
+})
+
+// #1688: `deepseek` is both the official catalog entry and a common id for an
+// OpenAI-compatible reseller (Alibaba Bailian, ...) pointed at another host by
+// the profile's baseURL. The balance endpoint belongs to one ORIGIN, so probing
+// it for the reseller reported the official account's money under the reseller's
+// name. These pin the origin gate.
+describe('balanceAppliesToRoute', () => {
+  const deepseek = adapterFor('deepseek')!
+
+  it('operator sees the official balance endpoint apply to the official origin', () => {
+    // Given the official route, with and without an explicit official base URL
+    // When applicability is decided
+    // Then the official endpoint is this route's account
+    expect(balanceAppliesToRoute(deepseek, undefined)).toBe(true)
+    expect(balanceAppliesToRoute(deepseek, 'https://api.deepseek.com')).toBe(true)
+    expect(balanceAppliesToRoute(deepseek, 'https://api.deepseek.com/v1')).toBe(true)
+  })
+
+  it('operator sees a reseller profile keep its own account instead of the official one', () => {
+    // Given a `deepseek` route pointed at Alibaba Bailian's compatible host
+    const bailian = 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+    // When applicability is decided
+    // Then the official endpoint is refused: it reports a different account
+    expect(balanceAppliesToRoute(deepseek, bailian)).toBe(false)
+    // And a trailing path or explicit port does not change the verdict
+    expect(balanceAppliesToRoute(deepseek, 'https://api.deepseek.com.evil.example')).toBe(false)
+  })
+
+  it('operator sees adapters without a fixed origin apply to every route', () => {
+    // Given a provider whose endpoint follows the profile host (siliconflow)
+    const perRoute = adapterFor('siliconflow')!
+    // When applicability is decided
+    // Then no origin gate applies
+    expect(balanceAppliesToRoute(perRoute, 'https://api.siliconflow.cn')).toBe(true)
+    expect(balanceAppliesToRoute(perRoute, 'https://elsewhere.example')).toBe(true)
+  })
+
+  it('operator sees an unparsable base URL fall back to the family default', () => {
+    // Given a malformed base URL in the profile
+    // When applicability is decided
+    // Then the route is treated as declaring no origin and keeps its adapter
+    expect(originOf('not a url')).toBeUndefined()
+    expect(balanceAppliesToRoute(deepseek, 'not a url')).toBe(true)
   })
 })
 
@@ -112,6 +209,10 @@ describe('kimi coding plan parse', () => {
 describe('glm coding plan parse', () => {
   it.each([
     ['zai-coding-cn', 'https://open.bigmodel.cn/api/monitor/usage/quota/limit'],
+    // The pi-ai catalog registers the z.ai coding plan as route id `zai`;
+    // only this package's older aliases `zai-coding`/`zai-coding-cn` were
+    // served before issue #1597.
+    ['zai', 'https://api.z.ai/api/monitor/usage/quota/limit'],
     ['zai-coding', 'https://api.z.ai/api/monitor/usage/quota/limit'],
   ])('%s probes the raw-key quota endpoint', (id, url) => {
     const adapter = adapterFor(id)!
@@ -133,6 +234,75 @@ describe('glm coding plan parse', () => {
     expect(parsed?.windows[0]).toMatchObject({ key: '5h', percent: 12.5 })
     // Percent clamps into 0-100.
     expect(parsed?.windows[1]).toMatchObject({ key: 'week', percent: 100 })
+  })
+
+  it('keys windows by the provider unit rather than by row position', () => {
+    const adapter = adapterFor('zai')!
+    const parsed = adapter.plan!.parse(200, {
+      success: true,
+      data: {
+        level: 'GLM-Code-Plan',
+        limits: [
+          { type: 'TOKENS_LIMIT', percentage: 70, unit: 6, nextResetTime: 1788300000000 },
+          { type: 'TOKENS_LIMIT', percentage: 30, unit: 5, nextResetTime: 1788900000000 },
+          { type: 'TOKENS_LIMIT', percentage: 12.5, unit: 3, nextResetTime: 1788000000000 },
+        ],
+      },
+    })
+    expect(parsed?.windows.map(window => window.key)).toEqual(['week', 'month', '5h'])
+    expect(parsed?.windows.map(window => window.percent)).toEqual([70, 30, 12.5])
+  })
+
+  it('renders the 5-hour-only legacy plan shape', () => {
+    const adapter = adapterFor('zai')!
+    const parsed = adapter.plan!.parse(200, {
+      success: true,
+      data: { level: 'GLM-Code-Plan', limits: [{ type: 'TOKENS_LIMIT', percentage: 42, unit: 3, nextResetTime: 1788000000000 }] },
+    })
+    expect(parsed?.windows).toEqual([{ key: '5h', percent: 42, resetsAt: '2026-08-29T10:40:00.000Z' }])
+  })
+
+  it('uses the exact credit ratio for a credits-based plan', () => {
+    const adapter = adapterFor('zai')!
+    const parsed = adapter.plan!.parse(200, {
+      success: true,
+      data: {
+        level: 'GLM-Code-Plan',
+        limits: [
+          { type: 'CREDIT_LIMIT', unit: 6, usage: 2000, currentValue: 500, percentage: 0.1, nextResetTime: 1788300000000 },
+          // No exact ratio available: the provider percentage is the fallback.
+          { type: 'CREDIT_LIMIT', unit: 3, percentage: 25, nextResetTime: 1788000000000 },
+        ],
+      },
+    })
+    expect(parsed?.windows[0]).toMatchObject({ key: 'week', percent: 25 })
+    expect(parsed?.windows[1]).toMatchObject({ key: '5h', percent: 25 })
+  })
+
+  it('skips the MCP request cap and unknown units instead of inventing windows', () => {
+    const adapter = adapterFor('zai')!
+    const parsed = adapter.plan!.parse(200, {
+      success: true,
+      data: {
+        level: 'GLM-Code-Plan',
+        limits: [
+          { type: 'TIME_LIMIT', percentage: 80, unit: 3, nextResetTime: 1788000000000 },
+          { type: 'TOKENS_LIMIT', percentage: 10, unit: 99, nextResetTime: 1788000000000 },
+          { type: 'TOKENS_LIMIT', percentage: 20, unit: 3, nextResetTime: 1788000000000 },
+        ],
+      },
+    })
+    expect(parsed?.windows).toEqual([{ key: '5h', percent: 20, resetsAt: '2026-08-29T10:40:00.000Z' }])
+    // Nothing renderable left: no plan data rather than an empty card.
+    expect(adapter.plan!.parse(200, {
+      success: true,
+      data: { limits: [{ type: 'TIME_LIMIT', percentage: 80, unit: 3 }] },
+    })).toBeUndefined()
+  })
+
+  it('reports no plan for the failure envelope the endpoint returns with HTTP 200', () => {
+    const adapter = adapterFor('zai')!
+    expect(adapter.plan!.parse(200, { success: false, code: 401, msg: 'invalid api key' })).toBeUndefined()
   })
 })
 

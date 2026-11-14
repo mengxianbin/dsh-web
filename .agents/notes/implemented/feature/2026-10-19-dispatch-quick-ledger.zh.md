@@ -29,4 +29,4 @@ Status: implemented
 
 ## Testing
 
-`tests/routes.spec.ts` 覆盖路由契约（taskRef 校验、绑定记录形态、409 带既有 sessionId、死亡后重派、无 taskRef 向后兼容、门 fail-open 与写入失败）。`tests/bindings.spec.ts` 以真实临时目录覆盖存储层（持久记录、活/死/归档语义、最新活者胜、损坏台账隔离留痕、workspace store 读不通 fail-open、原子写卫生）。44 个用例，加 `pnpm typecheck`、`pnpm build`、`pnpm sync-shared:check`、`pnpm docs:check` 全绿。
+`tests/routes.spec.ts` 覆盖路由契约（taskRef 校验、绑定记录形态、409 带既有 sessionId、死亡后重派、无 taskRef 向后兼容、门 fail-open 与写入失败）。`tests/bindings.spec.ts` 以真实临时目录覆盖存储层（持久记录、活/死/归档语义、最新活者胜、损坏台账隔离留痕、workspace store 读不通 fail-open、原子写卫生）。46 个用例，加 `pnpm typecheck`、`pnpm build`、`pnpm sync-shared:check`、`pnpm docs:check` 全绿。

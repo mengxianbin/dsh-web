@@ -182,7 +182,11 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
 
   if (sources.feed !== undefined) {
     try {
-      const response = await sources.feed.list({}, signal)
+      // Full-corpus scope stated explicitly (F′ flip, session-list-full-slim-1110
+      // P2): inventory cross-refs on-disk dirs for archived and subagent
+      // sessions too, so it keeps serving every row the pre-f5 `{}` default
+      // used to hand it. Off-host move stays parked in #inventory-offhost-1110.
+      const response = await sources.feed.list({ includeArchived: true, includeSubagents: true, trimHeavyProjections: false }, signal)
       for (const item of response.items ?? []) {
         if (typeof item.sessionId !== 'string' || item.sessionId === '') continue
         // The feed mixes id spellings (bare uuids beside `session-<uuid>`);
