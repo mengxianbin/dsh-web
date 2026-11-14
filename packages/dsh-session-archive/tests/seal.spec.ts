@@ -188,6 +188,9 @@ describe('seal grouping — legacy cut', () => {
     const host = createFakeHost()
     withTranscript(host, 'session-a', [
       assistantMsg(SAVE_DONE),
+      // The sentinel sits in an earlier turn (last-turn gate seal-lastturn-1113):
+      // only a cross-turn save reaches the legacy cut through the fallback path.
+      userMsg('隔一轮再问'),
       assistantMsg(CLEAN_REPLY),
     ], { mtimeMs: SENTINEL_ERA_START - 86_400_000 })
     expect(analyzeSeal('session-a', dirOf(host, 'session-a')).verdict).toBe('LEGACY')
@@ -261,9 +264,12 @@ describe('decode — multi-frame transcripts', () => {
     withTranscript(host, 'session-a', [
       userMsg('开跑'),
       assistantMsg(SAVE_DONE),
+      // Frame 2 carries this user message: it must decode, or the turn would
+      // keep the in-turn sentinel and the verdict would read no-endorsement
+      // instead of sentinel-stale (last-turn gate seal-lastturn-1113).
+      userMsg('帧尾追问'),
       assistantMsg('（帧尾追加）'),
     ], { frames: 2 })
-    // The trailing frame appended AFTER the sentinel makes the last assistant message continue.
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     expect(result.verdict).toBe('UNSEALED')
     expect(result.detail).toBe('sentinel-stale')

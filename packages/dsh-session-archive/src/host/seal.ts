@@ -8,12 +8,15 @@
  * Criteria and vocabulary are copied 1:1 from the m-note preflight scanner
  * `scripts/dsh/session-sentinel-scan.mjs` (main tree, 入册 2026-10-26):
  * `SAVE_STATUS` three values, the LEGACY cut (2026-10-26), the save-trace
- * regex, "stale = a sentinel in an earlier message while the last
- * assistant message continues the conversation", and the last-line gate
- * (seal-judge-lastline-1106, 2026-11-06): the sentinel only ever counts in
- * the last assistant message's **last non-empty trimmed line** — the
- * endorsement-line form, isomorphic to the save SKILL's "sentinel line =
- * the completion report's last line". The decode method follows
+ * regex, "stale = a sentinel in an earlier turn while the last turn
+ * continues the conversation", and the last-turn gate (seal-lastturn-1113,
+ * 2026-11-14, extending the last-line gate seal-judge-lastline-1106): the
+ * sentinel only ever counts in a **last non-empty trimmed line** of an
+ * assistant message inside the last turn (turn = the events after the
+ * transcript's last `user/message`), scanned newest-first so the newest
+ * signal-bearing line decides — the endorsement-line form, isomorphic to
+ * the save SKILL's "sentinel line = the completion report's last line".
+ * The decode method follows
  * `content/tech/ai/session-forensics.md` 场景十六: magic-scan the zstd frame
  * headers and decompress frame by frame with `node:zlib`
  * (`zstdDecompressSync`) — transcripts are append-only multi-frame files.
@@ -185,27 +188,44 @@ function lastLineOf(text: string): string {
 }
 
 /**
- * Judge the last assistant message alone; null = no direct signal (caller consults the whole transcript).
- *
- * Last-line gate (seal-judge-lastline-1106, 2026-11-06): the search scope is
- * the message's **last non-empty trimmed line** only — the endorsement-line
- * form, isomorphic to the save SKILL's "sentinel line = the completion
- * report's last line". Only the search range shrinks from the whole message
- * to its last line; the three-value judgement, the SAVE_TRACE fallback and
- * the caller's WORK_TRACE/LEGACY split keep their logic unchanged, so prose
- * quotes of `SAVE_STATUS=` in the body no longer read green (verbatim-same
- * as the scanner's `judge()`, contract C1).
+ * One direct judgement: the verdict, its detail, and the message whose last
+ * line carried the signal (the endorsement recheck reads that message, not
+ * whatever happens to be last in the turn).
  */
-function judge(text: string): { verdict: SealVerdict; detail: string } | null {
-  const line = lastLineOf(text)
-  const lastMatch = [...line.matchAll(new RegExp(SENTINEL, 'g'))].pop()
-  if (lastMatch) {
-    const value = lastMatch[1]
-    if (value === 'DONE') return { verdict: 'DONE', detail: DETAIL.sentinelOk }
-    if (value === 'N_A') return { verdict: 'N_A', detail: DETAIL.noArtifacts }
-    return { verdict: 'UNSEALED', detail: DETAIL.pending }
+interface JudgeHit {
+  readonly verdict: SealVerdict
+  readonly detail: string
+  readonly message: string
+}
+
+/**
+ * Judge the last turn's assistant messages, newest first; null = no direct
+ * signal (caller consults the whole transcript).
+ *
+ * Last-turn gate (seal-lastturn-1113, 2026-11-14, extends the last-line gate
+ * seal-judge-lastline-1106): the search scope is each assistant message's
+ * **last non-empty trimmed line** inside the last turn (turn = the events
+ * after the transcript's last `user/message`), scanned newest-first so the
+ * newest signal-bearing line decides — a save completed earlier in the same
+ * turn stays DONE when a trailing message follows (the repeat step the gate
+ * used to demand), while a sentinel before the last turn still reads stale.
+ * The endorsement-line form, the three-value judgement, the SAVE_TRACE
+ * fallback and the caller's WORK_TRACE/LEGACY split keep their logic
+ * unchanged, so prose quotes of `SAVE_STATUS=` in a body still never read
+ * green (verbatim-same as the scanner's `judge()`, contract C1).
+ */
+function judge(messages: readonly string[]): JudgeHit | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const line = lastLineOf(messages[index])
+    const lastMatch = [...line.matchAll(new RegExp(SENTINEL, 'g'))].pop()
+    if (lastMatch) {
+      const value = lastMatch[1]
+      if (value === 'DONE') return { verdict: 'DONE', detail: DETAIL.sentinelOk, message: messages[index] }
+      if (value === 'N_A') return { verdict: 'N_A', detail: DETAIL.noArtifacts, message: messages[index] }
+      return { verdict: 'UNSEALED', detail: DETAIL.pending, message: messages[index] }
+    }
+    if (SAVE_TRACE.test(line)) return { verdict: 'UNSEALED', detail: DETAIL.saveTail, message: messages[index] }
   }
-  if (SAVE_TRACE.test(line)) return { verdict: 'UNSEALED', detail: DETAIL.saveTail }
   return null
 }
 
@@ -328,9 +348,10 @@ function deriveSeal(
   }
   if (!text) return { id, verdict: 'UNKNOWN', detail: DETAIL.emptyTranscript }
 
-  // One pass: last assistant text, save traces anywhere, earlier sentinels, and
-  // the chat-message count at the last sentinel (for followUpCount).
-  let lastAssistant = ''
+  // One pass: the last turn's assistant texts (a `user/message` restarts the
+  // turn), save traces anywhere, earlier sentinels, and the chat-message count
+  // at the last sentinel (for followUpCount).
+  const turnMessages: string[] = []
   let saveTraceAnywhere = false
   let earlierSentinel = false
   let chatCount = 0
@@ -355,11 +376,14 @@ function deriveSeal(
           earlierSentinel = true
           chatAtSentinel = chatCount
         }
-        lastAssistant = t
+        turnMessages.push(t)
       }
     } else if (event.type === 'user/message') {
       chatCount += 1
       if (SAVE_TRACE.test(messageText(event))) saveTraceAnywhere = true
+      // Every user message starts a new turn; the last-turn gate judges only
+      // what accumulated after the final one (seal-lastturn-1113).
+      turnMessages.length = 0
     }
   }
   // Text that parses to no events at all is "解不出" (contract: 解不出/找不到
@@ -376,7 +400,7 @@ function deriveSeal(
   const legacy = lastTs > 0 && lastTs < SENTINEL_ERA_START
   const legacyRow = (): SealCheckResult => ({ id, verdict: 'LEGACY', detail: DETAIL.legacy })
 
-  const direct = judge(lastAssistant)
+  const direct = judge(turnMessages)
   if (direct !== null) {
     if (direct.verdict === 'UNSEALED' && legacy && !direct.detail.startsWith(DETAIL.pending)) return legacyRow()
     // Post-verdict endorsement downgrade (seal-noendorse-green-1106): a DONE
@@ -384,10 +408,12 @@ function deriveSeal(
     // `SAVE_STATUS=DONE` (AI self-assessment without save-status.py backing)
     // goes dark at the light and turns the archive gate into a confirmation.
     // N_A never runs the recheck (zero-output exemption, scanner --recheck 同口径).
-    if (direct.verdict === 'DONE' && !endorsementHolds(lastAssistant, text)) {
+    // The recheck reads the message that carried the signal — under the
+    // last-turn gate it may sit earlier in the turn than the final message.
+    if (direct.verdict === 'DONE' && !endorsementHolds(direct.message, text)) {
       return { id, verdict: 'UNSEALED', detail: DETAIL.noEndorsement }
     }
-    return { id, ...direct }
+    return { id, verdict: direct.verdict, detail: direct.detail }
   }
   if (saveTraceAnywhere || earlierSentinel) {
     if (legacy) return legacyRow()
