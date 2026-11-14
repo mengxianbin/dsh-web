@@ -53,6 +53,7 @@ import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, r
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
 import { appendJournal, type JournalEvent } from './journal.ts'
+import { REAP_SCAN_INTERVAL_MS, runReapCycle } from './reaper.ts'
 
 /** Thrown when the caller's expected delete total disagrees with the host plan. */
 export class PlanMismatchError extends Error {
@@ -158,6 +159,12 @@ export class ArchiveService {
   private readonly journalPath: string
   /** Last journal batch timestamp; keeps journal batches strictly ordered in-process. */
   private lastBatchAt = 0
+  /**
+   * Last subagent-reaper scan (archive-cascade-reap-1114): in-memory 24h
+   * throttle, never persisted — a restart scans again, idempotent by design
+   * (design §四 频率). Set only after a fully successful cycle.
+   */
+  private lastReapAt = 0
 
   private ledger: LedgerDocument = { version: 1, entries: {} }
   private autoState: AutoStateDocument = { version: 1 }
@@ -990,6 +997,45 @@ export class ArchiveService {
     }, delay)
   }
 
+  /**
+   * One throttled subagent-reaper + cascade-ledger-reconcile pass
+   * (archive-cascade-reap-1114, design §四/§五). Public for tests, like
+   * `runAutoCycle`; `tick` is the production caller. Runs under the operation
+   * lock like every other ledger-writing archive path (design §四 串行与失败
+   * 形态): a held lock skips this round with `BusyError` and leaves the 24h
+   * throttle unset; anything else propagates to `tick`, which logs loud and
+   * still arms the next check. `lastReapAt` is set only after a fully
+   * successful cycle (feed read → both passes → ledger flush), so a failure
+   * retries on the next tick instead of waiting a day.
+   */
+  async reapIdleSubagents(): Promise<void> {
+    const now = Date.now()
+    if (now - this.lastReapAt < REAP_SCAN_INTERVAL_MS) return
+    const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
+    const registry = this.serviceFace<{ archivedSessionIds: readonly string[]; archivedAtById?: Record<string, number> }>('workspaceRegistry')
+    if (feed === undefined) throw new Error('sessionController face unavailable')
+    if (registry === undefined) throw new Error('workspaceRegistry face unavailable')
+    await this.withLock(() => runReapCycle({
+      now: Date.now,
+      // inventory.ts 同款请求形 (design §四 扫描数据源): direct face, never
+      // `sources()` — that would pull dirIndex/projcache, the banned big heads.
+      listFeed: () => feed.list({ includeArchived: true, includeSubagents: true, trimHeavyProjections: true }, AbortSignal.timeout(30_000)),
+      archivedSessionIds: () => registry.archivedSessionIds,
+      archivedAtById: () => registry.archivedAtById,
+      // Built inside the lock: live+busy at scan time; `running` rides each feed row.
+      protectedIds: new Set(this.protectedReason(undefined).keys()),
+      ledger: this.ledger,
+      archive: (nativeId) => archiveSession(this.ctx, nativeId),
+      // Rejecting on purpose (unlike the silent `flushLedger` helper): a flush
+      // failure must leave the throttle unset so the next tick retries it.
+      flushLedger: async () => {
+        if (!this.loaded) return
+        await writeJsonAtomic(this.ledgerPath, this.ledger)
+      },
+    }))
+    this.lastReapAt = Date.now()
+  }
+
   private async tick(): Promise<void> {
     if (this.disposed) return
     const anythingEnabled = this.config.autoArchiveEnabled || this.config.autoDeleteEnabled
@@ -1020,6 +1066,17 @@ export class ArchiveService {
           }
           await this.flushState()
         }
+      }
+    }
+    // Subagent reaper + cascade-ledger reconcile (archive-cascade-reap-1114,
+    // design §四/§五): runs every tick regardless of the two cycle gates
+    // above; a held lock skips this round (BusyError), anything else logs
+    // loud and fails open — the schedule below still arms.
+    try {
+      await this.reapIdleSubagents()
+    } catch (error) {
+      if (!(error instanceof BusyError)) {
+        console.error(`[dsh-session-archive] reaper cycle failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     this.autoState.nextCheckAt = Date.now() + Math.max(15, this.config.checkIntervalMin) * 60_000
