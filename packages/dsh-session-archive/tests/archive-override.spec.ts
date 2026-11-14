@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { AddressInfo } from 'node:net'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
-import { ArchiveService, observedArchiveIds } from '../src/host/janitor.ts'
+import { ArchiveService } from '../src/host/janitor.ts'
 import { deserializeLedger, writeJsonAtomic } from '../src/host/ledger.ts'
 import { assistantMsg, createFakeHost, fakeContext, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
 
@@ -178,8 +178,8 @@ describe('POST /archive-override — mode note (contract C4, stale pass-through)
   })
 })
 
-describe('coexistence with the observed backfill — exactly one entry either way (C5)', () => {
-  it('write-back first: the backfill then skips the row and no second entry appears', async () => {
+describe('coexistence with the host stamp — exactly one entry either way (C5)', () => {
+  it('write-back first: the row then carries an archive time and no second entry appears', async () => {
     // The native channel archived the session; the stale note is written back first.
     const host = overrideHost(['session-native'])
     const service = await settledService(host)
@@ -189,14 +189,16 @@ describe('coexistence with the observed backfill — exactly one entry either wa
     const written = service.ledgerSnapshot().entries['session-native']
     expect(written).toEqual(expect.objectContaining({ source: 'observed', seal: 'stale' }))
 
-    // The next backfill pass sees a row that already carries an archive time.
+    // The next inventory pass sees a row that already carries an archive time
+    // (host stamp first, this entry as fallback) — nothing left to record.
     const inventory = await service.inventory()
-    expect(observedArchiveIds(inventory.rows)).toEqual([])
+    const row = inventory.rows.find((entry) => entry.id === 'session-native')
+    expect(row?.archivedAt).toBe(written?.archivedAt)
     expect(Object.keys(service.ledgerSnapshot().entries).filter((id) => id === 'session-native')).toHaveLength(1)
     expect(service.ledgerSnapshot().entries['session-native']).toEqual(written)
   })
 
-  it('backfill first: the note upgrades the same single entry, preserving time and source', async () => {
+  it('a historical observed entry first: the note upgrades the same single entry, preserving time and source', async () => {
     const host = overrideHost(['session-native'])
     await seedLedger(host, { 'session-native': { archivedAt: 3333, source: 'observed' } })
     const service = await settledService(host)

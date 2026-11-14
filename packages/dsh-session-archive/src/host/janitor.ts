@@ -31,7 +31,7 @@ import type {
   SessionPreviewView,
   WorkspaceView,
 } from '../core/types.ts'
-import { buildInventory, ledgerEntryFor, readProjcacheIndex, type BuiltInventory, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
+import { buildInventory, ledgerEntryFor, readProjcacheIndex, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
 import {
   capEntries,
   deserializeAutoState,
@@ -110,49 +110,6 @@ export interface ArchiveOverrideRow {
 
 const PREVIEW_MESSAGE_CAP = 6
 const PREVIEW_TEXT_CAP = 400
-
-/**
- * Ids whose archive time is unknown to the ledger even though the session is
- * archived - sessions archived from the official sidebar, which never reaches
- * this plugin. Their rows carry no `archivedAt`, so the retention clock cannot
- * start for them (`autoDeleteSeedCandidates` skips them) until something
- * records one. The order follows the row order, so a backfill is deterministic.
- *
- * Rows flagged `unreadable` or `no-data` are deliberately excluded. Those flags
- * say the plugin could not read the session's data on this pass, which is
- * usually transient (an unmounted volume, a drive that is not ready, a failed
- * read on a busy host) - the session itself is still there. Recording an
- * archive time for such a row would start a clock that ends in an
- * unrecoverable physical delete, turning a temporary read failure into
- * permanent data loss. They keep "archive time unknown" and stay outside
- * auto-delete, exactly as before this switch existed; once the data reads
- * again the flag clears and the next pass can record the time.
- */
-export function observedArchiveIds(rows: readonly ArchiveSessionRow[]): string[] {
-  const ids: string[] = []
-  for (const row of rows) {
-    if (row.archived !== true) continue
-    if (row.archivedAt !== undefined) continue
-    if (row.issues.includes('unreadable') || row.issues.includes('no-data')) continue
-    ids.push(row.id)
-  }
-  return ids
-}
-
-/**
- * Project a set of just-backfilled ids onto a row array: the named rows gain the
- * observation time and its `observed` source, every other row is returned as the
- * very same object. Pure - this is the read-side half of a backfill, so the
- * candidate rules of one cycle see the archive time that cycle records without a
- * second inventory pass, and the preview can show it without writing.
- */
-export function projectObservedArchives(
-  rows: readonly ArchiveSessionRow[],
-  backfilled: ReadonlySet<string>,
-  now: number,
-): ArchiveSessionRow[] {
-  return rows.map((row) => (backfilled.has(row.id) ? { ...row, archivedAt: now, archivedAtSource: 'observed' } : row))
-}
 
 /**
  * How long one sessions-root directory scan may be reused. The panel loads the
@@ -337,39 +294,12 @@ export class ArchiveService {
   }
 
   // ------------------------------------------------------------------
-  // Observed-archive backfill
-  // ------------------------------------------------------------------
-
-  /**
-   * Record an `observed` ledger entry for every archived row whose archive
-   * time is unknown, then persist once - and only when something was written,
-   * so a backfill that finds nothing never touches the ledger file.
-   *
-   * The recorded time is the moment of observation, which is a lower bound on
-   * the real archive moment (the session was archived at or before it). Because
-   * `autoDeleteSeedCandidates` skips archive times at or after the run start,
-   * this also keeps a row out of the delete set of the very cycle that records
-   * it.
-   *
-   * Callers inside a cycle must NOT hold the operation lock (runAutoCycle holds
-   * it); this method deliberately takes none.
-   * @returns the ids written, in row order.
-   */
-  private async recordObservedArchives(built: BuiltInventory, now: number): Promise<string[]> {
-    if (!this.config.recordManualArchive) return []
-    const ids = observedArchiveIds(built.rows)
-    for (const id of ids) this.ledger.entries[id] = { archivedAt: now, source: 'observed' }
-    if (ids.length > 0) await this.flushLedger()
-    return ids
-  }
-
-  // ------------------------------------------------------------------
   // Sources and protection
   // ------------------------------------------------------------------
 
   private async sources(): Promise<InventorySources> {
     const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
-    const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[] }>('workspaceRegistry')
+    const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[]; archivedAtById?: Record<string, number> }>('workspaceRegistry')
     return {
       feed: feed as never,
       registry: registry as never,
@@ -671,12 +601,12 @@ export class ArchiveService {
    * tier without touching an existing entry's source. Both modes are idempotent
    * write-ups: an existing `archivedAt` is never reset (a write-back must not
    * refresh the 30-day retention countdown), and repeated identical calls
-   * write nothing. Because `observedArchiveIds` skips rows that already carry
-   * an archive time, either order of backfill and write-back leaves exactly
-   * one entry (contract C5).
+   * write nothing. Rows that already carry an archive time — the host's stamp
+   * or a ledger entry — keep it, so write-back and the host stamp leave
+   * exactly one entry (contract C5).
    *
-   * Deliberately lock-free, mirroring `recordObservedArchives`: one ledger
-   * document, atomic whole-file writes, single-process read-modify-write.
+   * Deliberately lock-free: one ledger document, atomic whole-file writes,
+   * single-process read-modify-write.
    */
   async archiveOverride(
     ids: readonly string[],
@@ -898,15 +828,11 @@ export class ArchiveService {
     const archiveCandidates = this.config.autoArchiveEnabled
       ? autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now, protectedIds: protectedSet })
       : []
-    // A preview never writes: the backfill is projected in memory only, with
-    // `now` as both the observation time and the run start, so these candidates
-    // are the ones the next real cycle will compute (it records the same rows
-    // at its own start and therefore excludes them from that cycle too).
-    const seedRows = this.config.recordManualArchive
-      ? projectObservedArchives(built.rows, new Set(observedArchiveIds(built.rows)), now)
-      : built.rows
+    // A preview never writes: rows already carry their archive time (host
+    // stamp first, ledger fallback — archive-at-host-time-1114), so these
+    // candidates are the ones the next real cycle will compute.
     const deleteSeeds = this.config.autoDeleteEnabled
-      ? autoDeleteSeedCandidates(seedRows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
+      ? autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
       : []
     const plan = planDelete(built.rows, deleteSeeds.map((seed) => seed.id), this.protectedReason(undefined, built.rows))
     let deleteBytes = 0
@@ -949,20 +875,16 @@ export class ArchiveService {
         const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
         const protectedMap = this.protectedReason(currentSessionId, built.rows)
         const protectedSet = new Set(protectedMap.keys())
-        // Backfill first, against the same rows this cycle plans with: the
-        // recorded observation time is `startedAt`, so the existing
-        // `archivedAt >= runStartedAt` rule keeps every just-recorded session
-        // out of this cycle's delete set while later cycles count the retention
-        // from here. Zero writes leave the ledger file untouched.
-        const observed = await this.recordObservedArchives(built, startedAt)
-        const seedRows = observed.length === 0 ? built.rows : projectObservedArchives(built.rows, new Set(observed), startedAt)
-        const seeds = autoDeleteSeedCandidates(seedRows, { retainDays: this.config.autoDeleteDays, now: startedAt, runStartedAt: startedAt, protectedIds: protectedSet })
-        // `lastDeleteRun` is a DELETION record: a backfilled archive time is not
-        // a deleted session, and counting it as an `ok` entry would report
+        // Rows carry their archive time from the host stamp (ledger fallback),
+        // so planning starts straight from them; the existing
+        // `archivedAt >= runStartedAt` rule still keeps anything stamped at or
+        // after this cycle's start out of this cycle's delete set.
+        const seeds = autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now: startedAt, runStartedAt: startedAt, protectedIds: protectedSet })
+        // `lastDeleteRun` is a DELETION record: an archive time is not a
+        // deleted session, and counting it as an `ok` entry would report
         // "N sessions cleaned up" for a run that removed nothing. That number is
         // also the field users read to tell whether auto-delete works at all, so
         // inflating it would fake the very signal issue #1908 was diagnosed with.
-        // A backfill reaches the user through the row's backfilled marker only.
         if (seeds.length === 0) {
           const stats: RunStats = { at: startedAt, total: 0, ok: 0, skipped: 0, failed: 0, entries: [] }
           this.autoState.lastDeleteRun = stats
@@ -978,22 +900,6 @@ export class ArchiveService {
       } finally {
         this.cycleRunning = false
       }
-    })
-  }
-
-  /**
-   * The backfill-only scheduler step: take the lock, run one inventory pass and
-   * record the observed archives. Used when the backfill is the only automatic
-   * behaviour this deployment enables, so the recorded archive times still reach
-   * the list without an auto-delete cycle. It takes the lock itself and must
-   * therefore never be called from inside a cycle (where the lock is held).
-   * @returns the number of entries written.
-   */
-  private cycleObservedArchives(): Promise<number> {
-    return this.withLock(async () => {
-      const now = Date.now()
-      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
-      return (await this.recordObservedArchives(built, now)).length
     })
   }
 
@@ -1039,9 +945,7 @@ export class ArchiveService {
 
   private async tick(): Promise<void> {
     if (this.disposed) return
-    // The backfill counts as an automatic behaviour: with only that switch on,
-    // the scheduler still has work to do and must keep ticking.
-    const anythingEnabled = this.config.autoArchiveEnabled || this.config.autoDeleteEnabled || this.config.recordManualArchive
+    const anythingEnabled = this.config.autoArchiveEnabled || this.config.autoDeleteEnabled
     if (anythingEnabled) {
       // runAutoCycle serializes through the lock; a held lock (manual batch)
       // delays this cycle without failing it — catch-up happens next tick.
@@ -1056,25 +960,6 @@ export class ArchiveService {
             entries: [{ id: 'cycle', status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) }],
           }
           await this.flushState()
-        }
-      }
-      // The delete cycle backfills on its own, inside its own lock and against
-      // the rows it plans with, so this step exists for the deployment that
-      // enables the backfill but not auto-delete: the list still shows the
-      // recorded times. Running it here (never inside a cycle) keeps a single
-      // lock acquisition in flight.
-      if (this.config.recordManualArchive && !this.config.autoDeleteEnabled) {
-        try {
-          await this.cycleObservedArchives()
-        } catch (error) {
-          if (!(error instanceof BusyError)) {
-            this.autoState.lastDeleteRun = {
-              at: Date.now(),
-              total: 0, ok: 0, skipped: 0, failed: 1,
-              entries: [{ id: 'cycle', status: 'failed', reason: 'error', detail: `observed-archive backfill: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}` }],
-            }
-            await this.flushState()
-          }
         }
       }
       try {

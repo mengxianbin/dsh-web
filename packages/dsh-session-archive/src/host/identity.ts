@@ -26,9 +26,9 @@
  * spelling) looks itself up in the table and an unrecorded session actor is
  * denied — an unclassified identity archives nothing; anything else is a
  * channel name declared by a human caller and resolves to `human`. The
- * actor is self-reported over the loopback REST — the same trust model as
- * `recordManualArchive`: this gate stops honest-but-mistaken automation
- * (the 13:53 R16 misarchive), not a lying caller.
+ * actor is self-reported over the loopback REST — a self-reported identity
+ * stops honest-but-mistaken automation (the 13:53 R16 misarchive), not a
+ * lying caller.
  * @module @linxin666/dsh-session-archive/host/identity
  */
 

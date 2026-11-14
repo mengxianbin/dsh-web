@@ -23,7 +23,6 @@ const DOCUMENTED_DEFAULTS = {
   autoArchiveDays: 7,
   autoDeleteEnabled: false,
   autoDeleteDays: 7,
-  recordManualArchive: false,
   checkIntervalMin: 60,
 }
 
@@ -175,34 +174,16 @@ describe('host activation settings', () => {
   })
 })
 
-describe('recordManualArchive setting', () => {
-  it('admin sees the backfill switch served off by default', () => {
+describe('retired recordManualArchive setting (archive-at-host-time-1114)', () => {
+  it('the served schema and the resolved policy no longer carry the backfill field', () => {
     // Given the plugin Config schema the Host serves as this entry's settings page
     const dict = formFields()
 
-    // When the raw activation values are read and resolved
-    const effective = readArchiveConfig(Config({}) as SessionArchiveConfigFields)
-    const resolved = resolveAutoConfig(effective)
-
-    // Then the switch exists, is live-editable, and defaults to off
-    expect(dict['recordManualArchive']?.meta?.volatile).toBe(true)
-    expect(resolved.recordManualArchive).toBe(false)
-    expect(DEFAULT_AUTO_CONFIG.recordManualArchive).toBe(false)
-  })
-
-  it('admin switching the backfill on reaches the resolved policy unchanged', () => {
-    // Given an activation whose committed settings turn the backfill on
-    const field = volatileField(false)
-    const before = resolveAutoConfig(readArchiveConfig({ recordManualArchive: field } as SessionArchiveConfigFields))
-
-    // When the Host commits the user's write to `recordManualArchive: true`
-    field.set(true)
-    const after = resolveAutoConfig(readArchiveConfig({ recordManualArchive: field } as SessionArchiveConfigFields))
-
-    // Then the switch is off while unwritten and follows the committed value
-    expect(before.recordManualArchive).toBe(false)
-    expect(after.recordManualArchive).toBe(true)
-    // And the write leaves every other automation field at its default
-    expect(after).toEqual({ ...DEFAULT_AUTO_CONFIG, recordManualArchive: true })
+    // Then the retired field is gone from every layer
+    expect(dict['recordManualArchive']).toBeUndefined()
+    expect('recordManualArchive' in DEFAULT_AUTO_CONFIG).toBe(false)
+    const resolved = resolveAutoConfig(readArchiveConfig(Config({}) as SessionArchiveConfigFields))
+    expect('recordManualArchive' in resolved).toBe(false)
+    expect(resolved).toEqual(DOCUMENTED_DEFAULTS)
   })
 })

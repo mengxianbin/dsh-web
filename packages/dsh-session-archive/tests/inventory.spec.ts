@@ -328,3 +328,70 @@ describe('archivedAtSource', () => {
     expect(row && 'archivedAtSource' in row).toBe(false)
   })
 })
+
+describe('host archive stamps (archive-at-host-time-1114)', () => {
+  it('operator sees the host stamp win over the ledger entry, with attribution unchanged', async () => {
+    // Given a session the host stamped at 500 while a historical ledger entry says 300
+    const host = createFakeHost({
+      archivedSessionIds: ['session-manual'],
+      archivedAtById: { 'session-manual': 500 },
+    })
+    host.ledger.entries['session-manual'] = { archivedAt: 300, source: 'manual' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-manual')
+
+    // Then the host's time is the row's time (the executor is the authority)…
+    expect(row?.archivedAt).toBe(500)
+    // …while attribution still reads from the ledger, and no issue is raised
+    expect(row?.archivedAtSource).toBe('manual')
+    expect(row?.issues).not.toContain('no-archive-time')
+  })
+
+  it('operator sees a host-stamped archive with no ledger entry: time present, no source, no issue', async () => {
+    // Given a session archived natively after the host began stamping (no ledger entry)
+    const host = createFakeHost({
+      archivedSessionIds: ['session-native'],
+      archivedAtById: { 'session-native': 700 },
+    })
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-native')
+
+    // Then the row carries the host time, nothing to attribute, and no unknown-time flag
+    expect(row?.archivedAt).toBe(700)
+    expect(row && 'archivedAtSource' in row).toBe(false)
+    expect(row?.issues).not.toContain('no-archive-time')
+  })
+
+  it('operator sees the bare-id host stamp under the canonical row id', async () => {
+    // Given the harness stamped the bare spelling while the row is canonical
+    const host = createFakeHost({
+      archivedSessionIds: ['barefoot'],
+      archivedAtById: { barefoot: 900 },
+    })
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-barefoot')
+
+    // Then canonicalization maps the stamp onto the row
+    expect(row?.archivedAt).toBe(900)
+  })
+
+  it('degrades to the ledger when the registry face carries no host stamps', async () => {
+    // Given an older harness build: archived set present, no archivedAtById face
+    const host = createFakeHost({ archivedSessionIds: ['session-observed'] })
+    host.ledger.entries['session-observed'] = { archivedAt: 300, source: 'observed' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-observed')
+
+    // Then the historical entry still reads exactly as before — never fabricated
+    expect(row?.archivedAt).toBe(300)
+    expect(row?.archivedAtSource).toBe('observed')
+  })
+})

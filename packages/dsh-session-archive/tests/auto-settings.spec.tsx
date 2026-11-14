@@ -108,19 +108,20 @@ describe('AutoSettingsPanel', () => {
   })
 })
 
-describe('AutoSettingsPanel backfill switch', () => {
-  it('user enables the backfill switch and the bound form carries that exact write', async () => {
-    // Given a panel whose form has all three switches off
-    const form = new PrototypeMethodForm({ autoArchiveEnabled: false, autoDeleteEnabled: false, recordManualArchive: false })
+describe('AutoSettingsPanel retired backfill switch', () => {
+  it('renders only the two auto-policy switches; the backfill field is gone', async () => {
+    // Given a panel whose form carries the two auto-policy switches
+    const form = new PrototypeMethodForm({ autoArchiveEnabled: false, autoDeleteEnabled: false })
     const { container } = panelFor(form)
     const switches = container.querySelectorAll('input[type="checkbox"]')
-    expect(switches).toHaveLength(3)
+    // Then the retired recordManualArchive switch no longer renders
+    expect(switches).toHaveLength(2)
 
-    // When the user ticks the backfill switch, the one bound to recordManualArchive
-    fireEvent.click(switches[2] as HTMLInputElement)
+    // When the user ticks the retention switch (the second one)
+    fireEvent.click(switches[1] as HTMLInputElement)
 
-    // Then the write goes through the same form channel as the other booleans, for this field only
-    await waitFor(() => { expect(form.writes).toEqual([{ field: 'recordManualArchive', value: true }]) })
+    // Then the write goes through the same form channel as the other booleans
+    await waitFor(() => { expect(form.writes).toEqual([{ field: 'autoDeleteEnabled', value: true }]) })
     // And the panel shows no failure note, so the switch does not look saved-then-reverted
     expect(container.querySelector('[data-dsh-part="settings-save-failed"]')).toBeNull()
   })

@@ -35,6 +35,12 @@ export interface SessionFeedFace {
 export interface WorkspaceRegistryFace {
   list(): readonly { id: string; path: string; title: string; sessionIds: readonly string[] }[]
   archivedSessionIds: readonly string[]
+  /**
+   * The host's durable archive stamp (epoch ms) per archived id — the time
+   * authority since archive-at-host-time-1114. Absent on harness builds that
+   * predate the field; readers then fall back to the ledger (never fabricate).
+   */
+  archivedAtById?: Readonly<Record<string, number>>
 }
 
 export interface InventorySources {
@@ -301,6 +307,19 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
     if (canonical !== id && nativeIds[canonical] === undefined) nativeIds[canonical] = id
     return canonical
   }))
+  // The host's durable archive stamps, canonicalized like the archive set
+  // (archive-at-host-time-1114). An absent face or a failing read degrades to
+  // ledger-only times — never to a fabricated observation moment.
+  const hostArchivedAt = new Map<string, number>()
+  if (sources.registry?.archivedAtById !== undefined) {
+    try {
+      for (const [id, at] of Object.entries(sources.registry.archivedAtById)) {
+        hostArchivedAt.set(canonicalSessionId(id), at)
+      }
+    } catch {
+      // Degrades to ledger-only times for this pass.
+    }
+  }
   // Historical archive entries with no storage left (no feed row, no dir)
   // still surface as rows — flagged `no-data` — so the archive view stays
   // complete and the entries can be cleaned through unarchive/delete instead
@@ -336,7 +355,10 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
     if (draft.title === undefined) issues.push('no-title')
     const archived = archivedSet.has(draft.id)
     const ledgerEntry = archived ? ledgerEntryFor(sources.ledger, draft.id, nativeIds[draft.id]) : undefined
-    const archivedAt = ledgerEntry?.archivedAt
+    // Host time first (archive-at-host-time-1114: the executor stamps the
+    // moment), the ledger entry as fallback for archives that predate the
+    // host field. Attribution (source/reason/seal) stays ledger-derived.
+    const archivedAt = (archived ? hostArchivedAt.get(draft.id) : undefined) ?? ledgerEntry?.archivedAt
     // The source only travels with a real archive time: a row without one has
     // nothing to attribute, and the UI keys the "backfilled" marker off it.
     const archivedAtSource = ledgerEntry?.source

@@ -47,6 +47,7 @@ export interface FakeHost {
     workspaces: FixtureWorkspace[]
     list(): FixtureWorkspace[]
     get archivedSessionIds(): string[]
+    get archivedAtById(): Record<string, number>
     archiveSession(id: string): Promise<void>
     unarchiveSession(id: string): Promise<void>
     mutatedWorkspaces: string[]
@@ -62,6 +63,8 @@ export function createFakeHost(options: {
   persistedIds?: string[]
   brokenIds?: string[]
   archivedSessionIds?: string[]
+  /** The host's durable archive stamps, as the registry face exposes them. */
+  archivedAtById?: Record<string, number>
   dirs?: string[]
 } = {}): FakeHost {
   const home = mkdtempSync(join(tmpdir(), 'dsh-session-archive-'))
@@ -85,6 +88,7 @@ export function createFakeHost(options: {
     workspaceIds: (options.workspaces ?? []).map((workspace) => workspace.id),
     archivedSessionIds: [...(options.archivedSessionIds ?? [])],
   }
+  const archivedAtById: Record<string, number> = { ...(options.archivedAtById ?? {}) }
   const workspaces = (options.workspaces ?? []).map((workspace) => {
     const record: FixtureWorkspace & {
       mutate?(fn: (record: FixtureWorkspace) => FixtureWorkspace): Promise<void>
@@ -112,6 +116,9 @@ export function createFakeHost(options: {
     },
     get archivedSessionIds(): string[] {
       return [...state.archivedSessionIds]
+    },
+    get archivedAtById(): Record<string, number> {
+      return { ...archivedAtById }
     },
     async archiveSession(id: string): Promise<void> {
       if (!known(id)) throw new Error(`WorkspaceUnknownSessionError: ${id}`)
