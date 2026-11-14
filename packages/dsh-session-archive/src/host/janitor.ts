@@ -52,6 +52,7 @@ import { InventoryResponseCache, type InventoryResponseServe } from './inventory
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
+import { appendJournal, type JournalEvent } from './journal.ts'
 
 /** Thrown when the caller's expected delete total disagrees with the host plan. */
 export class PlanMismatchError extends Error {
@@ -153,6 +154,10 @@ export class ArchiveService {
   private readonly dshHome: string
   private readonly ledgerPath: string
   private readonly statePath: string
+  /** Append-only event journal path (B′, archive-audit-journal-1114). */
+  private readonly journalPath: string
+  /** Last journal batch timestamp; keeps journal batches strictly ordered in-process. */
+  private lastBatchAt = 0
 
   private ledger: LedgerDocument = { version: 1, entries: {} }
   private autoState: AutoStateDocument = { version: 1 }
@@ -214,6 +219,7 @@ export class ArchiveService {
     this.sealCompute = options.sealCompute
     this.ledgerPath = join(this.dshHome, 'dsh-session-archive', 'archive-ledger.json')
     this.statePath = join(this.dshHome, 'dsh-session-archive', 'state.json')
+    this.journalPath = join(this.dshHome, 'dsh-session-archive', 'archive-events.jsonl')
   }
 
   // ------------------------------------------------------------------
@@ -291,6 +297,32 @@ export class ArchiveService {
   private async flushState(): Promise<void> {
     if (!this.loaded) return
     await writeJsonAtomic(this.statePath, this.autoState).catch(() => {})
+  }
+
+  /**
+   * Batch timestamp for journal rows: wall clock, nudged +1ms on an
+   * in-process same-ms collision so journal batches stay strictly ordered
+   * (design §二). Ledger timestamps are untouched — the nudge only lands on
+   * the side log.
+   */
+  private nextBatchAt(): number {
+    const now = Date.now()
+    this.lastBatchAt = now > this.lastBatchAt ? now : this.lastBatchAt + 1
+    return this.lastBatchAt
+  }
+
+  /**
+   * Best-effort journal append (B′, archive-audit-journal-1114): never
+   * throws — a failed write only warns, so the archive/unarchive result is
+   * never flipped (fail-open, same loud-but-non-blocking shape as C4).
+   */
+  private async journal(events: readonly JournalEvent[]): Promise<void> {
+    if (events.length === 0) return
+    try {
+      await appendJournal(this.journalPath, events)
+    } catch (error) {
+      console.warn(`[dsh-session-archive] journal append failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   // ------------------------------------------------------------------
@@ -468,6 +500,8 @@ export class ArchiveService {
   async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string, gate?: ArchiveGate): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
+      const events: JournalEvent[] = []
+      const journalAt = this.nextBatchAt()
       const now = Date.now()
       const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
@@ -540,6 +574,7 @@ export class ArchiveService {
             ...(actor !== undefined ? { actor } : {}),
           }
           results.push({ id, status: 'ok' })
+          events.push({ id, op: 'archive', at: journalAt, ...(actor !== undefined ? { actor } : {}), entry: { ...this.ledger.entries[id] } })
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
         } finally {
@@ -547,6 +582,7 @@ export class ArchiveService {
         }
       }
       await this.flushLedger()
+      await this.journal(events)
       return { results, freedBytes: 0 }
     })
   }
@@ -554,6 +590,8 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
+      const events: JournalEvent[] = []
+      const journalAt = this.nextBatchAt()
       const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
       const toUnarchive: string[] = []
@@ -574,10 +612,14 @@ export class ArchiveService {
         // ledger keys stay canonical.
         await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive.map((id) => built.nativeIds[id] ?? id))
         for (const id of toUnarchive) {
+          // B′: snapshot the whole entry before the delete erases it — the
+          // journal keeps whatever seal/source/reason/actor the ledger drops.
+          const erased = this.ledger.entries[id] ?? this.ledger.entries[built.nativeIds[id] ?? id]
           delete this.ledger.entries[id]
           const native = built.nativeIds[id]
           if (native !== undefined && native !== id) delete this.ledger.entries[native]
           results.push({ id, status: 'ok' })
+          events.push({ id, op: 'unarchive', at: journalAt, ...(erased !== undefined ? { entry: { ...erased } } : {}) })
         }
       } catch (error) {
         for (const id of toUnarchive) {
@@ -585,6 +627,7 @@ export class ArchiveService {
         }
       }
       await this.flushLedger()
+      await this.journal(events)
       return { results, freedBytes: 0 }
     })
   }
@@ -906,6 +949,8 @@ export class ArchiveService {
   /** Archive without re-acquiring the lock (used inside cycles). */
   private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', nativeIds: Readonly<Record<string, string>>): Promise<BatchResponse> {
     const results: OpResult[] = []
+    const events: JournalEvent[] = []
+    const journalAt = this.nextBatchAt()
     const now = Date.now()
     for (const id of ids) {
       this.busy.add(id)
@@ -913,6 +958,7 @@ export class ArchiveService {
         await archiveSession(this.ctx, nativeIds[id] ?? id)
         this.ledger.entries[id] = { archivedAt: now, source }
         results.push({ id, status: 'ok' })
+        events.push({ id, op: 'archive', at: journalAt, entry: { ...this.ledger.entries[id] } })
       } catch (error) {
         results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
       } finally {
@@ -920,6 +966,7 @@ export class ArchiveService {
       }
     }
     await this.flushLedger()
+    await this.journal(events)
     return { results, freedBytes: 0 }
   }
 
