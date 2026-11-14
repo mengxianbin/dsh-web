@@ -44,18 +44,38 @@ const WORKER_CANDIDATES = [
 ] as const
 
 /**
+ * A rejected worker compute — an INFRA failure (script missing, budget
+ * exceeded, worker crash) that never produced a verdict. It carries the
+ * machine `detail` the record should show, so an infra outage is never
+ * mislabelled `decode-fail` (a transcript the analysis could not read).
+ * @example
+ * throw new SealComputeError('seal-state: worker script not found …', 'worker-missing')
+ */
+export class SealComputeError extends Error {
+  /** Machine detail the record carries: `worker-missing` / `worker-timeout` / `worker-error`. */
+  readonly detail: string
+  constructor(message: string, detail: string) {
+    super(message)
+    this.name = 'SealComputeError'
+    this.detail = detail
+  }
+}
+
+/**
  * Run one seal analysis on a worker thread (实施护栏 ②).
  * @param id - the session the verdict is for.
  * @param dir - its workspace directory from the sessions-root index.
- * @returns the six-value grouping; rejects on worker failure or timeout —
- *   the caller degrades the rejection to an `UNKNOWN` record (fail-visible).
+ * @returns the six-value grouping; rejects with a {@link SealComputeError}
+ *   naming the infra cause — the caller degrades the rejection to an
+ *   `UNKNOWN` record carrying that detail (fail-visible, never mislabelled
+ *   `decode-fail`).
  */
 export function computeSealInWorker(id: string, dir: string | undefined): Promise<SealCheckResult> {
   const base = new URL('.', import.meta.url)
   const entry = WORKER_CANDIDATES.map((candidate) => new URL(candidate, base))
     .find((url) => existsSync(fileURLToPath(url)))
   if (entry === undefined) {
-    return Promise.reject(new Error('seal-state: worker script not found next to the plugin module'))
+    return Promise.reject(new SealComputeError('seal-state: worker script not found next to the plugin module', 'worker-missing'))
   }
   const worker = new Worker(entry)
   return new Promise<SealCheckResult>((resolve, reject) => {
@@ -67,12 +87,12 @@ export function computeSealInWorker(id: string, dir: string | undefined): Promis
       finish()
     }
     const timer = setTimeout(() => {
-      settle(() => reject(new Error('seal-state: worker compute timed out')))
+      settle(() => reject(new SealComputeError('seal-state: worker compute timed out', 'worker-timeout')))
     }, SEAL_COMPUTE_TIMEOUT_MS)
     worker.once('message', (message: unknown) => {
       const result = (message as { result?: unknown } | null)?.result as SealCheckResult | undefined
       if (result === undefined || typeof result.verdict !== 'string') {
-        settle(() => reject(new Error('seal-state: worker answered no result')))
+        settle(() => reject(new SealComputeError('seal-state: worker answered no result', 'worker-error')))
         return
       }
       settle(() => resolve(result))
@@ -153,10 +173,14 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
     let result: SealCheckResult
     try {
       result = await compute(id, dir)
-    } catch {
-      // Worker failure or timeout: the same UNKNOWN the endpoint would serve
-      // for an unreadable transcript — visible on the lamp, never silent.
-      result = { id, verdict: 'UNKNOWN', detail: 'decode-fail' }
+    } catch (error) {
+      // A rejected compute is an INFRA failure (worker missing / timed out /
+      // crashed) — never a transcript the analysis could not read. Name the
+      // cause so the record stays trustworthy; `decode-fail` is reserved for
+      // a decode the worker itself returned. UNKNOWN still stamps the row
+      // (fail-visible, fail-closed gate) — the ruling's failure semantics.
+      const detail = error instanceof SealComputeError ? error.detail : 'worker-error'
+      result = { id, verdict: 'UNKNOWN', detail }
     }
     if (stopped) return
     // The session may have been disposed or replaced while the worker ran.
