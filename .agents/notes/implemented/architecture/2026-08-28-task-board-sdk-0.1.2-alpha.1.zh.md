@@ -24,6 +24,8 @@ Host runner 通过 gateway namespace 分发 unary 方法并消费直接业务结
 
 Session create、rename、prompt、list 与 page 调用以 `{ namespace, method, args: { request } }` 分发；`agentPresets/list` 使用空 args 对象并返回直接 roster。
 
+0.2.1 cohort 让每个 gateway 请求都必须携带 `peer`（`InvokeRemoteRequest`）。runner 在每次 invoke 与 stream 上命名一个进程内 owner peer：`principal: { kind: 'owner' }` 声明该调用是 Host 本地代码以本机用户身份驱动自己的 Host（gateway 对 owner peer 直接应答，不做 remote-access 判定），`interactions: 'none'` 让这个 peer 不接触它从不使用的转发事件端点。`createOwnerPeer(ctx)` 在插件 fiber 上铸造 peer，并在 fiber 处置时中止它；未显式传入 peer 的 runner（围绕 fake gateway 的单测）则把 peer 绑定到一个新的 root context 上。
+
 Workspace 校验在 Host registry 本地完成，其行使用 `id`；浏览器 workspace 行继续使用 `workspaceId`。
 
 由于本次迁移明确不修改 `shared/`，包内生成的 settings-form 副本直接适配；本次变更不能从旧 shared source 重新生成它。

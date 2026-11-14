@@ -1,0 +1,421 @@
+/* ============================================================
+   Frutiger Aero · DSH 皮肤
+   冰蓝气泡玻璃 / 水光高光描边
+   ------------------------------------------------------------
+   调色依据：背景壁纸主色
+     天空蓝 #58A2F2 / #1175F6 ・ 云白 #DDEEF8 ・ 草绿 #3C5B0F
+   文字对比度：正文对面板合成底 >= 7:1，次要文字 >= 4.5:1（WCAG AA）
+   ------------------------------------------------------------
+   改配色只需改这个文件里的变量，不用碰结构性代码。
+   ============================================================ */
+
+/* ---------- 浅色：正午晴空 · 白亮通透 ---------- */
+:root {
+  color: #0B2540;
+  background-color: #CDE8FA;
+
+  /* 气泡动效开关（零消耗模式）：
+     运行（running）= 气泡上浮动画运行
+     冻结（paused） = 气泡冻结、合成器零每帧工作（显卡占用降到接近空闲）
+     想冻结就把下面这个值改为 paused，然后刷新页面。 */
+  --aero-bubble-motion: running;
+
+  /* 面板实时磨砂开关（1.1.0 默认关闭）：
+     1.1.0 起把"2px 柔化 + 冷色"预烘进 assets/aero-sky.webp，面板退回清玻璃，
+     因为气泡在面板背后持续上浮会让实时模糊每帧重算整屏 —— 实测 iGPU 上
+     3D 引擎 82.33% vs 22.79%（见 patches.css 顶部的完整实测）。
+     想换回实时磨砂：改成 blur(1px) saturate(1.10) 并刷新页面（代价见上）。 */
+  --aero-frost: none;
+
+  /* 面板：冰蓝玻璃。透明度用【纯乘性】写法：
+     没有背景图时接近全透，有背景图时按用户设定的背景不透明度线性加权
+     （皮肤中心会把背景不透明度计入 --dsw-skin-scrim）。
+       遮蔽 0.85 → 透明度约 0.19（半透玻璃） ｜ 遮蔽 0 → 接近全透
+     调参入口优先用滑杆：设置 → 皮肤中心 → 背景遮蔽（0-100%），
+     它就是 --dsw-skin-scrim，直接乘以下面的系数，实时生效且持久化。
+     注意：该滑杆同时控制壁纸上的纱，调低会让壁纸更鲜亮。 */
+  --dsw-alias-bg-base: rgba(255, 255, 255, calc(var(--dsw-skin-scrim, 0) * .22));
+  --dsw-alias-bg-layer-1: rgba(244, 251, 255, calc(var(--dsw-skin-scrim, 0) * .25));
+  --dsw-alias-bg-layer-2: rgba(238, 248, 255, calc(var(--dsw-skin-scrim, 0) * .27));
+  --dsw-alias-bg-layer-3: rgba(230, 244, 254, calc(var(--dsw-skin-scrim, 0) * .30));
+  --dsw-mask-blur: none;   /* 官方默认；遮罩不做模糊，避免浮层下整屏发糊 */
+  --dsw-alias-bg-mask-1: #0B25403d;
+  --dsw-alias-bg-mask-2: #0B25401f;
+  --dsw-alias-bg-mask-3: #0B25407a;
+  --dsw-alias-bg-mask-photo: #071A30e0;
+  --dsw-alias-bg-module-platform: #EAF6FE8F;
+  --dsw-alias-bg-multi-select: #D6ECFBcc;
+  --dsw-alias-bg-overlay: #F2FAFFee;
+  --dsw-alias-bg-skeleton: #0B25400f;
+
+  /* 描边：冰蓝白高光，玻璃的"棱" */
+  --dsw-alias-border-inverted2: #ffffff9e;
+  --dsw-alias-border-inverted: #ffffff73;
+  --dsw-alias-border-l1: #3FB8E82E;
+  --dsw-alias-border-l2-darkmode-thin: #3FB8E838;
+  --dsw-alias-border-l2: #3FB8E84D;
+  --dsw-alias-border-l3: #2E9BD866;
+  --dsw-alias-border-l4: #1E6FA899;
+
+  /* 品牌 / 强调 */
+  --dsw-alias-brand-primary: #2E9BD8;
+  --dsw-alias-brand-primary-invert: #ffffff;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #2E9BD8;
+  --dsw-alias-brand-text: #0B2540;
+
+  /* 按钮 */
+  --dsw-alias-button-contrast-fill: #0B2540;
+  --dsw-alias-button-elevated-fill: #ffffff;
+  --dsw-alias-button-floating-fill: #ffffff;
+  --dsw-alias-button-floating-hover: #E6F5FE;
+  --dsw-alias-button-ghost-active-border: #7FD0F0;
+  --dsw-alias-button-ghost-active-fill: #D6ECFB;
+  --dsw-alias-button-ghost-active-hover: #C2E3F8;
+  --dsw-alias-button-info-fill: #1E7FBF;
+  --dsw-alias-button-info-hover: #2E9BD8;
+  --dsw-alias-button-primary-dimmed: #D6ECFB;
+  --dsw-alias-button-primary-fill: #2E9BD8;
+  --dsw-alias-button-primary-hover: #46ADE6;
+  --dsw-alias-button-tool-bar-fill-invisible: #2E9BD85C;
+  --dsw-alias-button-tool-bar-fill: #2E9BD880;
+  --dsw-alias-button-tool-bar-hover: #2E9BD899;
+
+  /* 交互态 */
+  --dsw-alias-interactive-bg-active: #2E9BD824;
+  --dsw-alias-interactive-bg-hover-accent: #2E9BD82E;
+  --dsw-alias-interactive-bg-hover-danger: #c000000f;
+  --dsw-alias-interactive-bg-hover-solid: #E1F2FD;
+  --dsw-alias-interactive-bg-hover: #2E9BD814;
+
+  /* 文字：全部压到深海军蓝，保证在亮玻璃上可读 */
+  --dsw-alias-label-primary: #0B2540;
+  --dsw-alias-label-primary-dimmed: #1D4570;
+  --dsw-alias-label-primary-foreground: #ffffff;
+  --dsw-alias-label-primary-inverted: #ffffff;
+  --dsw-alias-label-secondary: #17436E;
+  --dsw-alias-label-tertiary: #3D6E9C;
+  --dsw-alias-label-caption: #4A7CA8;
+  --dsw-alias-label-dimmed: #6E93B5;
+
+  /* Markdown / 代码 */
+  --dsw-alias-markdown-citation: #EAF6FE99;
+  --dsw-alias-markdown-code-block: #F4FBFF99;
+  --dsw-alias-markdown-code-block-banner: #F4FBFF99;
+  --dsw-alias-markdown-code-segment-selected: #ffffff;
+  --dsw-alias-markdown-code-segment-unselected: #EAF6FE99;
+  --dsw-alias-markdown-inline-code: #E1F2FD99;
+  --dsw-alias-markdown-placeholder: #F4FBFF99;
+  --dsw-alias-markdown-tag: #E1F2FD99;
+
+  /* 滚动条 */
+  --dsw-alias-scrollbar-bg-l1: #D6E9F7;
+  --dsw-alias-scrollbar-bg-l2: #D6E9F7;
+  --dsw-alias-scrollbar-hover-l1: #9BD3EE;
+  --dsw-alias-scrollbar-hover-l2: #9BD3EE;
+
+  /* 状态色 */
+  --dsw-alias-state-business-primary: #2E9BD8;
+  --dsw-alias-state-business-tertiary: #D6ECFB;
+  --dsw-alias-state-error-primary: #C92A2A;
+  --dsw-alias-state-error-secondary: #E05C5C;
+  --dsw-alias-state-success-primary: #2E8E52;
+  --dsw-alias-state-success-secondary: #58b058;
+  --dsw-alias-state-success-tertiary: #DCEFE2;
+  --dsw-alias-state-warn-primary: #C9973B;
+  --dsw-alias-state-warn-secondary: #D9B45B;
+  --dsw-alias-state-warn-tertiary: #F7EFDC;
+  --dsw-alias-state-warn-label: #A87C22;
+
+  /* 组件级 */
+  --dsw-alias-toast-bg: #0B2540;
+  --dsw-alias-tooltip-bg: #F4FBFFF2;
+  --dsw-alias-tooltip-fg: #0B2540;
+  --dsw-specific-bubble: #D6ECFB;
+  --dsw-specific-bubble-highlight: #C2E3F8;
+  --dsw-specific-input-major: #ffffff9e;
+  --dsw-specific-login-input: #ffffff9e;
+  --dsw-specific-menu: #F2FAFFF0;
+  --dsw-specific-selector: #E1F2FDD9;
+  --dsw-specific-sidebar-fill: rgba(234, 246, 254, calc(var(--dsw-skin-scrim, 0) * .33));
+  --dsw-specific-sidebar-nav-item-active: #D6ECFB;
+  --dsw-specific-sidebar-nav-item-active-accent: #9BD3EE;
+  --dsw-specific-sidebar-nav-item-hover: #E6F5FE;
+  --dsw-specific-tip: #F4FBFF;
+
+  color-scheme: light;
+}
+
+/* ---------- 深色：黄昏海面 · 冷冽半透 ---------- */
+body[data-ds-dark-theme] {
+  color: #DCEBFA;
+  background-color: #081a2e;
+
+  /* 深色同样改用纯乘性公式（见上方浅色段说明）。
+     深色保持较小常数项：完全透明会让深色面板失去"玻璃厚度" */
+  --dsw-alias-bg-base: rgba(7, 27, 59, calc(.20 + var(--dsw-skin-scrim, 0) * .34));
+  --dsw-alias-bg-layer-1: rgba(10, 35, 72, calc(.24 + var(--dsw-skin-scrim, 0) * .32));
+  --dsw-alias-bg-layer-2: rgba(13, 43, 86, calc(.28 + var(--dsw-skin-scrim, 0) * .30));
+  --dsw-alias-bg-layer-3: rgba(15, 50, 100, calc(.32 + var(--dsw-skin-scrim, 0) * .28));
+  --dsw-alias-bg-mask-1: #00000080;
+  --dsw-alias-bg-mask-2: #00000033;
+  --dsw-alias-bg-mask-3: #0000007a;
+  --dsw-alias-bg-mask-photo: #04121fe6;
+  --dsw-alias-bg-module-platform: #0e2f5f99;
+  --dsw-alias-bg-multi-select: #154886cc;
+  --dsw-alias-bg-overlay: #08234deb;
+  --dsw-alias-bg-skeleton: #ffffff0f;
+
+  --dsw-alias-border-inverted2: #ffffff9e;
+  --dsw-alias-border-inverted: #ffffff66;
+  --dsw-alias-border-l1: #7bd0ff1F;
+  --dsw-alias-border-l2-darkmode-thin: #7bd0ff26;
+  --dsw-alias-border-l2: #57c8ff2E;
+  --dsw-alias-border-l3: #57c8ff42;
+  --dsw-alias-border-l4: #57c8ff57;
+
+  --dsw-alias-brand-primary: #57c8ff;
+  --dsw-alias-brand-primary-invert: #061938;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #57c8ff;
+  --dsw-alias-brand-text: #bce3ff;
+
+  --dsw-alias-button-contrast-fill: #bce3ff;
+  --dsw-alias-button-elevated-fill: #0e2f5d;
+  --dsw-alias-button-floating-fill: #08234d;
+  --dsw-alias-button-floating-hover: #10386f;
+  --dsw-alias-button-ghost-active-border: #57c8ff;
+  --dsw-alias-button-ghost-active-fill: #10386f;
+  --dsw-alias-button-ghost-active-hover: #144381;
+  --dsw-alias-button-info-fill: #157bde;
+  --dsw-alias-button-info-hover: #2d9be7;
+  --dsw-alias-button-primary-dimmed: #10386f;
+  --dsw-alias-button-primary-fill: #2d9be7;
+  --dsw-alias-button-primary-hover: #44adf5;
+  --dsw-alias-button-tool-bar-fill-invisible: #57c8ff5C;
+  --dsw-alias-button-tool-bar-fill: #57c8ff80;
+  --dsw-alias-button-tool-bar-hover: #57c8ff99;
+
+  --dsw-alias-interactive-bg-active: #57c8ff29;
+  --dsw-alias-interactive-bg-hover-accent: #57c8ff33;
+  --dsw-alias-interactive-bg-hover-danger: #e05c5c1f;
+  --dsw-alias-interactive-bg-hover-solid: #10386f;
+  --dsw-alias-interactive-bg-hover: #f7ffff12;
+
+  --dsw-alias-label-primary: #d5ebff;
+  --dsw-alias-label-primary-dimmed: #a4c8f3;
+  --dsw-alias-label-primary-foreground: #061938;
+  --dsw-alias-label-primary-inverted: #081a2e;
+  --dsw-alias-label-secondary: #a4c8f3;
+  --dsw-alias-label-tertiary: #7ba6d6;
+  --dsw-alias-label-caption: #688fbd;
+  --dsw-alias-label-dimmed: #3c72ae;
+
+  --dsw-alias-markdown-citation: #0e2f5f9e;
+  --dsw-alias-markdown-code-block: #0a234da8;
+  --dsw-alias-markdown-code-block-banner: #0a234da8;
+  --dsw-alias-markdown-code-segment-selected: #144381BF;
+  --dsw-alias-markdown-code-segment-unselected: #0d2b5899;
+  --dsw-alias-markdown-inline-code: #0b264c9E;
+  --dsw-alias-markdown-placeholder: #0d2b5899;
+  --dsw-alias-markdown-tag: #0b264c9E;
+
+  --dsw-alias-scrollbar-bg-l1: #183e6f;
+  --dsw-alias-scrollbar-bg-l2: #183e6f;
+  --dsw-alias-scrollbar-hover-l1: #2b6bb6;
+  --dsw-alias-scrollbar-hover-l2: #2b6bb6;
+
+  --dsw-alias-state-business-primary: #57c8ff;
+  --dsw-alias-state-business-tertiary: #10386f;
+  --dsw-alias-state-error-primary: #E05C5C;
+  --dsw-alias-state-error-secondary: #E07070;
+  --dsw-alias-state-success-primary: #58b058;
+  --dsw-alias-state-success-secondary: #58b058;
+  --dsw-alias-state-success-tertiary: #1E3F2C;
+  --dsw-alias-state-warn-primary: #D9B45B;
+  --dsw-alias-state-warn-secondary: #D9B45B;
+  --dsw-alias-state-warn-tertiary: #6B5420;
+  --dsw-alias-state-warn-label: #D9B45B;
+
+  --dsw-alias-toast-bg: #0e2f5d;
+  --dsw-alias-tooltip-bg: #08234dF2;
+  --dsw-alias-tooltip-fg: #d5ebff;
+  --dsw-specific-bubble: #10386f;
+  --dsw-specific-bubble-highlight: #144381;
+  --dsw-specific-input-major: #0a234da6;
+  --dsw-specific-login-input: #0a234da6;
+  --dsw-specific-menu: #0a234df0;
+  --dsw-specific-selector: #0b264cD9;
+  --dsw-specific-sidebar-fill: rgba(8, 31, 68, calc(.24 + var(--dsw-skin-scrim, 0) * .40));
+  --dsw-specific-sidebar-nav-item-active: #10386f;
+  --dsw-specific-sidebar-nav-item-active-accent: #206bb6;
+  --dsw-specific-sidebar-nav-item-hover: #0e2f5d;
+  --dsw-specific-tip: #08234d;
+
+  color-scheme: dark;
+}
+
+/* ---------- AionUI 组件变量 ---------- */
+:root {
+  --aion-bg-base: #ffffff94;
+  --aion-bg-1: #F4FBFF80;
+  --aion-bg-2: #EAF6FEA6;
+  --aion-bg-3: #2E9BD838;
+  --aion-bg-4: #2E9BD857;
+  --aion-bg-hover: #2E9BD814;
+  --aion-bg-active: #2E9BD824;
+  --aion-text-primary: #0B2540;
+  --aion-text-secondary: #17436E;
+  --aion-text-tertiary: #3D6E9C;
+  --aion-text-disabled: #6E93B5;
+  --aion-primary: #2E9BD8;
+  --aion-success: #2E8E52;
+  --aion-warning: #C9973B;
+  --aion-danger: #C92A2A;
+  --aion-brand: #9BD3EE;
+  --aion-aou-1: #F4FBFF;
+  --aion-aou-2: #D6ECFB;
+  --aion-aou-3: #9BD3EE;
+  --aion-aou-4: #5AB4E0;
+  --aion-aou-5: #2E9BD8;
+  --aion-aou-6: #17436E;
+  --aion-fill-2: #2E9BD80f;
+  --aion-fill-3: #2E9BD824;
+  --aion-border-base: #2E9BD82E;
+  --aion-overlay-shadow: 0 10px 30px #0B254038, 0 1px 0 #ffffffb3 inset;
+  --aion-font-sans: -apple-system, "system-ui", "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --aion-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+body[data-ds-dark-theme] {
+  --aion-bg-base: #0a234dd1;
+  --aion-bg-1: #0a234d80;
+  --aion-bg-2: #0e2f5f99;
+  --aion-bg-3: #57c8ff33;
+  --aion-bg-4: #57c8ff4d;
+  --aion-bg-hover: #57c8ff1f;
+  --aion-bg-active: #57c8ff33;
+  --aion-text-primary: #d5ebff;
+  --aion-text-secondary: #a4c8f3;
+  --aion-text-tertiary: #7ba6d6;
+  --aion-text-disabled: #3c72ae;
+  --aion-primary: #57c8ff;
+  --aion-brand: #7bd0ff;
+  --aion-aou-1: #0b264c;
+  --aion-aou-2: #0e2f5d;
+  --aion-aou-3: #10386f;
+  --aion-aou-4: #206bb6;
+  --aion-aou-5: #4c9aff;
+  --aion-aou-6: #a4c8f3;
+  --aion-fill-2: #57c8ff1f;
+  --aion-fill-3: #57c8ff33;
+  --aion-border-base: #57c8ff26;
+  --aion-overlay-shadow: 0 14px 36px #00000480, 0 1px 0 #f7ffff26 inset;
+}
+
+/* ---------- 水光：高光描边与外发光（Frutiger Aero 的"棱"）---------- */
+[data-dsh-part="dialog"] {
+  /* 窗口级巨型层 [data-dsh-part="dialog"] 刻意不使用 backdrop-filter：
+     对它做整屏高斯模糊约 +22% 显卡占用，是这套皮肤里唯一昂贵的写法。
+     区域磨砂改由 patches.css 挂到具体结构类名上，代价低于 0.3%。 */
+  border-color: #ffffffb3;
+  box-shadow:
+    0 12px 34px #0B254029,
+    0 1px 0 #ffffffcc inset,
+    0 -1px 0 #7FD0F03D inset;
+}
+
+body[data-ds-dark-theme] [data-dsh-part="dialog"] {
+  border-color: #5AC8F547;
+  box-shadow:
+    0 14px 38px #00000073,
+    0 1px 0 #ffffff2e inset;
+}
+
+/* ---------- 滚动条 ---------- */
+body::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+body::-webkit-scrollbar-track {
+  background: #EAF6FE;
+}
+
+body::-webkit-scrollbar-thumb {
+  background: #B3DCF2;
+  border: 2px solid #EAF6FE;
+  border-radius: 5px;
+}
+
+body::-webkit-scrollbar-thumb:hover {
+  background: #7FC8E8;
+}
+
+body::-webkit-scrollbar-corner {
+  background: #EAF6FE;
+}
+
+body[data-ds-dark-theme]::-webkit-scrollbar-track,
+body[data-ds-dark-theme]::-webkit-scrollbar-corner {
+  background: #081a2e;
+}
+
+body[data-ds-dark-theme]::-webkit-scrollbar-thumb {
+  background: #3D6E9C;
+  border-color: #081a2e;
+}
+
+body[data-ds-dark-theme]::-webkit-scrollbar-thumb:hover {
+  background: #5A8FBC;
+}
+
+/* ---------- 选区 ---------- */
+body::selection {
+  color: #04263D;
+  background: #A8E4FF;
+}
+
+body[data-ds-dark-theme]::selection {
+  color: #04263D;
+  background: #7FD0F0;
+}
+
+body[data-ds-dark-theme] :focus-visible {
+  outline-color: var(--dsw-alias-state-business-primary);
+}
+
+/* ---------- 窄窗浮层侧栏（视口宽度 < 1024px）----------
+   窄窗下侧栏收成窄轨；手动展开时它作为浮层叠在被压缩的主区之上。
+   官方默认的 --dsw-specific-sidebar-fill 是不透明静态色，正是为了浮层态可读：
+   半透明填充会让背后内容透出来，两层文字互相叠印。 */
+@media (max-width: 1023px) {
+  /* 只给侧栏列单独加底色，不要覆盖 --dsw-specific-sidebar-fill：
+     该变量同时是整个窗口框架的底色
+     （[data-windows-titlebar] .BynINW_frame { background: var(--dsw-specific-sidebar-fill) }），
+     在断点内改它会把壁纸一起挡掉，整个窗口变成一片灰。 */
+  [class*="sidebarCol"] {
+    background-color: rgba(242, 250, 255, .96);
+    box-shadow:
+      inset 4px 0 7px -4px #ffffff26,
+      10px 0 28px #0B254026;
+  }
+  body[data-ds-dark-theme] [class*="sidebarCol"] {
+    background-color: rgba(8, 24, 47, .96);
+    box-shadow:
+      inset 4px 0 7px -4px #ffffff12,
+      10px 0 28px #00000059;
+  }
+
+  /* 浮层遮罩减半：窄窗下侧栏浮层会用 --dsw-alias-bg-mask-1 压暗主区，
+     官方 24% 与接近纯白的侧栏并置时对比偏硬；此处降到 12%（暗色 50%→32%），
+     保留"内容退后"的层次而不显得发灰。
+     注意：该变量也用于窄窗内的其它弹层遮罩，会一并变淡。 */
+  :root {
+    --dsw-alias-bg-mask-1: #0B25401f;
+  }
+  body[data-ds-dark-theme] {
+    --dsw-alias-bg-mask-1: #00000052;
+  }
+}

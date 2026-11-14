@@ -298,9 +298,10 @@ describe('GitService status single-flight', () => {
     const fakeRunner: GitRunner = {
       async run(argv) {
         calls.push([...argv])
-        if (argv[0] === 'rev-parse' && argv[1] === '--show-toplevel') return { exitCode: 0, stdout: '/repo\n', stderr: '' }
-        if (argv[0] === 'rev-parse' && argv[1] === '--abbrev-ref') return { exitCode: 0, stdout: 'main\n', stderr: '' }
-        if (argv[0] === 'rev-parse' && argv[1] === '--short') return { exitCode: 0, stdout: 'abc1234\n', stderr: '' }
+        // One spawn carries root + short head, so the stub answers with both lines;
+        // the branch now rides the status header.
+        if (argv[0] === 'rev-parse' && argv[1] === '--show-toplevel') return { exitCode: 0, stdout: '/repo\nabc1234\n', stderr: '' }
+        if (argv[0] === 'status') return { exitCode: 0, stdout: '# branch.oid abc\n# branch.head main\n', stderr: '' }
         return { exitCode: 0, stdout: '', stderr: '' }
       },
     }
@@ -328,17 +329,11 @@ describe('GitService status single-flight', () => {
       async run(argv, _cwd, signal) {
         calls.push({ argv: [...argv], signal })
         if (argv[0] === 'rev-parse' && argv[1] === '--show-toplevel') {
-          return { exitCode: 0, stdout: '/repo\n', stderr: '' }
-        }
-        if (argv[0] === 'rev-parse' && argv[1] === '--abbrev-ref') {
-          return { exitCode: 0, stdout: 'main\n', stderr: '' }
+          return { exitCode: 0, stdout: '/repo\nabc1234\n', stderr: '' }
         }
         if (argv[0] === 'status') {
           signal?.addEventListener('abort', () => { abortObserved = true }, { once: true })
           return new Promise((resolve) => { releaseStatus = resolve })
-        }
-        if (argv[0] === 'rev-parse' && argv[1] === '--short') {
-          return { exitCode: 0, stdout: 'abc1234\n', stderr: '' }
         }
         return { exitCode: 0, stdout: '', stderr: '' }
       },

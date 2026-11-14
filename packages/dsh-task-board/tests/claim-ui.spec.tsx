@@ -7,6 +7,8 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it } from 'vitest'
 import { TaskDetail } from '../src/client/board/TaskDetail.tsx'
+import { t } from '../src/client/locales.ts'
+import { openFormSection } from './form-sections.ts'
 import type { BoardController, ControllerSnapshot } from '../src/core/controller.ts'
 import type { TaskRecord } from '../src/core/tasks.ts'
 
@@ -48,6 +50,7 @@ function controller(): BoardController {
   }
   return {
     getSnapshot: () => state,
+    isHostBacked: () => false,
     subscribe: () => () => {},
     closeTask: () => {},
   } as unknown as BoardController
@@ -65,6 +68,8 @@ function render(element: React.ReactElement): HTMLElement {
 describe('claim audit UI (issue #6)', () => {
   it('shows the freeze source session and the execution initiator in the detail view', () => {
     const container = render(<TaskDetail controller={controller()} task={card()} />)
+    // The history is folded by default; the initiator lives inside it.
+    openFormSection(container, t('detail.execution'))
     const freeze = container.querySelector('[data-dsh-part="freeze"]')
     expect(freeze).not.toBeNull()
     expect(freeze!.textContent).toContain('session-source')

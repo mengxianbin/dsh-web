@@ -3,7 +3,7 @@ import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage } from 'node:http'
 import { PairingService } from '../src/pairing.ts'
-import { makeGateListener, readCookie, isPairedDeviceRequest } from '../src/gate.ts'
+import { makeGateListener, readCookie, isLoopbackClient, isLoopbackUpstream, isPairedDeviceRequest } from '../src/gate.ts'
 
 function request(headers: Record<string, string>, remoteAddress = '127.0.0.1'): IncomingMessage {
   const req = Readable.from([]) as unknown as IncomingMessage
@@ -141,6 +141,109 @@ describe('makeGateListener', () => {
     const service = makeService()
     const gate = makeGateListener(service)
     expect(gate(request({ host: ':::' }), 'session.list', () => true)).toBe(false)
+  })
+})
+
+/**
+ * A reverse proxy in front of the host rewrites the Host to its own
+ * 127.0.0.1:<port> upstream and dials it over loopback, so both halves of the
+ * loopback classification hold for a public request. The forwarding header is
+ * what tells the two apart (issue #1906).
+ */
+describe('isLoopbackClient behind a reverse proxy', () => {
+  it('operator on the desktop stays loopback when no forwarding header is present', () => {
+    // Given a direct desktop request to 127.0.0.1
+    const direct = request({ host: '127.0.0.1:3080' })
+    // When the classification runs
+    const verdict = isLoopbackClient(direct)
+    // Then it is the local client
+    expect(verdict).toBe(true)
+  })
+
+  it('operator reaching the host through Cloudflare Tunnel is not classified as loopback by cf-connecting-ip', () => {
+    // Given a proxy that rewrote the Host and carries CF-Connecting-IP
+    const forwarded = request({ host: '127.0.0.1:3080', 'cf-connecting-ip': '203.0.113.7' })
+    // When the classification runs
+    const verdict = isLoopbackClient(forwarded)
+    // Then the public caller is not the desktop
+    expect(verdict).toBe(false)
+  })
+
+  it('operator reaching the host through a reverse proxy is not classified as loopback by x-forwarded-for', () => {
+    // Given a proxy that rewrote the Host and appended X-Forwarded-For
+    const forwarded = request({ host: '127.0.0.1:3080', 'x-forwarded-for': '203.0.113.7, 127.0.0.1' })
+    // When the classification runs
+    const verdict = isLoopbackClient(forwarded)
+    // Then the forwarded caller is never the desktop, whatever hop it names
+    expect(verdict).toBe(false)
+  })
+
+  it('operator on a non-loopback socket stays outside the loopback classification', () => {
+    // Given a LAN caller with a spoofed loopback Host and no forwarding header
+    const lan = request({ host: '127.0.0.1:3080' }, '192.168.1.20')
+    // When the classification runs
+    const verdict = isLoopbackClient(lan)
+    // Then the socket address still decides
+    expect(verdict).toBe(false)
+  })
+
+  it('operator behind a proxy does not pass the pairing gate without a device cookie', () => {
+    // Given a pairing service and a tunnel-forwarded request that looks loopback
+    const service = makeService()
+    const gate = makeGateListener(service)
+    let delegated = false
+    // When the gate sees it
+    const result = gate(
+      request({ host: '127.0.0.1:3080', 'cf-connecting-ip': '203.0.113.7' }),
+      'session.list',
+      () => { delegated = true; return true },
+    )
+    // Then the request is treated as remote and refused
+    expect(result).toBe(false)
+    expect(delegated).toBe(false)
+  })
+})
+
+/**
+ * #1906 made a forwarded request stop looking like the desktop; #1919 splits the
+ * two facts that used to share one predicate. A loopback upstream (a proxy dialing
+ * 127.0.0.1:<port>) still says the request reached this process by loopback, which
+ * is what the reachability fences need; it never says the caller IS the desktop,
+ * which is what the payload and control-plane fences keep asking isLoopbackClient.
+ */
+describe('isLoopbackUpstream', () => {
+  it('visitor behind a tunnel reaches a loopback upstream without becoming the desktop', () => {
+    // Given a proxy that dialed the loopback upstream and rewrote the Host to it
+    const forwarded = request({ host: '127.0.0.1:3080', 'cf-connecting-ip': '203.0.113.7' })
+    // When both classifications run
+    // Then the request did reach a loopback authority, but it is not the desktop
+    expect(isLoopbackUpstream(forwarded)).toBe(true)
+    expect(isLoopbackClient(forwarded)).toBe(false)
+  })
+
+  it('operator on the desktop is both reachable over loopback and the desktop', () => {
+    // Given a desktop request with no forwarding header
+    const direct = request({ host: '127.0.0.1:3080' })
+    // When both classifications run
+    // Then it is reachable over loopback and it is the desktop
+    expect(isLoopbackUpstream(direct)).toBe(true)
+    expect(isLoopbackClient(direct)).toBe(true)
+  })
+
+  it('visitor on a non-loopback socket stays outside the loopback upstream', () => {
+    // Given a LAN caller presenting a loopback Host
+    const lan = request({ host: '127.0.0.1:3080' }, '192.168.1.20')
+    // When the classification runs
+    // Then the socket address still decides
+    expect(isLoopbackUpstream(lan)).toBe(false)
+  })
+
+  it('visitor presenting a non-loopback Host stays outside the loopback upstream', () => {
+    // Given a loopback socket presenting a foreign Host
+    const foreign = request({ host: 'phone.example.com' })
+    // When the classification runs
+    // Then the Host half still decides
+    expect(isLoopbackUpstream(foreign)).toBe(false)
   })
 })
 

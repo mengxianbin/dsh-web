@@ -1,17 +1,23 @@
 /**
- * DSH host version parsing and comparison for the update compatibility
+ * Version parsing plus the requirement reader for the update compatibility
  * check. The declared minimum lives in the published package manifest under
- * `dsh.engines.dsh`, falling back to the top-level `engines.dsh`; the only
- * supported form is `>=X.Y.Z[-prerelease]`.
+ * `dsh.engines.dsh`, falling back to the top-level `engines.dsh` and then to
+ * the `@deepseek-ai/dsh` peer; the range forms a manifest may use are the
+ * full node-semver range grammar.
  *
- * Comparison deliberately uses plain semver ordering instead of
- * `semver.satisfies`: npm's prerelease rule only allows a prerelease version
- * to satisfy a comparator set carrying a prerelease on the same
- * major.minor.patch tuple, which would reject a newer host line (0.1.1-rc.2)
- * against a declared `>=0.1.0-rc.8` — exactly the cross-cohort upgrade path
- * this check must allow. Everything here is pure and tolerant of untrusted
- * input: a malformed value means "cannot verify", which the callers treat as
- * a fail-closed verdict when a requirement was declared (issue #754).
+ * This module is shared by both halves and therefore stays free of `semver`,
+ * which is a node package: it parses and compares a single `X.Y.Z[-pre]`
+ * version, which is all the browser half needs to render a declared range
+ * (`displayMinimumVersion`) and all the host half needs to accept a probed
+ * host version (`parseDshVersion`). The range verdict itself lives in the
+ * host-only `../host/dsh-compat.ts`, which evaluates the declaration with
+ * `semver.satisfies(host, range, { includePrerelease: true })` — the exact
+ * call the official boot gate makes, so `||`, `^`, `~`, multi-comparator
+ * and x-ranges all decide the same way here as they do at boot.
+ *
+ * Everything here is pure and tolerant of untrusted input: a malformed value
+ * means "cannot verify", which the callers treat as a fail-closed verdict
+ * when a requirement was declared (issue #754).
  * @module @linxin666/dsh-client-ui-plugin-manager/core
  */
 
@@ -90,27 +96,12 @@ function comparePrerelease(left: readonly (number | string)[], right: readonly (
 const MINIMUM_RANGE_PATTERN = /^>=\s*(v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/
 
 /**
- * Whether a host version satisfies a declared `>=X.Y.Z[-prerelease]` minimum.
- * @param host - the running DSH host version.
- * @param minimum - the declared minimum; any form other than `>=<semver>`
- * (plain semver, `^`, `~`, multi-comparator ranges, empty) returns undefined.
- * @returns true / false, or undefined when the host version is malformed or
- * the minimum uses an unsupported form — callers treat undefined as
- * "cannot verify" and fail closed for declared requirements.
- */
-export function meetsMinimumDsh(host: string, minimum: string): boolean | undefined {
-  const match = MINIMUM_RANGE_PATTERN.exec(minimum.trim())
-  if (match === null) return undefined
-  const compared = compareVersions(host, match[1])
-  if (compared === undefined) return undefined
-  return compared >= 0
-}
-
-/**
  * The bare minimum version for display: strips the `>=` operator (and an
  * optional leading `v`) from a declared requirement so UI copy that already
  * contains the comparison operator renders `0.1.1-rc.1` instead of
- * `>= >=0.1.1-rc.1`. Unsupported range forms render unchanged.
+ * `>= >=0.1.1-rc.1`. Every other range form renders unchanged — the browser
+ * half does not evaluate a range (the host does, in `../host/dsh-compat.ts`),
+ * so it must not pull a range parser into the client bundle to shorten copy.
  * @param minimum - the declared minimum range.
  * @returns the version portion for display.
  */
@@ -121,15 +112,22 @@ export function displayMinimumVersion(minimum: string): string {
 
 /**
  * Read the declared DSH minimum from a published registry manifest:
- * `dsh.engines.dsh` first, top-level `engines.dsh` as the fallback.
+ * `dsh.engines.dsh` first, top-level `engines.dsh` next, and
+ * `peerDependencies["@deepseek-ai/dsh"]` last, which is where a package that
+ * only declares the host as a peer still gets gated at boot.
  * Defensive against malformed or untrusted metadata: anything that is not a
  * non-empty string reads as absent.
  * @param manifest - the decoded registry version manifest.
  * @returns the declared minimum, or undefined when not declared.
  */
-export function dshRequirementOf(manifest: { dsh?: unknown; engines?: unknown }): string | undefined {
+export function dshRequirementOf(manifest: { dsh?: unknown; engines?: unknown; peerDependencies?: unknown }): string | undefined {
   const dshEngines = (manifest.dsh as { engines?: unknown } | undefined)?.engines as { dsh?: unknown } | undefined
   const engines = (manifest.engines as { dsh?: unknown } | undefined)?.dsh
-  const value = dshEngines?.dsh ?? engines
+  const peers = (manifest.peerDependencies as Record<string, unknown> | undefined)?.['@deepseek-ai/dsh']
+  // The host's own peer gate is the LAST word: a package that declares the
+  // host only under peerDependencies still gets that row skipped at boot when
+  // the floor is not met, so a requirement we display must come from the same
+  // place the gate reads, or the user is told nothing and then loses the row.
+  const value = dshEngines?.dsh ?? engines ?? peers
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
 }

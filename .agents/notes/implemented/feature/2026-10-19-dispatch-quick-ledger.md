@@ -16,7 +16,7 @@ Batch task dispatch creates one session per task, but nothing durable records wh
 
 ## Alternatives considered
 
-- Writing `[/] 🔗 session-xxxx` back into the git task board as the binding account: rejected — worktree-isolated board sessions cannot see each other's commits, so the board would show stale occupancy exactly when concurrency matters (this was the original charter idea, overturned in design v3). The board may still carry such annotations as a human convenience, but the machine gate cannot depend on them.
+- Writing `[/] session-xxxx` back into the git task board as the binding account: rejected — worktree-isolated board sessions cannot see each other's commits, so the board would show stale occupancy exactly when concurrency matters (this was the original charter idea, overturned in design v3). The board may still carry such annotations as a human convenience, but the machine gate cannot depend on them.
 - Storing bindings in the workspace store (alongside `sessionIds`): rejected — that store is Host-owned schema; extending it couples this plugin to its internal shape and risks the session-persistence machinery. The ledger is plugin-local with a structural read of the workspace store.
 - Deleting bindings when sessions are archived (event-driven cleanup): rejected — the archive plugin runs in a separate process and the Host may be killed at any time; deletion-on-event would leak live bindings on missed events. Aliveness is therefore computed at read time from the authoritative store, making the ledger self-healing.
 - Returning 500 when the binding write fails: rejected — the session is already created and prompting; a disk hiccup on the ledger must not make the caller believe the dispatch failed and retry into a duplicate session.

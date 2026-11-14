@@ -1,0 +1,946 @@
+/**
+ * Styles of the agents center-column page.
+ *
+ * Layout rules for the phone-first case this GUI is driven from (360px wide,
+ * remote-web-ui): the page root and every column/grid child carry
+ * `min-width: 0`, the scroll container hides horizontal overflow, the card
+ * grids use `minmax(min(<ideal>, 100%), 1fr)` so a card never demands more
+ * width than the column has, and every free-text surface wraps with
+ * `overflow-wrap: anywhere` plus a line clamp. No rule here reads a class name
+ * owned by another package.
+ */
+
+.page {
+  /* The one inline inset the header row, the scrolling body and the page banner
+     share, so every panel and card grid inside them ends on the same edge. The
+     narrow-viewport rule below moves this single declaration. */
+  --agents-inline-inset: 16px;
+  display: flex;
+  flex-direction: column;
+  block-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary, #1f2328);
+  background: var(--dsw-alias-bg-base, transparent);
+  font-family: var(--dsw-font-family, inherit);
+}
+
+.header {
+  display: flex;
+  flex-wrap: wrap;
+  /* The title and the refresh control share one text baseline, so the control
+     belongs to the heading row instead of floating beside it. */
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-inline-size: 0;
+  padding: 16px var(--agents-inline-inset) 8px;
+}
+
+.headerTitle {
+  flex: 1 1 180px;
+  min-inline-size: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  max-inline-size: 100%;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px var(--agents-inline-inset) 24px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+.sectionHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  min-inline-size: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-inline-size: 0;
+  padding: 20px 16px;
+  border: 1px dashed var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  text-align: start;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.emptyHint {
+  margin: 0;
+  max-inline-size: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.squadGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr));
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.squadItem {
+  display: flex;
+  min-inline-size: 0;
+}
+
+.squadCard {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, transparent);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.squadCard:hover {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
+
+.squadCard:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, currentColor);
+  outline-offset: 2px;
+}
+
+.squadName {
+  max-inline-size: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.squadCount {
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.squadDescription {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  max-inline-size: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+.detailHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.detailTitle {
+  flex: 1 1 180px;
+  min-inline-size: 0;
+}
+
+.detailWorkspace {
+  margin: 2px 0 0;
+  max-inline-size: 100%;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.detailDescription {
+  margin: 0;
+  max-inline-size: 100%;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+.detailActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+.membersTitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.memberGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memberItem {
+  display: flex;
+  min-inline-size: 0;
+}
+
+.memberCard {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, transparent);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+}
+
+.memberName {
+  margin: 0;
+  max-inline-size: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Three equal tracks, one per pinned field: every card spends the same column
+   on the same label, so the label row and the value row of neighbouring cards
+   share one line instead of redistributing per content length. */
+.meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px 12px;
+  min-inline-size: 0;
+  margin: 0;
+}
+
+.metaItem {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+.metaLabel {
+  font-size: 11px;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+/* One line per value: a long pin is clipped with an ellipsis inside its own
+   track instead of growing a second line, and MemberCard.tsx carries the whole
+   string in the node's title and accessible name, so the clip loses nothing. */
+.metaValue {
+  margin: 0;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memberBrief {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  max-inline-size: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+/* One status line: a glyph plus a text label, always mounted with its own height
+   reserved, so a run that starts or settles never moves the actions below it. */
+.runStatus {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  min-block-size: 18px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+  overflow-wrap: anywhere;
+}
+
+.runStatus svg {
+  flex: 0 0 auto;
+}
+
+/* Pinned to the card bottom: the auto margin spends the free block space above
+   the row, so every card of a grid row puts its actions on one shared line no
+   matter how tall its fields turned out. */
+.memberActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-inline-size: 0;
+  margin-block-start: auto;
+}
+
+.primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  max-inline-size: 100%;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--dsw-alias-button-primary-fill, #1f2328);
+  color: var(--dsw-alias-label-primary-foreground, #ffffff);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--dsw-alias-button-primary-hover, #30363d);
+}
+
+.primary:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  max-inline-size: 100%;
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.secondary:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover, transparent);
+}
+
+.secondary:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.secondary:focus-visible,
+.primary:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary, currentColor);
+  outline-offset: 2px;
+}
+
+.danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 44px;
+  min-inline-size: 44px;
+  max-inline-size: 100%;
+  padding: 0 12px;
+  border: 1px solid var(--dsw-alias-state-error-primary, #b91c1c);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.danger:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  margin: 0;
+  padding: 24px 16px;
+  border: 1px dashed var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.noticeError {
+  margin: 0;
+  padding: 8px 10px;
+  max-inline-size: 100%;
+  border: 1px solid var(--dsw-alias-state-error-secondary, var(--dsw-alias-state-error-primary, #b91c1c));
+  border-radius: 8px;
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* A page-level banner sits between the header and the scrolling body, so it
+   carries the gutters the body applies to its own content. */
+.banner {
+  margin: 0 var(--agents-inline-inset) 8px;
+  max-inline-size: calc(100% - 2 * var(--agents-inline-inset));
+}
+
+.noticeOk {
+  margin: 0;
+  max-inline-size: 100%;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-state-success-primary, #15803d);
+  overflow-wrap: anywhere;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-inline-size: 0;
+  /* No cap here: each form states its own. A shared cap on this class would be
+     the single reason a wide panel ends in a narrow column, and a later class
+     could only argue with it, not remove it. */
+  max-inline-size: none;
+}
+
+/* The member form is a single column of pickers and keeps the reading width. */
+.memberForm {
+  max-inline-size: 560px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.fieldLabel {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+/* The statement under a picker that has nothing to offer beyond its inherit
+   choice: the same secondary label token and 12px step as the field label right
+   above it, so it reads as part of that one field and not as a new group. */
+.fieldHint {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.input,
+.textarea {
+  box-sizing: border-box;
+  inline-size: 100%;
+  max-inline-size: 100%;
+  min-inline-size: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-base, transparent);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.textarea {
+  min-block-size: 72px;
+  resize: vertical;
+}
+
+.formActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* The squad-run control: the page's primary action block. It takes the same
+   hairline, radius, surface and padding tokens as a member card, so it reads as
+   one block of the same page rather than as a second card family. */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+/* The read-only reading of a value that has no picker in this deployment: it
+   occupies the same two-line field box a select would, so a Host that starts
+   reporting presets does not move anything around it. */
+.fieldValue {
+  display: flex;
+  align-items: center;
+  min-block-size: 34px;
+  margin: 0;
+  max-inline-size: 100%;
+  padding: 0 9px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+.runActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-inline-size: 0;
+}
+
+/* The run's own feedback: always mounted, one line tall, so the sections below
+   never jump when a run is refused or started. */
+.feedback {
+  margin: 0;
+  min-block-size: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.feedbackOk {
+  color: var(--dsw-alias-state-success-primary, #15803d);
+}
+
+.feedbackError {
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+}
+
+.teamGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.runGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One session row of the live roster or the run history. */
+.row {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+}
+
+.rowHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+/* Names wrap instead of truncating: a teammate whose name is cut in half is a
+   person the operator cannot identify. */
+.rowTitle {
+  margin: 0;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.rowBadge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+/* Status carries a colour slot AND a glyph AND its own text label; the colour
+   alone never has to mean anything. */
+.rowStatus {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  min-block-size: 18px;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.rowStatus svg {
+  flex: 0 0 auto;
+}
+
+.rowDetail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  max-inline-size: 100%;
+  margin: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+.rowTime {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+.tonePending {
+  color: var(--dsw-alias-label-tertiary, #6b7280);
+}
+
+.toneActive {
+  color: var(--dsw-alias-state-business-primary, currentColor);
+}
+
+.toneSuccess {
+  color: var(--dsw-alias-state-success-primary, #15803d);
+}
+
+.toneError {
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+}
+
+/* Destructive actions leave the reading order of the page alone: one hairline
+   separates them from the history, and they stay secondary. */
+.dangerZone {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-inline-size: 0;
+  margin-block-start: 4px;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+}
+
+@media (max-width: 420px) {
+  /* One override point: the inset shrinks here and every gutter above follows
+     it, so no panel keeps the wide value while its neighbour narrows. */
+  .page {
+    --agents-inline-inset: 12px;
+  }
+
+  .header {
+    padding: 12px var(--agents-inline-inset) 8px;
+  }
+
+  .body {
+    padding: 8px var(--agents-inline-inset) 20px;
+  }
+}
+
+/* Motion is one reversible background transition per action button; with the
+   reduced-motion preference set it is removed entirely, and nothing here moves
+   spatially, so no lifecycle is lost. */
+@media (prefers-reduced-motion: reduce) {
+  .primary,
+  .secondary,
+  .danger {
+    transition: none;
+  }
+}
+
+/* The squad form is the page's creation surface: two labelled groups of fields
+   beside a live card preview, single column below the two-column breakpoint so
+   a 360px phone reads the same fields in the same order. */
+.formWide {
+  inline-size: 100%;
+  max-inline-size: none;
+}
+
+.formLayout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px 20px;
+  align-items: start;
+}
+
+@media (min-width: 720px) {
+  .formLayout {
+    grid-template-columns: minmax(0, 1fr) minmax(240px, 340px);
+  }
+}
+
+.formGroups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-inline-size: 0;
+}
+
+/* A group reads as one block of the same page as a member card: the same
+   hairline, radius, surface and padding tokens. */
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-inline-size: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+}
+
+.formGroupTitle {
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.formGroupHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow-wrap: anywhere;
+}
+
+/* The required marker rides the label, not the hint: the field states its own
+   obligation before the user reaches for the button. */
+.fieldRequired {
+  margin-inline-start: 2px;
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+}
+
+.fieldHintError {
+  color: var(--dsw-alias-state-error-primary, #b91c1c);
+}
+
+.inlineRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A secondary-weight button at the text step of a hint row instead of the 44px
+   action bar: the description control belongs to its field, not to the form's
+   commit row. */
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.action:hover:not(:disabled) {
+  border-color: var(--dsw-alias-border-l1, #8c959f);
+}
+
+.action:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.actionSmall {
+  min-block-size: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* The card the squad will become, filled from the fields beside it. */
+.formPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-inline-size: 0;
+}
+
+.formPreviewLabel {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.formPreviewCard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-inline-size: 0;
+  padding: 12px;
+  border: 1px solid var(--dsw-alias-border-l2, #d0d7de);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2, transparent);
+}
+
+.formPreviewName {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.formPreviewMeta {
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.formPreviewDescription {
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  line-clamp: 6;
+}
+
+.formPreviewFoot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-secondary, #4b5563);
+}
+
+.formPreviewFoot > span {
+  max-inline-size: 100%;
+  overflow-wrap: anywhere;
+}

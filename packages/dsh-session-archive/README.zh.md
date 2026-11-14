@@ -1,8 +1,21 @@
-# dsh-session-archive
+# dsh-session-archive · DeepSeek Harness (DSH) 全量会话多维检索、批量归档与生命周期清理插件
 
 [English](README.md) | 中文
 
-DSH Web 的会话归档管理插件：集中查看全部会话，批量归档/恢复，并以完整、可审计的管线物理删除会话。可选（默认关闭）的自动策略按未活动时长自动归档、按归档保留期自动清理。
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-session-archive?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>DeepSeek Harness（DSH）官方 Web GUI 与桌面客户端全量会话归档与生命周期治理中心</strong><br>
+  <em>全量会话集中视图 · 多维搜索与异常过滤 · 批量归档与级联物理删除 · 自动化保留与清理策略 · 磁盘空间释放</em>
+</p>
+
+面向 DeepSeek Harness (DSH) Web GUI 与官方桌面客户端的会话归档管理插件：集中查看全部会话，批量归档/恢复，并以完整、可审计的管线物理删除会话与释放磁盘。可选（默认关闭）的自动策略按未活动时长自动归档、按归档保留期自动清理。
 
 ## 功能
 
@@ -11,7 +24,7 @@ DSH Web 的会话归档管理插件：集中查看全部会话，批量归档/�
 - **真正的多选**：逐条勾选、按工作区全选/取消、跨完整筛选结果集的全选（不只是当前渲染的行）。筛选条件变化后保留选择，并在选中项落在当前结果之外时给出明确提示。
 - **批量操作**：对选中集合执行批量归档、批量取消归档与批量物理删除，服务端分块执行，实时展示进度与逐会话结果（成功 / 跳过并说明原因 / 失败并说明原因），支持仅重试失败项。当前会话、运行中的会话、有运行中后代的会话始终受保护并被跳过，附原因说明。
 - **物理删除的级联语义**：删除会话会同时清除其存储（jsonl.zstd 目录或 session-rdb 行）、工作区记录、归档集合条目、投影缓存与本插件归档台账。删除父会话会一并删除全部后代；会话族中任一成员受保护则整族跳过，绝不半删除。删除必须经过明确确认（展示直接选中数、级联数、最终总数、跳过的受保护数与预计释放空间）；大批量删除需要额外的知情勾选。
-- **可选自动维护（默认关闭）**：按最后活动时间（不是创建时间）自动归档超期未活动会话；按记录的归档时间（不是文件时间）自动删除超过保留期的归档会话。两个开关相互独立，支持启用前预览、立即执行，并持久化上次运行与下次检查状态。本插件出现之前归档的会话没有可靠归档时间，界面显示"未知"，且永远不会被自动删除。
+- **可选自动维护（默认关闭）**：按最后活动时间（不是创建时间）自动归档超期未活动会话；按记录的归档时间（不是文件时间）自动删除超过保留期的归档会话。手动与自动归档均支持裸 UUID 和 `session-` 前缀 ID，归档台账统一使用规范化 ID。两个开关相互独立，支持启用前预览、立即执行，并持久化上次运行与下次检查状态。本插件出现之前归档的会话没有可靠归档时间，界面显示"未知"，默认永远不会被自动删除；只有在开启下文记录的补记开关后，它们才会开始进入保留期。
 - **默认安全**：全部路由仅限回环访问（隧道与局域网客户端得到 403）；删除绝不跟随符号链接越出会话根目录；操作串行化，两个批次永远不会交错执行。
 
 ## 安装
@@ -26,7 +39,11 @@ pnpm add @linxin666/dsh-session-archive
 dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 ```
 
-重启 `dsh web` 后，Web 设置中会出现一级入口"会话归档管理"（Workshop 之下）。
+重启 `dsh web` 后，插件新增自己的「已归档会话」设置入口：注册的 `settings.section` id 是本插件自己的命名空间（`dsh-session-archive`），导航 order 为 25，承载本插件的管理面。该设置区打开即已归档视图。
+
+该 id 刻意使用本插件自己的命名空间，而不是官方的 `archived-sessions`：设置外壳对每条注册各渲染一个导航项、不合并同 id 的 section，并按「同一 id + 同一 priority（缺省 0）」拒绝重复注册，order 只决定排序。因此两个归档插件只要占用同一个 section id 就必然相撞，选什么 order 都避不开——其中一条注册抛错，或两条入口中的一条静默消失。使用自有 id 后，本入口可与官方归档会话页面以及任何第三方归档插件共存，各有一条入口。
+
+单插件安装、或未启用其他归档插件时，设置里只有这一条入口。
 
 ## 配置
 
@@ -35,6 +52,7 @@ dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 - `enabled` — 整体关闭管理界面。
 - `autoArchiveEnabled` + `autoArchiveDays`（1–3650，默认 7）— 按最后活动时间的自动归档阈值。
 - `autoDeleteEnabled` + `autoDeleteDays`（1–3650，默认 7）— 归档保留期，超期后物理删除。
+- `recordManualArchive`（默认关闭）— 为不经过本插件归档的会话补记归档时间，见下文。
 - `checkIntervalMin`（15–1440，默认 60）— 自动检查的调度间隔。
 
 无效或越界的值不会被保存，表单会显示校验提示。
@@ -43,12 +61,21 @@ dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 
 - **归档不删除数据。** 已归档会话只是从分组界面消失；取消归档会原位恢复其工作区位置。
 - **物理删除不可恢复。** 它会清除会话历史、元数据、工作区关联、归档记录、投影缓存及其他归属于该会话的数据。共享的内容寻址附件保持不动（可能被其他会话引用）；本插件不回收孤儿附件。
-- **归档时间由本插件记录。** 安装之前归档的会话显示"归档时间未知"，在人工删除、或取消归档后重新归档（重新计算保留期）之前，不会进入自动删除范围。
+- **归档时间由本插件记录。** 归档台账（`$DSH_HOME/dsh-session-archive/archive-ledger.json`）始终是唯一的归档时间事实源，绝不从文件时间推断。安装之前归档的会话——包括通过官方侧栏归档、根本不经过本插件的会话——显示"归档时间未知"，在人工删除、取消归档后重新归档（重新计算保留期）、或由下文的补记记录时间之前，不会进入自动删除范围。
+- **`recordManualArchive` 是默认关闭的补记开关。** 开启后，本插件首次观测到某个已归档但台账无条目的会话时，按观测时刻补记一条 `observed` 条目，使该会话从此开始保留期倒计时，到期后可能被自动删除。观测时刻是真实归档时刻的下界而非真实值，列表会在该时间后标注"（补记）"以便区分。补记与删除不会发生在同一轮：既有规则忽略不早于本轮启动时刻的归档时间，因此刚补记的会话不会在本轮被删除。关闭时不会写入任何台账，行为与开启前完全一致。
+- **从现在开始倒计时是刻意的取舍。** 很久以前归档的会话，倒计时从观测时刻重新起算而不是按真实年龄；因此补记不可能删除归档时间比保留期更近的会话。
 - **受保护会话无论手动还是自动都不会被删除**：运行中的会话、当前正在查看的会话、有运行中子会话的会话，以及正在执行其他归档操作的会话。绝不会通过强制停止会话来完成删除。
+- **归档按身份裁决（三值裁决表）。** `POST /archive` 必须带 `actor`——裁决会话 id 或 `manual` 这类人工通道名——缺失即 400。宿主拿它对照 dispatch 插件的注意力账本（`$DSH_HOME/session-attention.json`）逐 id 裁决，批内不连坐：`bot-boss` 可归 `bot-worker` 与 `bot-boss` 会话但绝不归 `human`，`bot-worker` 什么都不归，查无记录的会话 actor 什么都不归，查无记录的**目标**按 `human` 计。放行归档的 `actor` 会写进对应台账条目，"谁归的档"从台账对账即可，不再需要转录考古。
+
+## 归档收口闸（seal gate）
+
+`POST /api/dsh-session-archive/archive` 归档前逐 id 跑收口判定：解码转录（zstd 多帧）读最后一条 save 哨兵，得六值分组——`DONE` / `N_A` / `NEUTRAL` / `LEGACY` 照常归档；`sentinel-stale`（此前 save 已完成、其后续聊过）降级放行并记 `seal: "stale"`；真红 `UNSEALED` 与 `UNKNOWN` 逐 id 拒绝，返回 `reason: "seal-required"` 与该 id 的 `{verdict, detail}` 分组详情，批内不连坐。强制归档必须同一请求携带 `force: true` **与非空** `reason`（缺失即整请求 400）；强制放行的条目以 `source: "override"` 记入原因与收口判定。分组实现全插件仅此一份，同时以 `POST /api/dsh-session-archive/seal-check {ids}` 供原生归档弹窗读取；`POST /api/dsh-session-archive/archive-override {ids, mode: "force" | "note", reason?, seal?}` 为原生通道台账回写（force 原因空值归一 `override:no-reason`，note 固定 `seal: "stale"`），两种回写都不会重置已有的 `archivedAt`，保留期倒计时不会被回写刷新。
+
+- **降级注记**：不认识 `override` 源的旧版插件读取（并随后改写）新台账时会丢弃 `override` 条目——该会话归档时间变回"未知"、不启动保留期倒计时。方向安全：降级至多丢账，绝不会提前安排物理删除。
 
 ## 安全模型
 
-全部 HTTP 路由（`/api/dsh-session-archive/*`）要求回环套接字 + 回环 Host 头 + 浏览器同源标记；永不信任 `X-Forwarded-For`。删除只通过插件自己的会话根目录索引解析存储路径，移除前再次校验 realpath，并拒绝任何位于 `$DSH_HOME/sessions` 之外的路径。客户端只提交会话 ID，从不提交文件路径。session-rdb（SQLite）在删除前校验存储指纹。
+全部 HTTP 路由（`/api/dsh-session-archive/*`）要求回环套接字 + 回环 Host 头 + 浏览器同源标记；永不信任 `X-Forwarded-For`。删除只通过插件自己的会话根目录索引解析存储路径，移除前再次校验 realpath，并拒绝任何位于 `$DSH_HOME/sessions` 之外的路径。客户端只提交会话 ID，从不提交文件路径。session-rdb（SQLite）在删除前校验存储指纹。归档请求另须声明 `actor` 并通过三值身份闸（见「语义说明」）；actor 为回环 REST 自报字段——与 `recordManualArchive` 同一信任模型，拦的是出错的自动化，不是蓄意伪造者。
 
 ## 已知限制
 

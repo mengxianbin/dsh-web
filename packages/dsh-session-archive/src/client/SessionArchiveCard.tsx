@@ -7,7 +7,7 @@
  */
 
 import { useEffect, useMemo, useState, useSyncExternalStore, type ReactNode } from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { SessionArchiveConfig } from '../core/config.ts'
 import {
   AUTO_ARCHIVE_DAYS_MAX,
@@ -28,7 +28,7 @@ import styles from './archive.module.css'
 /** The registration-side face the section's slot entry injects. */
 export interface SessionArchiveFace {
   controller: ArchiveController
-  settings: SettingsScope<SessionArchiveConfig>
+  settings: ConfigForm<SessionArchiveConfig>
 }
 
 export interface SessionArchiveProps extends SessionArchiveFace {
@@ -212,7 +212,7 @@ export function SessionArchiveCard(props: SessionArchiveProps): ReactNode {
                     ? <span>{row.workspaceIds.map(workspaceTitle).join(' · ')}</span>
                     : <span className={styles.muted}>{t('arch.filter.workspace.none')}</span>}
                   <span>{row.lastActivityAt === undefined ? t('arch.row.lastActivity.unknown') : t('arch.row.lastActivity', { time: formatTime(row.lastActivityAt) })}</span>
-                  {row.archived && <span>{row.archivedAt === undefined ? t('arch.row.archivedAt.unknown') : t('arch.row.archivedAt', { time: formatTime(row.archivedAt) })}</span>}
+                  {row.archived && <span>{row.archivedAt === undefined ? t('arch.row.archivedAt.unknown') : `${t('arch.row.archivedAt', { time: formatTime(row.archivedAt) })}${row.archivedAtSource === 'observed' ? t('arch.row.archivedAt.backfilled') : ''}`}</span>}
                   {row.sizeBytes !== undefined && <span>{t('arch.row.size', { size: formatBytes(row.sizeBytes) })}</span>}
                   {issues.length > 0 && <span className={styles.issueText}>{issues.join(' · ')}</span>}
                 </div>

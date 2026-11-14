@@ -29,12 +29,19 @@ export interface SshHostEntry {
     /**
      * ssh-agent endpoint for 'agent' auth. A socket path, the special value
      * 'pageant' (PuTTY Pageant on Windows), or undefined for auto-detect
-     * (SSH_AUTH_SOCK, then Pageant on Windows).
+     * (SSH_AUTH_SOCK, then the native OpenSSH named pipe on Windows).
      */
     agentPath?: string
   }
   /** Jump chain: local aliases connected through in order (ProxyJump). */
   proxyJump: string[]
+  /**
+   * OpenSSH-compatible ProxyCommand: a shell command whose stdio becomes the
+   * connection transport. Tokens %h (host) / %p (port) / %r (user) / %n (alias)
+   * expand before exec and %% is a literal percent; an empty value or 'none'
+   * means "no proxy command". Mutually exclusive with a non-empty proxyJump.
+   */
+  proxyCommand?: string
   /** Free-form note. */
   description?: string
   /** Deployment environment label (development / production / ...). */
@@ -43,6 +50,12 @@ export interface SshHostEntry {
   tags: string[]
   /** Physical location note. */
   location?: string
+  /**
+   * Opt-in ssh-agent forwarding (OpenSSH ForwardAgent / ssh -A): the host's
+   * sessions request agent forwarding so the remote can sign with this
+   * machine's agent. Default off; stored only when enabled.
+   */
+  forwardAgent?: boolean
   createdAt: number
   updatedAt: number
 }
@@ -57,10 +70,18 @@ export interface SshHostSummary {
   /** Whether the key path exists on the host machine (key auth only). */
   keyReady: boolean
   proxyJump: string[]
+  /** Configured ProxyCommand, echoed to the browser so the form can edit it. */
+  proxyCommand?: string
   description?: string
   environment?: string
   tags: string[]
   location?: string
+  /**
+   * Whether agent forwarding is enabled. Always projected as a definite
+   * boolean: the browser and the tool bridge need a value even for entries
+   * stored before the feature existed.
+   */
+  forwardAgent: boolean
   createdAt: number
   updatedAt: number
 }
@@ -142,10 +163,30 @@ export interface HostPayload {
    */
   auth?: SshHostEntry['auth']
   proxyJump?: string[]
+  /**
+   * ProxyCommand to store. An empty string or 'none' clears a stored value;
+   * omitting the key leaves it untouched (PATCH semantics).
+   */
+  proxyCommand?: string
   description?: string
   environment?: string
   tags?: string[]
   location?: string
+  /**
+   * Agent forwarding for this host. Omitted on update keeps the stored value;
+   * false clears it (PATCH semantics).
+   */
+  forwardAgent?: boolean
+}
+
+/** Why one ssh_config Host block was not imported. */
+export type ImportSkipReason = 'wildcard' | 'existing' | 'match' | 'invalid'
+
+/** One skipped ssh_config block and the reason it could not be imported. */
+export interface ImportSkipBlock {
+  /** Host pattern (or '`Match …`' label) that was skipped. */
+  name: string
+  reason: ImportSkipReason
 }
 
 /** Import outcome from ~/.ssh/config. */
@@ -153,8 +194,8 @@ export interface ImportResult {
   parsed: number
   added: number
   skipped: number
-  /** Aliases that failed to map (wildcard patterns, missing HostName, ...). */
-  skippedNames: string[]
+  /** Every skipped block with its reason, in scan order and deduplicated by name. */
+  skippedBlocks: ImportSkipBlock[]
 }
 
 /** JSON error body used by every route. */
@@ -164,7 +205,8 @@ export interface ApiErrorBody {
 
 /** WebSocket terminal protocol frames (host -> client and client -> host). */
 export type TerminalServerFrame =
-  | { type: 'ready'; alias: string }
+  /** The shell is up; `sessionId` reattaches to it after a view detach. */
+  | { type: 'ready'; alias: string; sessionId: string }
   | { type: 'output'; data: string }
   | { type: 'exit'; code: number | null; error?: string }
   | {
@@ -178,6 +220,10 @@ export type TerminalClientFrame =
   | { type: 'input'; data: string }
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'auth_response'; responses: string[] }
+  /** Leave the socket while the host keeps the shell alive for a reattach. */
+  | { type: 'detach' }
+  /** End the session outright (the view's disconnect control). */
+  | { type: 'close' }
 
 /** Route paths the client calls (shared literals). */
 export const SSH_API_BASE = '/api/dsh-ssh' as const

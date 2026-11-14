@@ -1,9 +1,10 @@
 /**
  * Market host HTTP routes — the loopback-only install gateway the browser
- * half calls to install skins/pets from dsh-market.com into the DSH home
- * asset directories. Endpoints (all under /api/market):
+ * half calls to install skins/pets/presets from dsh-market.com into the DSH
+ * home asset directories. Endpoints (all under /api/market):
  *  - POST /api/market/install-skin { id, force? }
  *  - POST /api/market/install-pet { id, force? }
+ *  - POST /api/market/install-preset { id, force? }  (writes the preset library)
  * The host fetches the manifest itself, validates every path, and never
  * accepts a URL or a file list from the client (see core/installer).
  * @module @linxin666/dsh-client-ui-market/routes
@@ -31,6 +32,11 @@ export interface MakeMarketRoutesDeps {
   fetchImpl?: typeof fetch
   /** Runtime hook for tests. */
   now?: () => number
+  /**
+   * The effective install network policy, resolved per request so a settings
+   * save reaches the next install (issue #1941).
+   */
+  installPolicy?: () => { timeoutMs?: number; retries?: number }
 }
 
 /** Build the market install routes. */
@@ -64,15 +70,19 @@ export function makeMarketRoutes(deps: MakeMarketRoutesDeps = {}): WebRoute[] {
       return
     }
     try {
+      const policy = deps.installPolicy?.() ?? {}
       const result = await installAsset(kind, id, {
         dshHome: home,
         force: body.force === true,
         fetchImpl,
+        ...(policy.timeoutMs === undefined ? {} : { fetchTimeoutMs: policy.timeoutMs }),
+        ...(policy.retries === undefined ? {} : { retries: policy.retries }),
       })
       writeJson(res, 200, result, { 'cache-control': 'no-store' })
     } catch (err) {
       const code = err instanceof Error && 'code' in err ? String((err as { code: unknown }).code) : 'write'
-      const status = code === 'conflict' ? 409 : code === 'manifest' ? 502 : 500
+      // A Cloudflare challenge is an upstream failure, not the caller's fault.
+      const status = code === 'conflict' ? 409 : code === 'manifest' || code === 'blocked' ? 502 : 500
       writeJson(res, status, { ok: false, error: code, message: err instanceof Error ? err.message : String(err) }, { 'cache-control': 'no-store' })
     }
   }
@@ -99,11 +109,13 @@ export function makeMarketRoutes(deps: MakeMarketRoutesDeps = {}): WebRoute[] {
     writeJson(res, 200, {
       skins: listDirs(path.join(home, 'skins')),
       pets: listDirs(path.join(home, 'pets')),
+      presets: listDirs(path.join(home, 'agent-presets')),
     }, { 'cache-control': 'no-store' })
   }
 
   const installSkin = handleInstall('skin')
   const installPet = handleInstall('pet')
+  const installPreset = handleInstall('preset')
 
   return [
     {
@@ -120,6 +132,11 @@ export function makeMarketRoutes(deps: MakeMarketRoutesDeps = {}): WebRoute[] {
       kind: 'exact',
       path: `${MARKET_API_PREFIX}/install-pet`,
       handler: installPet,
+    },
+    {
+      kind: 'exact',
+      path: `${MARKET_API_PREFIX}/install-preset`,
+      handler: installPreset,
     },
   ]
 }

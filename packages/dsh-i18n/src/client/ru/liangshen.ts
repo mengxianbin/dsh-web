@@ -1,0 +1,47 @@
+/**
+ * Russian dictionary for the "liangshen" locale namespace.
+ * Source package: packages/dsh-liangshen (its zh dictionary is the key source).
+ * Maintained centrally by the dsh-i18n language pack; when a zh key is added
+ * or changed upstream, mirror it here and run `pnpm i18n:check`.
+ */
+
+export const ru: Record<string, string> = {
+  'burst.line1': 'Три секунды, три жизни кода',
+  'burst.line2': 'Вэньянь · двоичный код · азбука Морзе',
+  'lever.a11y': 'Рычаг режима Ляншэнь',
+  'lever.busy': 'Переключение…',
+  'lever.failed.failed': 'Не удалось переключить: {reason}',
+  'lever.failed.locked': 'Сессия уже началась, режим заблокирован',
+  'lever.failed.missing': 'Пресет «Ляншэнь» не найден',
+  'lever.failed.timeout': 'Тайм-аут переключения; повторите попытку',
+  'lever.hint.locked': 'Сессия уже началась, режим больше не изменить',
+  'lever.hint.missing': 'Пресет «Ляншэнь» не установлен; сначала включите эту строку плагина',
+  'lever.hint.pull': 'Потяните рычаг вниз, чтобы включить режим Ляншэнь',
+  'lever.hint.push': 'Поднимите рычаг вверх, чтобы вернуться к «{preset}»',
+  'lever.name': 'Режим Ляншэнь',
+  'lever.state.off': 'Обычный режим',
+  'lever.state.on': 'Режим Ляншэнь',
+  'settings.title': 'Режим Ляншэнь',
+  'settings.description': 'Переключатель режима, представление инструментов и роль диспетчера.',
+  'settings.enabled': 'Главный переключатель',
+  'settings.enabledHint': 'Когда выключено, пресет больше не объявляется.',
+  'settings.announceToAgent': 'Объявлять агентам',
+  'settings.announceToAgentHint': 'Каждый системный промпт несёт это объявление.',
+  'settings.presentation': 'Представление',
+  'settings.presentationHint': 'ptc сворачивает инструменты в run_code; native оставляет родной список.',
+  'settings.dispatcher': 'Диспетчер',
+  'settings.dispatcherHint': 'Работает как диспетчер: оценка, интервью, затем раздача субагентам.',
+  'settings.on': 'Вкл',
+  'settings.off': 'Выкл',
+  'settings.inherit': 'Наследовать',
+  'settings.overridden': 'Изменено',
+  'settings.reset': 'Восстановить по умолчанию',
+  'settings.notExposed': 'Эта версия DSH не открывает настройки LiangShen.',
+  'settings.readOnly': 'Настройки только для чтения.',
+  'settings.expand': 'Показать настройки',
+  'settings.collapse': 'Скрыть настройки',
+  'settings.saveFailed': 'Не сохранено.',
+  'settings.invalidValue': 'Введите значение, которое принимает поле.',
+  'presentation.ptc': 'ptc',
+  'presentation.native': 'native',
+}

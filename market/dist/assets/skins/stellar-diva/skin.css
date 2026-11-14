@@ -79,8 +79,14 @@
   --dsw-alias-state-warn-secondary: rgba(201,138,27,0.16);
   --dsw-alias-state-warn-tertiary: rgba(201,138,27,0.1);
   --dsw-alias-toast-bg: #FFFFFF;
-  --dsw-alias-tooltip-bg: #FFFFFF;
-  --dsw-alias-tooltip-fg: #17264A;
+  /* The official Tooltip paints its label with --dsw-static-neutral-bluish-00
+     (fixed #fff), a token no skin declaration can remap, so the bubble
+     background has to carry the contrast. A pearl-white background therefore
+     rendered white-on-white and hid every label in light mode (issue #72).
+     The official light default is dark; this is the skin's own sapphire tone
+     (already used by label-secondary / button-contrast-fill). */
+  --dsw-alias-tooltip-bg: #33456E;
+  --dsw-alias-tooltip-fg: #E9EEFF;
   --dsw-specific-sidebar-fill: rgba(250,252,255,0.66);
   --dsw-specific-sidebar-nav-item-active: rgba(61,111,214,0.14);
   --dsw-specific-sidebar-nav-item-hover: rgba(61,111,214,0.08);

@@ -7,7 +7,7 @@ import { test } from 'node:test'
 import { REPO_ROOT, applySync, checkSync, copyEntries, headerFor, renderCopy, stripHeader } from './sync-shared.mjs'
 
 test('header/strip round-trips every file kind', () => {
-  for (const file of ['settings-form.ts', 'PluginSettingsCard.tsx', 'settings-card.module.css']) {
+  for (const file of ['settings-form.ts', 'PluginSettingsCard.tsx', 'settings-card.module.css', 'SegmentGroup.tsx', 'RangeBubble.tsx']) {
     const source = 'export const x = 1' + String.fromCharCode(10)
     const sourceRel = 'shared/client/settings/' + file
     const rendered = renderCopy(source, file, sourceRel)
@@ -22,11 +22,50 @@ test('copies cover the settings trio for all consumers plus host and http helper
   // the copy-count buckets below match on forward slashes.
   const entries = copyEntries().map(entry => ({ ...entry, target: entry.target.replaceAll('\\', '/') }))
   // The total is every generated copy in the manifest; the single-instance
-  // guard alone contributes one mount-once.ts per host half (19 today). The
-  // buckets below partition the same set by target location.
-  assert.equal(entries.length, 112)
+  // guard alone contributes one mount-once.ts per host half (18 today). The
+  // buckets below split the same set by target location, and what neither
+  // bucket holds is the package-root test setup (6 today) plus the per-package
+  // http.ts and console-output.ts copies. The settings bucket is the card trio
+  // plus the entry-bound form fallback, the latter one per package whose card
+  // binds a family namespace (8 today). Every family panel now renders through
+  // the native layout seats, so the panel-mount-core and sidebar-entry-core
+  // copies are gone and body-mutations serves the aggregate shell, the usage
+  // card, the plugin-manager's list-level update toolbar and the task board's
+  // official schedule-row guard. run-guarded.ts is
+  // not synced here: no in-repo package imports
+  // it (the satellite repositories that do carry their own copies), so only the
+  // shared source and its spec remain in this repository. The plugin-card seat
+  // copy has four consumers: the GitHub extension renders inside the board's
+  // own settings card now, so it carries no card of its own.
+  // tool-surface.ts adds four copies in host halves (ssh, task-board,
+  // task-board-github, agents); they sit at a package root rather than under
+  // src/host/, so the bucket below does not claim them. dsh-agents also joined
+  // the card trio and the plugin-card seat, which is the same six copies every
+  // card-bearing package carries.
+  // dsh-remote-bridge adds one dsh-home.ts copy under src/host/ (the bridge's
+  // host half resolves $DSH_HOME through the same generated copy every other
+  // host half uses, rather than a second local parser).
+  // dsh-web-settings joined the card trio (the family-wide telemetry switch
+  // renders through the same chrome), which adds three client copies: the card
+  // chrome, its form primitives, and the card stylesheet. It carries no
+  // entry-bound form fallback, because it binds no Host settings namespace.
+  // dsh-browser-view adds one host copy of loopback.ts: its panel socket and
+  // status route drive a real browser, so the route family reuses the shared
+  // fence instead of restating it. The Web Extensions page adapter adds two
+  // client copies (Workshop and Usage); the satellite repositories carry their
+  // own copies because they publish separately. The segmented control with
+  // the sliding highlight and the coarse slider bubble each add one client
+  // copy per card consumer. dsh-usage joined the card consumers (its page
+  // renders through the same chrome and rows), which adds five client copies:
+  // the chrome, its form primitives, the stylesheet, the segmented control and
+  // the slider bubble; it already carried the entry-bound form fallback.
+  // The four fork-only host packages (session-dispatch, auto-route,
+  // session-revive, mimo-relogin) carry no client settings copies; they add 14
+  // host-half copies in total: mount-once, loopback and http each get four, and
+  // dsh-home two (the bridge's host half joins the remote-bridge copy).
+  assert.equal(entries.length, 154)
   const clientTrio = entries.filter(entry => entry.target.includes('/src/client/'))
-  assert.equal(clientTrio.length, 37)
+  assert.equal(clientTrio.length, 74)
   const hostCopies = entries.filter(entry => entry.target.includes('/src/host/')
     || entry.target.includes('/src/dsh-home.ts')
     || entry.target.includes('/src/mount-once.ts')
@@ -34,35 +73,24 @@ test('copies cover the settings trio for all consumers plus host and http helper
     || entry.target.includes('/src/pair-access.ts')
     || entry.target.includes('/src/agent/')
     || entry.target.endsWith('/packages/dsh-task-board/src/http.ts'))
-  assert.equal(hostCopies.length, 64)
+  assert.equal(hostCopies.length, 62)
 })
 
 test('checkSync detects drift and applySync repairs it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'sync-shared-test-'))
   try {
-    // Fake tree: shared source + one consumer copy with wrong content.
-    const sourceDir = join(root, 'shared', 'client', 'settings')
-    await mkdir(sourceDir, { recursive: true })
-    await writeFile(join(sourceDir, 'settings-form.ts'), 'export const good = 1' + String.fromCharCode(10))
-    await writeFile(join(sourceDir, 'PluginSettingsCard.tsx'), 'export const card = 1' + String.fromCharCode(10))
-    await writeFile(join(sourceDir, 'settings-card.module.css'), '.card { color: red }' + String.fromCharCode(10))
-    await writeFile(join(root, 'shared', 'client', 'telemetry.ts'), 'export const beat = 1' + String.fromCharCode(10))
-    await writeFile(join(root, 'shared', 'client', 'sse-leader.ts'), 'export const leader = 1' + String.fromCharCode(10))
-    await writeFile(join(root, 'shared', 'client', 'sidebar-entry-core.ts'), 'export const sidecore = 1' + String.fromCharCode(10))
-    await writeFile(join(root, 'shared', 'client', 'panel-mount-core.ts'), 'export const panelcore = 1' + String.fromCharCode(10))
-    const hostDir = join(root, 'shared', 'host')
-    await mkdir(hostDir, { recursive: true })
-    await writeFile(join(hostDir, 'poll-guard.ts'), 'export const guard = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'dsh-home.ts'), 'export const home = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'loopback.ts'), 'export const loop = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'pair-access.ts'), 'export const fence = 1' + String.fromCharCode(10))
-    await writeFile(join(root, 'shared', 'vitest.setup.ts'), 'export {}' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'git-runner.ts'), 'export const runner = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'mount-once.ts'), 'export const once = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'http.ts'), 'export const http = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'legacy-migration.ts'), 'export const legacy = 1' + String.fromCharCode(10))
-    await writeFile(join(hostDir, 'run-guarded.ts'), 'export const guard2 = 1' + String.fromCharCode(10))
-    const targetDir = join(root, 'packages', 'dsh-pet', 'src', 'client')
+    // Fake tree: every shared source the manifest names, plus one consumer copy
+    // whose content drifted. The sources are DERIVED from the manifest rather
+    // than hand-listed: a hand-written list silently missed
+    // shared/host/detached-work.ts when that entry was added, and checkSync
+    // then died on ENOENT instead of reporting drift.
+    const sourceText = 'export const shared = 1' + String.fromCharCode(10)
+    const entries = copyEntries(root)
+    for (const entry of entries) {
+      await mkdir(dirname(entry.source), { recursive: true })
+      await writeFile(entry.source, sourceText)
+    }
+    const targetDir = join(root, 'packages', 'dsh-task-board', 'src', 'client')
     await mkdir(targetDir, { recursive: true })
     await writeFile(join(targetDir, 'settings-form.ts'), renderCopy('export const bad = 2' + String.fromCharCode(10), 'settings-form.ts', 'shared/client/settings/settings-form.ts'))
 
@@ -75,7 +103,7 @@ test('checkSync detects drift and applySync repairs it', async () => {
     const after = await checkSync(root)
     assert.deepEqual(after, [])
     const fixed = await readFile(join(targetDir, 'settings-form.ts'), 'utf8')
-    assert.equal(stripHeader(fixed, 'settings-form.ts', 'shared/client/settings/settings-form.ts'), 'export const good = 1' + String.fromCharCode(10))
+    assert.equal(stripHeader(fixed, 'settings-form.ts', 'shared/client/settings/settings-form.ts'), sourceText)
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -17,7 +17,7 @@ export interface InstalledPluginChild {
   id: string
   /** Display name: the real plugin package (shell config.plugin) when known. */
   name: string
-  /** Saved next-start enablement of this row alone. */
+  /** Effective next-start enablement of this row alone (bundle default plus user override). */
   enabled: boolean
   /** Rows the manager must never disable (the manager tab itself, the compat face). */
   locked?: boolean
@@ -30,7 +30,7 @@ export interface InstalledPluginItem {
   version: string
   source: { kind: 'npm' | 'git'; spec: string }
   installedAt: string
-  /** Saved next-start enablement from the managed profile patch row. */
+  /** Effective next-start enablement across the bundle's own rows and the managed profile patch row. */
   enabled: boolean
   commit?: string
   /**
@@ -41,6 +41,37 @@ export interface InstalledPluginItem {
    * package).
    */
   children?: InstalledPluginChild[]
+}
+
+/**
+ * How the host carried out (or refused) a restart request:
+ * `relaunch` — this host re-executes itself in place; `shell` — the packaged
+ * Desktop shell owns the process tree and runs its own restart; `manual` —
+ * neither is safe here, the user restarts DSH themselves.
+ */
+export type RestartMode = 'relaunch' | 'shell' | 'manual'
+
+/**
+ * The result of one applied update: the installed row, plus the host's verdict
+ * on whether this process can serve it without a restart.
+ *
+ * The two facts are separate because they answer different questions and must
+ * not be folded into one: the version landed (the row carries it), and the
+ * running host may still not have loaded it. Reporting the second as an error
+ * would be wrong twice over — the update did apply, and a batch update stops on
+ * the first error it sees — so it travels as an accompanying fact instead.
+ */
+export interface PluginUpdateResult {
+  /** The installed row, at the version the update landed on. */
+  plugin: InstalledPluginItem
+  /**
+   * Bundles whose new version is on disk but which the running host has not
+   * loaded, empty when the update took effect in place. The official manager
+   * reports this as `application: 'restart-required'` (issue #1905); the
+   * official installer channel carries no such fact, so it answers an empty
+   * list.
+   */
+  restartRequired: string[]
 }
 
 /** Point-in-time install/update progress reported by the host. */
@@ -68,6 +99,14 @@ export interface PluginUpdateItem {
   requiresDsh?: string
   /** Whether the running DSH host satisfies requiresDsh; absent when unknown. */
   compatible?: boolean
+  /**
+   * The running DSH version the verdict was made from, present only when the
+   * host compared it and found it below the declaration. Its absence is what
+   * separates "this host is too old" from "we could not verify" — a host that
+   * could not be read, or a declaration that could not be parsed; different
+   * problems, with different copy (issues #1819 and #1899).
+   */
+  hostVersion?: string
 }
 
 /** One recorded plugin boot failure served by the host. */
@@ -88,14 +127,6 @@ export interface PluginFailuresSnapshot {
   pluginRoot: string
   /** Whether the host is running in safe mode (user plugins skipped). */
   safeMode: boolean
-}
-
-/** One deployment-configured logical product switch. */
-export interface PluginControlItem {
-  id: string
-  name: string
-  repository: string
-  state: 'enabled' | 'disabled' | 'mixed' | 'unavailable' | 'uninstalled'
 }
 
 /** Whether a decoded value is a non-array object. */
@@ -171,29 +202,23 @@ export function parseInstalledPlugin(value: unknown): InstalledPluginItem {
 }
 
 /**
- * Validate and normalize a plugin-control `list` / `set-enabled` response value.
- * @param value - decoded but untrusted response value.
- * @returns the typed control items.
+ * Read the restart-required list off one gateway job (or off anything else
+ * carrying it).
+ *
+ * Deliberately tolerant where the other parsers in this module throw: this list
+ * is a hint attached to an update that already landed, so an unreadable value
+ * must cost the user the hint only. Throwing would reject an applied update and
+ * stop a batch run — the exact outcome the fact exists to avoid.
+ * @param value - decoded but untrusted job value.
+ * @returns the bundle names, empty when the value is absent or unusable.
  */
-export function parsePluginControlSnapshot(value: unknown): PluginControlItem[] {
-  if (!isRecord(value) || !Array.isArray(value.controls)) {
-    throw new Error('plugin-manager: response must contain a controls array')
+export function parseRestartRequired(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  const names: string[] = []
+  for (const item of value) {
+    if (typeof item === 'string' && item !== '') names.push(item)
   }
-  return value.controls.map((control, index) => {
-    if (!isRecord(control) || !isString(control.id) || !isString(control.name)
-      || !isString(control.repository)
-      || (control.state !== 'enabled' && control.state !== 'disabled'
-        && control.state !== 'mixed' && control.state !== 'unavailable'
-        && control.state !== 'uninstalled')) {
-      throw new Error(`plugin-manager: control row ${String(index)} is invalid`)
-    }
-    return {
-      id: control.id,
-      name: control.name,
-      repository: control.repository,
-      state: control.state,
-    }
-  })
+  return names
 }
 
 /**
@@ -255,8 +280,28 @@ export function parseUpdateList(value: unknown): PluginUpdateItem[] {
       }
       row.compatible = update.compatible
     }
+    if (update.hostVersion !== undefined) {
+      if (!isString(update.hostVersion)) {
+        throw new Error(`plugin-manager: update row ${String(index)} is invalid`)
+      }
+      row.hostVersion = update.hostVersion
+    }
     return row
   })
+}
+
+/**
+ * Validate and normalize a `restart` response value.
+ * @param value - decoded but untrusted response value.
+ * @returns the mode the host actually used.
+ */
+export function parseRestartMode(value: unknown): RestartMode {
+  const restart = isRecord(value) ? value.restart : undefined
+  const mode = isRecord(restart) ? restart.mode : undefined
+  if (mode !== 'relaunch' && mode !== 'shell' && mode !== 'manual') {
+    throw new Error('plugin-manager: response must contain a restart mode')
+  }
+  return mode
 }
 
 /**

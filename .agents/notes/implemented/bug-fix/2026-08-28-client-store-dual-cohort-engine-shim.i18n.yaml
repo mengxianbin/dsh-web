@@ -1,0 +1,4 @@
+# Bilingual-pair consistency record (docs/i18n.md).
+# Both languages have equal authority; re-record with git hash-object after paired edits.
+2026-08-28-client-store-dual-cohort-engine-shim.md: 4757ce8f989fea77942db0edeb0f9b4ac09fdd1e
+2026-08-28-client-store-dual-cohort-engine-shim.zh.md: 61ef24b2f9c1ca53c4d4d27528f230c6d2142633

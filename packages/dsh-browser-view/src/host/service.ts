@@ -1,0 +1,859 @@
+/**
+ * The host-side browser service: one lazy Chrome, one tab per agent session,
+ * and the fan-out that keeps every attached panel in sync.
+ *
+ * Lifecycle. Chrome is not started when the plugin mounts — a plugin that
+ * launches a browser the moment the GUI loads spends a process on a feature
+ * nobody has opened. The first tool call or socket attach starts it, and a
+ * failed start is remembered as a panel message instead of being retried in a
+ * loop on every keystroke.
+ *
+ * Binding. `sessionId -> tabId` is the reason two agents never fight over one
+ * page: a tool call from session A reuses A's tab, creates one on first use, and
+ * leaves B's tab alone. Tab ids stay explicit arguments too, so a caller can
+ * address any open tab on purpose.
+ *
+ * Broadcast. Paths, once a socket is attached, are push-only: frames, state
+ * changes, and action traces go to every attached panel. The service never
+ * lets one dead socket break the fan-out — a throwing send drops that sink.
+ *
+ * @module @linxin666/dsh-client-ui-browser-view/host/service
+ */
+
+import { CdpClient } from '../core/cdp.ts'
+import type { CdpTransport } from '../core/cdp.ts'
+import { ChromeProcess } from '../core/chrome.ts'
+import { TabManager, type ScreencastFrame } from '../core/tabs.ts'
+import { buildSnapshot, type SnapshotResult } from '../core/snapshot.ts'
+import { DOCUMENT_TEXT_EXPRESSION, isAuthChallengeText, isLoopbackTarget } from './auth.ts'
+import {
+  clickElement,
+  navigateTo,
+  pressKey,
+  scrollBy,
+  typeText,
+  type ActionOutcome,
+  type ElementTarget,
+} from '../core/actions.ts'
+import {
+  DEFAULT_JPEG_QUALITY,
+  DEFAULT_VIEWPORT,
+  type BrowserActionTrace,
+  type BrowserConsoleEntry,
+  type BrowserNetworkEntry,
+  type BrowserPanelState,
+  type BrowserSnapshot,
+  type BrowserTabView,
+  type BrowserViewCommand,
+  type BrowserViewEvent,
+} from '../core/protocol.ts'
+
+/** One attached panel socket as the service sees it. */
+export interface BrowserViewSink {
+  /** Deliver one event; a throw means the sink is gone. */
+  send(event: BrowserViewEvent): void
+  /** Close the underlying transport. */
+  close(): void
+}
+
+/** What the route layer needs from the service; tests stub this instead. */
+export interface BrowserViewBackend {
+  /** The state the status route reports; safe to call before a browser exists. */
+  state(): BrowserPanelState
+  /**
+   * Register one panel socket.
+   * @param sink - the socket adapter.
+   * @returns the detach function, called when the socket closes.
+   */
+  attach(sink: BrowserViewSink): () => void
+  /**
+   * Run one validated panel command.
+   * @param sink - the socket that sent it.
+   * @param command - an already validated command.
+   */
+  handleCommand(sink: BrowserViewSink, command: BrowserViewCommand): Promise<void>
+}
+
+/** One running browser plus the tab manager over it. */
+export interface BrowserSession {
+  /** Protocol transport the tabs and the actions share. */
+  transport: CdpTransport
+  /** Tabs of this browser. */
+  tabs: TabManager
+  /** The Chrome process; absent when a test supplied its own session. */
+  chrome?: ChromeProcess
+  /** Stop everything this session owns. */
+  dispose(): Promise<void>
+}
+
+/** Construction options. */
+export interface BrowserViewServiceOptions {
+  /** JPEG quality for frames and screenshots. @default DEFAULT_JPEG_QUALITY */
+  jpegQuality?: number
+  /** Viewport pinned on every tab. @default DEFAULT_VIEWPORT */
+  viewport?: { width: number; height: number }
+  /** Clock for action traces. @default Date.now */
+  now?: () => number
+  /**
+   * Mints the process launch-token URL for one clean URL, or returns
+   * undefined when the host mounts no such seam. Resolved per navigation by
+   * the loader from `ctx.get('connection')`; absent here means no auth top-up.
+   */
+  authenticatedUrl?: (url: string) => string | undefined
+  /** Browser factory, replaced by tests. */
+  openSession?: (options: { jpegQuality: number; viewport: { width: number; height: number }; onFrame: (frame: ScreencastFrame) => void; onTabsChanged: () => void }) => Promise<BrowserSession>
+}
+
+/** Start Chrome, connect CDP, and wrap both in a session. */
+async function openDefaultSession(options: {
+  jpegQuality: number
+  viewport: { width: number; height: number }
+  onFrame: (frame: ScreencastFrame) => void
+  onTabsChanged: () => void
+}): Promise<BrowserSession> {
+  const chrome = await ChromeProcess.launch({ viewport: options.viewport })
+  let cdp: CdpClient
+  try {
+    cdp = await CdpClient.connect(chrome.info.webSocketDebuggerUrl)
+  } catch (error) {
+    await chrome.dispose()
+    throw error
+  }
+  const tabs = new TabManager({
+    transport: cdp,
+    jpegQuality: options.jpegQuality,
+    viewport: options.viewport,
+    onFrame: options.onFrame,
+    onTabsChanged: options.onTabsChanged,
+  })
+  return {
+    transport: cdp,
+    tabs,
+    chrome,
+    async dispose() {
+      await tabs.dispose()
+      cdp.close()
+      await chrome.dispose()
+    },
+  }
+}
+
+/**
+ * The plugin's single browser service.
+ */
+export class BrowserViewService implements BrowserViewBackend {
+  private readonly jpegQuality: number
+  private readonly viewport: { width: number; height: number }
+  private readonly now: () => number
+  private readonly openSession: NonNullable<BrowserViewServiceOptions['openSession']>
+  private readonly authenticatedUrl: BrowserViewServiceOptions['authenticatedUrl']
+  private readonly sinks = new Set<BrowserViewSink>()
+  private readonly bindings = new Map<string, string>()
+  /**
+   * Tabs whose one auth top-up for the current navigation is already spent.
+   * This is what stops a retry that did not clear the challenge from
+   * navigating again; it is reset when the navigation ends.
+   */
+  private readonly authTopUpSpent = new Set<string>()
+  private session: BrowserSession | undefined
+  /**
+   * The tab the attached panels watch. Kept beside the tab manager instead of
+   * read from it because "the page the panel shows" and "the page most recently
+   * created" are different facts: a panel that follows the agent must NOT move
+   * to a tab an explicit selection pinned it to, while the tab manager still
+   * has to know about every tab that exists.
+   */
+  private displayedTabId: string | null = null
+  /**
+   * Whether a person chose the watched tab in the panel. Until that happens the
+   * panels follow whatever the agent drives; afterwards they never steal it.
+   */
+  private selectionPinned = false
+  private opening: Promise<BrowserSession> | undefined
+  private openingTab: Promise<BrowserTabView> | undefined
+  private lastError: string | undefined
+  private disposed = false
+
+  /**
+   * @param options - quality, viewport, clock, and the browser factory seam.
+   */
+  constructor(options: BrowserViewServiceOptions = {}) {
+    this.jpegQuality = options.jpegQuality ?? DEFAULT_JPEG_QUALITY
+    this.viewport = options.viewport ?? { width: DEFAULT_VIEWPORT.width, height: DEFAULT_VIEWPORT.height }
+    this.now = options.now ?? Date.now
+    this.openSession = options.openSession ?? openDefaultSession
+    this.authenticatedUrl = options.authenticatedUrl
+  }
+
+  /** Whether a browser is currently running. */
+  get running(): boolean {
+    return this.session !== undefined
+  }
+
+  /** The current panel-facing state; safe to call before anything started. */
+  state(): BrowserPanelState {
+    const state: BrowserPanelState = {
+      tabs: this.session?.tabs.list() ?? [],
+      activeTabId: this.session === undefined ? null : this.displayedOrDefault(),
+      running: this.session !== undefined,
+    }
+    if (this.lastError !== undefined) state.message = this.lastError
+    return state
+  }
+
+  /**
+   * Register one panel socket and start the stream it wants.
+   * @param sink - socket adapter.
+   * @returns the detach function.
+   */
+  attach(sink: BrowserViewSink): () => void {
+    this.sinks.add(sink)
+    // The hello frame is the panel's first paint: it carries the current tabs
+    // so a reconnecting panel does not have to ask.
+    sink.send({ v: 1, kind: 'hello', state: this.state() })
+    void this.startStreaming()
+    return () => {
+      this.sinks.delete(sink)
+      if (this.sinks.size === 0) void this.stopStreaming()
+    }
+  }
+
+  /**
+   * Run one validated panel command.
+   * @param sink - the sending socket.
+   * @param command - validated command.
+   */
+  async handleCommand(sink: BrowserViewSink, command: BrowserViewCommand): Promise<void> {
+    if (this.disposed) return
+    try {
+      switch (command.kind) {
+        case 'attach': {
+          // Attaching is observation, never operation: a panel that arrived
+          // must not create a tab of its own, or the user ends up watching a
+          // blank page instead of the one the agent is driving.
+          this.followPanelSession(command.sessionId)
+          sink.send({ v: 1, kind: 'hello', state: this.state() })
+          await this.startStreaming()
+          return
+        }
+        case 'select-tab': {
+          const tabs = await this.requireTabs()
+          // A person picked this tab in the panel: from here on the panels stop
+          // following the agent until the choice no longer exists.
+          tabs.selectTab(command.tabId)
+          this.selectionPinned = true
+          this.showTab(command.tabId)
+          await this.startStreaming()
+          return
+        }
+        case 'request-frame': {
+          const tabs = await this.requireTabs()
+          const tabId = this.displayedOrDefault()
+          if (tabId === null) return
+          this.displayedTabId = tabId
+          await tabs.refreshFrame(tabId)
+          return
+        }
+        case 'close-tab': {
+          await this.closeTab(command.tabId)
+          return
+        }
+        default: {
+          const unreachable: never = command
+          void unreachable
+        }
+      }
+    } catch (error) {
+      this.fail('command-failed', error)
+    }
+  }
+
+  /**
+   * Close one tab, drop every binding that pointed at it, and let the panels
+   * fall back when the tab they were watching is the one that went away.
+   *
+   * Bindings are forgotten before the target goes, so a later tool call cannot
+   * resurrect a tab somebody deliberately closed.
+   * @param tabId - tab to close.
+   */
+  async closeTab(tabId: string): Promise<void> {
+    const tabs = await this.requireTabs()
+    const wasDisplayed = tabId === this.displayedTabId
+    for (const [sessionId, boundTab] of [...this.bindings]) {
+      if (boundTab === tabId) this.bindings.delete(sessionId)
+    }
+    await tabs.closeTab(tabId)
+    if (wasDisplayed) {
+      // The pinned tab is gone, so there is nothing left to hold: fall back to
+      // whatever remains and resume following.
+      this.selectionPinned = false
+      this.displayedTabId = null
+      this.showTab(tabs.list().at(-1)?.id ?? null)
+    }
+    this.broadcast({ v: 1, kind: 'state', state: this.state() })
+  }
+
+  /**
+   * Close the tabs one agent session opened, and nothing else.
+   *
+   * Ownership is read off the tab record rather than the binding map: a session
+   * may have driven somebody else's tab through an explicit `tabId`, and that
+   * must not make the tab its own to destroy. A caller that names a tab it does
+   * not own is refused with the reason instead of being quietly ignored, because
+   * a cleanup that reports success while closing nothing is worse than an error.
+   *
+   * A session with no tab of its own, or a host with no browser running yet,
+   * closes nothing and succeeds: cleanup is the one call that must be safe to
+   * make unconditionally.
+   * @param sessionId - calling agent session; absent means no ownership basis.
+   * @param tabId - one tab to close; omitted closes every tab this session owns.
+   * @returns ids of the tabs actually closed, in close order.
+   */
+  async closeOwnTabs(sessionId: string | undefined, tabId?: string): Promise<string[]> {
+    if (sessionId === undefined) {
+      throw new Error('browser_close needs the calling session: with no session there is no tab this call may close')
+    }
+    if (this.session === undefined) return []
+    const tabs = this.session.tabs
+    if (tabId !== undefined && tabId !== '') {
+      const found = tabs.list().find(tab => tab.id === tabId)
+      if (found === undefined) throw new Error(`unknown tab "${tabId}"; call browser_tabs to see the open tabs`)
+      if (found.sessionId !== sessionId) {
+        throw new Error(`tab "${tabId}" was not opened by this session, so it is not this session's to close`)
+      }
+      await this.closeTab(found.id)
+      return [found.id]
+    }
+    const owned = tabs.list().filter(tab => tab.sessionId === sessionId)
+    const closed: string[] = []
+    for (const tab of owned) {
+      await this.closeTab(tab.id)
+      closed.push(tab.id)
+    }
+    return closed
+  }
+
+  /**
+   * Resolve the tab a tool call from `sessionId` should act on.
+   *
+   * The order is a safety property, not a preference. An agent that lands on
+   * the tab the panel happens to be showing destroys whatever the user was
+   * looking at, so the watched tab is only ever a last resort:
+   *
+   * 1. the tab the caller named,
+   * 2. the tab this session created or last worked in,
+   * 3. the watched tab, but only while no other session owns it,
+   * 4. otherwise a tab of its own.
+   *
+   * Step 3 exists for the case where the user opened a page nobody is driving
+   * (they navigated or selected it themselves); step 3's ownership guard is
+   * what keeps a bystander session from taking over a page another session
+   * owns — the exact way the watched page used to be lost.
+   * @param sessionId - calling agent session, when the host provides one.
+   * @param tabId - explicit tab from the tool arguments.
+   * @returns the tab view.
+   */
+  async tabFor(sessionId: string | undefined, tabId?: string): Promise<BrowserTabView> {
+    const tabs = await this.requireTabs()
+    if (tabId !== undefined && tabId !== '') {
+      const found = tabs.list().find(tab => tab.id === tabId)
+      if (found === undefined) throw new Error(`unknown tab "${tabId}"; call browser_tabs to see the open tabs`)
+      if (sessionId !== undefined) this.bindings.set(sessionId, found.id)
+      this.focusFollowed(found.id)
+      return found
+    }
+    if (sessionId !== undefined) {
+      const bound = this.bindings.get(sessionId)
+      if (bound !== undefined) {
+        const found = tabs.list().find(tab => tab.id === bound)
+        if (found !== undefined) {
+          this.focusFollowed(found.id)
+          return found
+        }
+        this.bindings.delete(sessionId)
+      }
+    }
+    const watching = this.displayedOrDefault()
+    if (watching !== null) {
+      const found = tabs.list().find(tab => tab.id === watching)
+      // Safety invariant, not a default-value preference: one tool navigation
+      // must never drive the page the user is watching. A page another session
+      // owns is therefore not this session's to drive — falling through to a
+      // tab of its own is what holds that invariant, and this guard is what
+      // makes it a property rather than an accident of ordering.
+      if (found !== undefined && !this.ownedByOtherSession(found.id, sessionId)) {
+        if (sessionId !== undefined) this.bindings.set(sessionId, found.id)
+        this.focusFollowed(found.id)
+        return found
+      }
+    }
+    return await this.ensureTab(sessionId)
+  }
+
+  /**
+   * Whether a tab is bound to some other session.
+   * @param tabId - the tab being considered.
+   * @param sessionId - the asking session, which does not count as other.
+   * @returns true when another session already drives this tab.
+   */
+  private ownedByOtherSession(tabId: string, sessionId: string | undefined): boolean {
+    for (const [owner, bound] of this.bindings) {
+      if (bound === tabId && owner !== sessionId) return true
+    }
+    return false
+  }
+
+  /**
+   * Get (or lazily create) the tab bound to one session.
+   * @param sessionId - calling agent session.
+   * @returns the tab view.
+   */
+  async ensureTab(sessionId?: string): Promise<BrowserTabView> {
+    const tabs = await this.requireTabs()
+    if (sessionId !== undefined) {
+      const bound = this.bindings.get(sessionId)
+      if (bound !== undefined) {
+        const found = tabs.list().find(tab => tab.id === bound)
+        if (found !== undefined) return found
+        this.bindings.delete(sessionId)
+      }
+    }
+    // Two concurrent tool calls from a fresh session must share one tab, not
+    // race two `Target.createTarget` calls into existence.
+    this.openingTab ??= this.createBoundTab(sessionId).finally(() => { this.openingTab = undefined })
+    return await this.openingTab
+  }
+
+  /** Create a tab, bind it, and make it the one the panel watches. */
+  private async createBoundTab(sessionId: string | undefined): Promise<BrowserTabView> {
+    const tabs = await this.requireTabs()
+    const created = await this.openTab(sessionId)
+    // An unopened page still needs its first frame, or the panel shows an empty
+    // viewer until something happens to move the compositor.
+    await tabs.refreshFrame(created.id).catch(() => undefined)
+    return created
+  }
+
+  /**
+   * Open one additional tab for a session, deliberately without the
+   * first-use deduplication {@link ensureTab} applies: asking for a new tab is
+   * what the caller wants, so two calls must produce two tabs.
+   * @param sessionId - calling agent session.
+   * @returns the new tab view, now the session's bound tab and the panel's active one.
+   */
+  private async openTab(sessionId: string | undefined): Promise<BrowserTabView> {
+    const tabs = await this.requireTabs()
+    const created = await tabs.createTab({ url: 'about:blank', sessionId })
+    if (sessionId !== undefined) {
+      this.bindings.set(sessionId, created.id)
+      tabs.bindSession(created.id, sessionId)
+    }
+    // A freshly opened tab is what the agent is about to work on, so a
+    // following panel moves to it; a pinned panel keeps its own choice.
+    this.focusFollowed(created.id)
+    this.broadcast({ v: 1, kind: 'state', state: this.state() })
+    return created
+  }
+
+  /**
+   * Navigate a tab and trace the action.
+   * @param sessionId - calling agent session.
+   * @param url - destination.
+   * @param tabId - explicit tab, when the caller named one.
+   * @param options - `newTab` opens an additional tab instead of reusing one.
+   * @returns the action outcome plus the resulting tab view.
+   */
+  async navigate(
+    sessionId: string | undefined,
+    url: string,
+    tabId?: string,
+    options: { newTab?: boolean } = {},
+  ): Promise<{ outcome: ActionOutcome; tab: BrowserTabView }> {
+    // An explicit request for a new tab wins over a tab id: the caller is
+    // describing where the page should open, not which existing tab to reuse.
+    const tab = options.newTab === true
+      ? await this.openTab(sessionId)
+      : await this.tabFor(sessionId, tabId)
+    try {
+      const outcome = await navigateTo(this.scope(), tab.id, url)
+      await this.topUpAuthTicket(tab.id, url)
+      return { outcome: this.trace('navigate', outcome), tab: this.refreshTab(tab.id) }
+    } finally {
+      // Every navigation gets its own single retry: a later one may be a
+      // different page, and a rotated or expired cookie needs the same top-up.
+      this.authTopUpSpent.delete(tab.id)
+    }
+  }
+
+  /**
+   * Give a loopback navigation that landed on DSH's own authentication page
+   * one launch-token retry.
+   *
+   * The token rides the URL, and DSH answers the site root with a 303 to the
+   * clean address plus the `dsh-auth-<authority>` cookie, so the retried
+   * request is served normally. This is an enhancement, never a dependency: a
+   * host that mounts no connection service, a seam that throws, and a page
+   * that is still the challenge afterwards all end here without an error and
+   * leave the navigation result exactly as it is.
+   * @param tabId - tab the navigation ran in.
+   * @param url - the URL the caller asked for.
+   */
+  private async topUpAuthTicket(tabId: string, url: string): Promise<void> {
+    let ticket = await this.authTicketUrl(tabId, url)
+    while (ticket !== undefined) {
+      this.authTopUpSpent.add(tabId)
+      await navigateTo(this.scope(), tabId, ticket)
+      ticket = await this.authTicketUrl(tabId, url)
+    }
+  }
+
+  /**
+   * The ticketed URL for this navigation, or undefined when no retry applies.
+   * @param tabId - tab the navigation ran in.
+   * @param url - the URL the caller asked for.
+   * @returns the URL to retry with, or undefined.
+   */
+  private async authTicketUrl(tabId: string, url: string): Promise<string | undefined> {
+    if (this.authTopUpSpent.has(tabId)) return undefined
+    const mint = this.authenticatedUrl
+    if (mint === undefined) return undefined
+    if (!isLoopbackTarget(url)) return undefined
+    if (!(await this.documentShowsAuthChallenge(tabId))) return undefined
+    try {
+      const ticket = mint(url)
+      return typeof ticket === 'string' && ticket !== '' ? ticket : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Whether the tab's current document is DSH's authentication page. Reading
+   * the document is best-effort: a tab that refuses the script, or reports
+   * something other than text, simply does not match.
+   * @param tabId - tab to read.
+   * @returns true when the page body is the challenge.
+   */
+  private async documentShowsAuthChallenge(tabId: string): Promise<boolean> {
+    try {
+      const scope = this.scope()
+      const result = await scope.transport.send<{ result?: { value?: unknown } }>(
+        'Runtime.evaluate',
+        { expression: DOCUMENT_TEXT_EXPRESSION, returnByValue: true },
+        scope.tabs.sessionOf(tabId),
+      )
+      const text = result.result?.value
+      return typeof text === 'string' && isAuthChallengeText(text)
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Click in a tab and trace the action.
+   * @param sessionId - calling agent session.
+   * @param target - ref, selector, or coordinates.
+   * @param tabId - explicit tab.
+   * @returns the recorded outcome.
+   */
+  async click(sessionId: string | undefined, target: ElementTarget, tabId?: string): Promise<ActionOutcome> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const outcome = await clickElement(this.scope(), tab.id, target)
+    return this.trace('click', outcome)
+  }
+
+  /**
+   * Type into a tab and trace the action.
+   * @param sessionId - calling agent session.
+   * @param text - text to insert.
+   * @param target - optional element to focus first.
+   * @param tabId - explicit tab.
+   * @returns the recorded outcome.
+   */
+  async type(sessionId: string | undefined, text: string, target: ElementTarget = {}, tabId?: string): Promise<ActionOutcome> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const outcome = await typeText(this.scope(), tab.id, text, target)
+    return this.trace('type', outcome)
+  }
+
+  /**
+   * Press one key and trace the action.
+   * @param sessionId - calling agent session.
+   * @param key - key name or single character.
+   * @param tabId - explicit tab.
+   * @returns the recorded outcome.
+   */
+  async press(sessionId: string | undefined, key: string, tabId?: string): Promise<ActionOutcome> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const outcome = await pressKey(this.scope(), tab.id, key)
+    return this.trace('press', outcome)
+  }
+
+  /**
+   * Scroll a tab and trace the action.
+   * @param sessionId - calling agent session.
+   * @param delta - scroll distance.
+   * @param tabId - explicit tab.
+   * @returns the recorded outcome.
+   */
+  async scroll(sessionId: string | undefined, delta: { deltaX?: number; deltaY?: number; x?: number; y?: number }, tabId?: string): Promise<ActionOutcome> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const outcome = await scrollBy(this.scope(), tab.id, delta)
+    return this.trace('scroll', outcome)
+  }
+
+  /**
+   * Walk the tab's DOM and remember the ref map for later clicks.
+   * @param sessionId - calling agent session.
+   * @param tabId - explicit tab.
+   * @returns the snapshot the model sees.
+   */
+  async snapshot(sessionId: string | undefined, tabId?: string): Promise<BrowserSnapshot> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const tabs = await this.requireTabs()
+    const result: SnapshotResult = await buildSnapshot(this.transport(), tab.id, tabs.sessionOf(tab.id), {
+      url: tab.url,
+      title: tab.title,
+    })
+    // Record before returning: the very next call is usually the click that
+    // uses one of these refs.
+    tabs.setSnapshotRefs(tab.id, result.refs)
+    return result.snapshot
+  }
+
+  /**
+   * Capture one JPEG of the tab.
+   * @param sessionId - calling agent session.
+   * @param tabId - explicit tab.
+   * @returns the tab and the base64 JPEG.
+   */
+  async screenshot(sessionId: string | undefined, tabId?: string): Promise<{ tabId: string; url: string; title: string; data: string }> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const tabs = await this.requireTabs()
+    const data = await tabs.captureScreenshot(tab.id)
+    const current = tabs.list().find(candidate => candidate.id === tab.id) ?? tab
+    return { tabId: current.id, url: current.url, title: current.title, data }
+  }
+
+  /**
+   * Console entries of one tab, newest last.
+   * @param sessionId - calling agent session.
+   * @param limit - maximum trailing entries to return.
+   * @param tabId - explicit tab.
+   * @returns the entries.
+   */
+  async console(sessionId: string | undefined, limit = 100, tabId?: string): Promise<{ tabId: string; entries: BrowserConsoleEntry[] }> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const tabs = await this.requireTabs()
+    const entries = tabs.consoleEntries(tab.id)
+    return { tabId: tab.id, entries: entries.slice(Math.max(0, entries.length - limit)) }
+  }
+
+  /**
+   * Network entries of one tab, newest last.
+   * @param sessionId - calling agent session.
+   * @param limit - maximum trailing entries to return.
+   * @param tabId - explicit tab.
+   * @returns the entries.
+   */
+  async network(sessionId: string | undefined, limit = 100, tabId?: string): Promise<{ tabId: string; entries: BrowserNetworkEntry[] }> {
+    const tab = await this.tabFor(sessionId, tabId)
+    const tabs = await this.requireTabs()
+    const entries = tabs.networkEntries(tab.id)
+    return { tabId: tab.id, entries: entries.slice(Math.max(0, entries.length - limit)) }
+  }
+
+  /** Open tabs, for `browser_tabs`. */
+  async listTabs(): Promise<{ tabs: BrowserTabView[]; activeTabId: string | null }> {
+    if (this.session === undefined) {
+      // Listing tabs is also the cheap "is anything running" probe, so it must
+      // answer without starting a browser.
+      return { tabs: [], activeTabId: null }
+    }
+    return { tabs: this.session.tabs.list(), activeTabId: this.displayedOrDefault() }
+  }
+
+  /** Push one event to every attached panel, dropping sockets that fail. */
+  broadcast(event: BrowserViewEvent): void {
+    for (const sink of [...this.sinks]) {
+      try {
+        sink.send(event)
+      } catch {
+        this.sinks.delete(sink)
+      }
+    }
+  }
+
+  /**
+   * Tear everything down: stop pushing, stop streaming, close the socket, kill
+   * the browser.
+   * @returns once every owned resource is released.
+   */
+  async dispose(): Promise<void> {
+    if (this.disposed) return
+    this.disposed = true
+    // Stop broadcasting first: a panel must not receive a frame from a browser
+    // that is already being killed.
+    const sinks = [...this.sinks]
+    this.sinks.clear()
+    for (const sink of sinks) {
+      try {
+        sink.close()
+      } catch {
+        // A socket that is already gone needs no second close.
+      }
+    }
+    const session = this.session
+    this.session = undefined
+    this.bindings.clear()
+    this.displayedTabId = null
+    this.selectionPinned = false
+    if (session !== undefined) await session.dispose()
+  }
+
+  /** The action helpers' collaborator view: one transport, one tab manager. */
+  private scope(): { transport: CdpTransport; tabs: TabManager } {
+    const session = this.session
+    if (session === undefined) throw new Error('the browser is not running')
+    return { transport: session.transport, tabs: session.tabs }
+  }
+
+  /** The protocol transport of the running session. */
+  private transport(): CdpTransport {
+    return this.scope().transport
+  }
+
+  /** Resolve the live session or start one. */
+  private async requireTabs(): Promise<TabManager> {
+    return (await this.requireSession()).tabs
+  }
+
+  /** Resolve the live session, starting the browser on first use. */
+  private async requireSession(): Promise<BrowserSession> {
+    if (this.disposed) throw new Error('the browser view service is disposed')
+    if (this.session !== undefined) return this.session
+    this.opening ??= this.startSession().finally(() => { this.opening = undefined })
+    return await this.opening
+  }
+
+  /** Start the browser once, recording failures for the panel. */
+  private async startSession(): Promise<BrowserSession> {
+    try {
+      const session = await this.openSession({
+        jpegQuality: this.jpegQuality,
+        viewport: this.viewport,
+        onFrame: frame => { this.broadcast({ v: 1, kind: 'frame', ...frame }) },
+        onTabsChanged: () => { this.broadcast({ v: 1, kind: 'state', state: this.state() }) },
+      })
+      this.session = session
+      this.lastError = undefined
+      this.broadcast({ v: 1, kind: 'state', state: this.state() })
+      return session
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error)
+      this.broadcast({ v: 1, kind: 'error', code: 'browser-launch-failed', message: this.lastError })
+      throw error
+    }
+  }
+
+  /** Start the screencast for the tab the panel watches. */
+  private async startStreaming(): Promise<void> {
+    const session = this.session
+    if (session === undefined || this.sinks.size === 0) return
+    const tabId = this.displayedOrDefault()
+    if (tabId === null) return
+    this.displayedTabId = tabId
+    await session.tabs.startScreencast(tabId).catch(error => { this.fail('screencast-failed', error) })
+  }
+
+  /** Stop streaming when nobody is watching. */
+  private async stopStreaming(): Promise<void> {
+    const session = this.session
+    if (session === undefined) return
+    const tabId = this.displayedOrDefault()
+    if (tabId === null) return
+    await session.tabs.stopScreencast(tabId).catch(() => undefined)
+  }
+
+  /**
+   * The tab the panels currently watch: an explicit choice while that tab
+   * still exists, otherwise the newest tab, so a panel is never left pointing
+   * at a tab that no longer exists.
+   * @returns the watched tab id, or null when nothing is open.
+   */
+  private displayedOrDefault(): string | null {
+    const tabs = this.session?.tabs.list() ?? []
+    if (this.displayedTabId !== null && tabs.some(tab => tab.id === this.displayedTabId)) return this.displayedTabId
+    return tabs.at(-1)?.id ?? null
+  }
+
+  /**
+   * Show one tab to the panels and move the screencast with it.
+   * @param tabId - the tab to watch, or null when the last one closed.
+   */
+  private showTab(tabId: string | null): void {
+    if (this.displayedTabId === tabId) {
+      // Nothing moved, but the caller may still owe the panels a state frame
+      // (a tab's url changed, for instance).
+      this.broadcast({ v: 1, kind: 'state', state: this.state() })
+      return
+    }
+    const session = this.session
+    const previous = this.displayedTabId
+    this.displayedTabId = tabId
+    if (session !== undefined && this.sinks.size > 0) {
+      // One screencast at a time: the tab nobody watches must stop emitting,
+      // or a background page keeps the browser busy for no viewer.
+      if (previous !== null) void session.tabs.stopScreencast(previous).catch(() => undefined)
+      if (tabId !== null) void session.tabs.startScreencast(tabId).catch(() => undefined)
+    }
+    this.broadcast({ v: 1, kind: 'state', state: this.state() })
+  }
+
+  /**
+   * Let the panels follow an agent action unless a person pinned a tab.
+   * @param tabId - the tab the agent just used.
+   */
+  private focusFollowed(tabId: string): void {
+    if (this.selectionPinned) return
+    this.showTab(tabId)
+  }
+
+  /**
+   * Show the tab a panel's own session already owns, if it has one.
+   *
+   * Deliberately creates and binds nothing: an attaching panel observes. A
+   * session without a tab keeps following the page the agent is driving.
+   * @param sessionId - the session the panel belongs to.
+   */
+  private followPanelSession(sessionId: string | undefined): void {
+    const session = this.session
+    if (session === undefined || sessionId === undefined) return
+    const bound = this.bindings.get(sessionId)
+    if (bound === undefined) return
+    const found = session.tabs.list().find(tab => tab.id === bound)
+    if (found !== undefined) this.showTab(found.id)
+  }
+
+  /** Broadcast one readable action trace and return it as the tool outcome. */
+  private trace(tool: string, outcome: ActionOutcome): ActionOutcome {
+    const trace: BrowserActionTrace = { tool, summary: outcome.summary, at: this.now() }
+    this.broadcast({ v: 1, kind: 'action', trace })
+    this.broadcast({ v: 1, kind: 'state', state: this.state() })
+    return outcome
+  }
+
+  /** Re-read one tab after a navigation changed its url. */
+  private refreshTab(tabId: string): BrowserTabView {
+    const session = this.session
+    if (session === undefined) return { id: tabId, url: '', title: '', loading: false }
+    return session.tabs.list().find(tab => tab.id === tabId) ?? { id: tabId, url: '', title: '', loading: false }
+  }
+
+  /** Report a failure to the panels without throwing at the caller. */
+  private fail(code: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error)
+    this.lastError = message
+    this.broadcast({ v: 1, kind: 'error', code, message })
+  }
+}

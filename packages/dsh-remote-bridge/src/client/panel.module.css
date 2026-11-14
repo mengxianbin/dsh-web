@@ -1,0 +1,397 @@
+/* Protocol v1 pairing panel: the sidebar-foot seat plus the QR modal card.
+   Colour comes only from the theme's semantic aliases. Geometry, spacing and
+   type resolve through the scale below, so no element carries a one-off literal
+   (KFL R4 centralizes the value; A3 keeps one spacing rhythm; H5 holds the view
+   to three type sizes: 15 title / 13 body / 12 status). */
+
+/* ── One geometry scale for the seat and the card ──
+
+   Four spacing tiers, one type tier per hierarchy level, the symbol's fixed
+   module, and the two hit areas. The rule below repeats the selector for each
+   root that needs the scale: the seat and the card are siblings in different
+   trees, so custom properties cannot be inherited from one shared ancestor. */
+.panel,
+.trigger,
+.dialog {
+  --pair-space-1: 4px;
+  --pair-space-2: 8px;
+  --pair-space-3: 12px;
+  --pair-space-4: 24px;
+  --pair-title-size: 15px;
+  --pair-title-line: 24px;
+  --pair-text-size: 13px;
+  --pair-text-line: 20px;
+  --pair-state-size: 12px;
+  --pair-state-line: 18px;
+  --pair-qr: 184px;
+  --pair-bar: 4px;
+  --pair-seat: 36px;
+  --pair-close: 28px;
+  --pair-hit: 44px;
+  --pair-width: 460px;
+  --pair-faded: 0.35;
+  --pair-focus-offset: 2px;
+  /* The live status row's whole box: one text line, its gap and the bar. The
+     expired sentence occupies the same box, so the flip moves nothing. */
+  --pair-status: calc(var(--pair-state-line) + var(--pair-space-1) + var(--pair-bar));
+  /* The address line's reserved box: the located line and the missing-address
+     warning each fill it, so neither the hint nor the action row below moves. */
+  --pair-address: calc(var(--pair-text-line) * 2);
+}
+
+/* ── Sidebar foot seat ── */
+
+.trigger {
+  position: relative;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--pair-seat);
+  height: var(--pair-seat);
+  border: none;
+  border-radius: 50%;
+  padding: 0;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+  /* Ahead of the update/remote stack in the shared footer-action seat. */
+  order: -1;
+  transition: background-color var(--ds-transition-duration) ease, color var(--ds-transition-duration) ease;
+}
+
+/* The 36px visual keeps its size; the negative inset grows the pointer and
+   touch target to var(--pair-hit) without touching the seat's geometry (I3). */
+.trigger::after {
+  content: '';
+  position: absolute;
+  inset: calc((var(--pair-hit) - var(--pair-seat)) / -2);
+  border-radius: 50%;
+}
+
+.trigger:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.trigger:active:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+/* The seat is the one control this package still draws itself (see icons.tsx for
+   the QR exception): the official Button has no circular seat variant, and the
+   seat's geometry belongs to the shell's footer row. Its states therefore read
+   the very slots the library's ghost variant reads — hover, active and the
+   family's declared focus ring — so the two never diverge in behaviour. */
+.trigger:focus-visible {
+  outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: var(--pair-focus-offset);
+}
+
+/* ── Rail seat geometry (official-shell compatibility) ──
+
+   The shell renders `sidebar.footer.action` as a centered horizontal row, so
+   this trigger is the third occupant of a seat the 56px rail cannot widen. In
+   rail mode stack the seat vertically, keeping every occupant in the 36px
+   column the shell uses elsewhere. The selector carries no class names (they
+   stay global under CSS Modules) and matches only a seat that actually holds
+   this trigger. The gap keeps a fallback literal because this rule targets the
+   seat element itself, which is outside this plugin's token scope. */
+[class*='footerActions']:has([data-dsh-plugin='remote-bridge'][data-wide='rail']) {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--pair-space-1, 4px);
+}
+
+/* ── The headless card the official Modal renders ──
+
+   The library owns the overlay, the mask, the radius, the elevation and the
+   card's own fade-in; this class only sizes the card for the 184px symbol and
+   pads it. Both declarations repeat the class so they win over the library's
+   own .dialog rule whichever order the two stylesheets are injected in. */
+.dialog.dialog {
+  width: min(var(--pair-width), 100%);
+  max-height: 100%;
+  padding: var(--pair-space-4);
+  overflow: auto;
+}
+
+/* ── Panel ── */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pair-space-3);
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--pair-text-size);
+  line-height: var(--pair-text-line);
+  /* The leave leg's second shape: a fade that needs no keyframe name. It is
+     what the reduced-motion path runs, and what a browser that cannot report
+     the dialog's keyframe name falls back to. */
+  transition: opacity var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+/* ── Leave leg (M1/M2) ──
+
+   The library animates the card in with its own opacity-only `modalEnter` and
+   returns null the instant `open` goes false, so the exit is this plugin's: the
+   panel stays mounted and plays that same keyframe backwards — same name, same
+   duration, same curve, direction reversed — which is the enter path read in the
+   opposite direction. `--pair-exit-name` carries that name because the bundler
+   scopes the library's keyframes, so the name cannot be written here; PairPanel
+   reads it off the mounted dialog when closing starts and clears it on reopen.
+   With no name the declaration resolves to `none` and the card falls back to the
+   transition on .panel, which is also what reduced motion runs.
+
+   Known limitation, recorded rather than hidden: the mask's own fade-in belongs
+   to the library's .mask::after and its name is scoped the same way, so the
+   overlay behind this reverse fade cannot be reversed and clears with the node.
+   Reusing a scoped keyframe from outside the library's stylesheet is not
+   possible, and duplicating the mask to animate it would fork the primitive. */
+.panel[data-closing] {
+  opacity: 0;
+  animation: var(--pair-exit-name, none) var(--ds-transition-duration) var(--ds-ease-in-out) reverse both;
+}
+
+/* Reduced motion (M5): the library drops its own animation, so the leave leg
+   keeps the lifecycle with one short opacity fade instead of no motion at all.
+   No travel, no size change, no focus move: the layout is identical to the
+   settled state while the fade runs, and the dialog stays mounted until it ends. */
+@media (prefers-reduced-motion: reduce) {
+  .panel[data-closing] {
+    animation: none;
+  }
+}
+
+/* ── Header ── */
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pair-space-3);
+}
+
+.heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.title {
+  margin: 0;
+  font-size: var(--pair-title-size);
+  font-weight: 600;
+  line-height: var(--pair-title-line);
+}
+
+.subtitle {
+  margin: var(--pair-space-1) 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--pair-text-size);
+  line-height: var(--pair-text-line);
+}
+
+/* Official ghost/sm control: the library owns hover, focus and disabled, and
+   the negative inset below restores the 44px target around its 28px box (I3). */
+.close {
+  position: relative;
+  flex: none;
+  width: var(--pair-close);
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.close::after {
+  content: '';
+  position: absolute;
+  inset: calc((var(--pair-hit) - var(--pair-close)) / -2);
+  border-radius: 50%;
+}
+
+/* ── Body ── */
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--pair-space-2);
+}
+
+/* ── QR card ──
+
+   The symbol's box is a fixed module, so the card the read leaves behind and
+   the card the code arrives in are the same height (A4), and the status row's
+   height is fixed too: the countdown and the expiry sentence share one box. */
+.qrCard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--pair-space-2);
+  padding: var(--pair-space-3);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-lg);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+/* No background of its own: QRCodeSVG paints its full-size white quiet zone
+   itself, so the symbol keeps scanner contrast in either theme and this box
+   adds no literal colour. */
+.qrSlot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--pair-qr);
+  height: var(--pair-qr);
+}
+
+/* An expired code stops looking scannable without moving or resizing: the
+   symbol keeps its box and only loses contrast. */
+.qrSlot[data-expired] {
+  opacity: var(--pair-faded);
+}
+
+.skeleton {
+  display: block;
+  width: var(--pair-qr);
+  height: var(--pair-qr);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--pair-space-1);
+  box-sizing: border-box;
+  width: 100%;
+  height: var(--pair-status);
+}
+
+.statusText {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--pair-state-size);
+  line-height: var(--pair-state-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  display: block;
+  width: 100%;
+  height: var(--pair-bar);
+  overflow: hidden;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  border-radius: var(--dsw-radius-xs);
+  background: var(--dsw-alias-brand-primary);
+  transition: width var(--ds-transition-duration) linear;
+}
+
+/* ── Supporting group under the card ── */
+
+.address {
+  display: flex;
+  align-items: center;
+  min-height: var(--pair-address);
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--pair-text-size);
+  line-height: var(--pair-text-line);
+}
+
+/* The warn state slot is the shell's own text colour for a warning line; there
+   is no label-warning alias in the theme, and inventing one here would put a
+   literal hue outside the declared palette. */
+.address[data-tone='warning'] {
+  color: var(--dsw-alias-state-warn-primary);
+}
+
+.hint {
+  margin: 0;
+  color: var(--dsw-alias-label-tertiary);
+  font-size: var(--pair-text-size);
+  line-height: var(--pair-text-line);
+}
+
+/* ── Refusals ── */
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--pair-space-2);
+  padding: var(--pair-space-3);
+  border: 1px solid var(--dsw-alias-state-error-primary);
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.noticeIcon {
+  flex: none;
+  display: inline-flex;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.noticeCopy {
+  min-width: 0;
+}
+
+.noticeTitle {
+  margin: 0;
+  font-size: var(--pair-text-size);
+  font-weight: 600;
+  line-height: var(--pair-text-line);
+}
+
+.noticeText {
+  margin: var(--pair-space-1) 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--pair-text-size);
+  line-height: var(--pair-text-line);
+}
+
+/* ── Action row ── */
+
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--pair-space-2);
+}
+
+/* The copy control's three labels share one grid cell, so the button keeps one
+   width and the row keeps its gaps while the label changes (A4/M3). Only the
+   active label is exposed to assistive technology. */
+.labels {
+  display: grid;
+}
+
+.label {
+  grid-area: 1 / 1;
+}
+
+.label[data-visible='false'] {
+  visibility: hidden;
+}
+
+/* The copy outcome as a live region. The label swap above confirms the result
+   on screen, but a control's name is spoken when focus lands on it, so the
+   change itself can pass unheard; this region says it instead. It takes no part
+   in the row: out of flow, no box, clipped away, with no type, colour or length
+   of its own, so the action row keeps the geometry it had. */
+.announce {
+  position: absolute;
+  width: 0;
+  height: 0;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(0);
+}

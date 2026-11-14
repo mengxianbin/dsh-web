@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-17-remote-tunnel-orphan-reaping.md: 5f48866ec3b9bbe29c3cdd35439da22db90cd785
+2026-10-17-remote-tunnel-orphan-reaping.zh.md: 84a1e9a52c5a5f46ec36174acdebffb0db7a9cd5

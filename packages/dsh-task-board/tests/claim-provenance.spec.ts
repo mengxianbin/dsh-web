@@ -77,8 +77,8 @@ describe('ledger claim audit (issue #6)', () => {
 
   it('leaves initiatedBy absent for cron-triggered runs and plain tasks', () => {
     const ledger = new HostTaskLedger(tempRoot(), () => NOW)
-    ledger.applyRequest('req-c', { kind: 'create', id: 'card-1', input: { title: 'x', description: '', prompt: 'y' } })
-    ledger.openScheduled('card-1', undefined, NOW)
+    ledger.applyRequest('req-c', { kind: 'create', id: 'card-1', input: { title: 'x', description: '', prompt: 'y', schedule: { enabled: true, cron: '* * * * *' } } })
+    ledger.openScheduled('card-1', NOW)
     const execution = ledger.state().tasks[0].executions[0]
     expect(execution.initiatedBy).toBeUndefined()
     expect(execution.frozenAt).toBeUndefined()
@@ -113,7 +113,7 @@ describe('controller claim initiator (issue #6)', () => {
     const initiators: Array<string | undefined> = []
     const running: TaskRecord = { ...initial, status: 'running', executions: [{ id: 'e1', sessionId: undefined, startedAt: NOW, endedAt: undefined, result: undefined, error: undefined }] }
     const snapshot = (revision: number, tasks: readonly TaskRecord[]): TaskBoardSnapshot => ({
-      schemaVersion: 3, revision, tasks: [...tasks],
+      schemaVersion: 6, revision, tasks: [...tasks],
       scheduler: { timeZone: 'UTC', ledgerId: 'ledger-a' },
       power: { platform: 'linux', phase: 'unsupported', enabled: false, runningSessions: 0, armedSchedules: 0, sessionStateKnown: true },
     })
@@ -124,7 +124,8 @@ describe('controller claim initiator (issue #6)', () => {
       subscribe: () => () => undefined,
     }
     const sessions = {
-      list: { getSnapshot: () => ({ current: 'session-claimer' }), subscribe: () => () => {} },
+      current: () => 'session-claimer',
+      subscribe: () => () => {},
       open: () => {},
     }
     const controller = new BoardController({ store: new InMemoryTaskStore(), sessions, transport, now: () => NOW })

@@ -49,19 +49,22 @@ const ALLOW_MARKER = 'i18n-allow:'
  * the gate follows the code instead of a hand-maintained copy.
  */
 const PACKAGES = [
-  { pkg: 'dsh-doctor', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-agents', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-browser-view', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-git-graph', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-liangshen', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-market', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
-  { pkg: 'dsh-model-capabilities', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
-  { pkg: 'dsh-pet', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-message-edit', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-plugin-manager', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-remote-bridge', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-remote-web-ui', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-session-id', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-session-archive', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-skill-explorer', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-ssh', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-task-board', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
-  { pkg: 'dsh-tool-describe-image', files: [{ file: 'src/client/locales.ts', shape: 'dictionaries' }] },
+  { pkg: 'dsh-task-board-github', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
+  { pkg: 'dsh-update', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-usage', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
   { pkg: 'dsh-web-settings', files: [{ file: 'src/client/locales.ts', shape: 'zh-en' }] },
 ]
@@ -238,6 +241,23 @@ export function diffPlaceholders(a, b) {
   return issues
 }
 
+/**
+ * The error lines for placeholder mismatches between the zh source of truth and
+ * one other dictionary. One formatter for every comparison on purpose: the zh/en
+ * and zh/ru loops each carried their own copy of this template, and the zh/en
+ * copy interpolated a loop variable that does not exist in its scope, so a
+ * mismatch crashed the gate instead of reporting it.
+ * @param pkg - the package the zh dictionary came from (the ru side names itself).
+ * @param ns - the locale namespace.
+ * @param issues - mismatches reported by {@link diffPlaceholders}.
+ * @param other - the dictionary compared against zh, as its report label ("en", "ru").
+ * @returns one error line per mismatched key.
+ */
+export function placeholderMismatchErrors(pkg, ns, issues, other) {
+  return issues.map(({ key, onlyA, onlyB }) =>
+    `[${pkg}] ns "${ns}" key "${key}": placeholder mismatch zh vs ${other} (zh-only: ${onlyA.join(', ') || 'none'}; ${other}-only: ${onlyB.join(', ') || 'none'})`)
+}
+
 /* ------------------------------------------------------------------ *
  * Loading dictionary modules (real TS, through type stripping)
  * ------------------------------------------------------------------ */
@@ -269,7 +289,9 @@ async function importTs(absolutePath) {
  * Extract a namespace id from a package's client entry: the first
  * `ctx.locale.register(arg` where arg is a quoted literal, or an identifier
  * resolved against const declarations in the entry and the dictionary module.
- * @param {string} entrySource - src/client/index.ts text.
+ * The same reading applies to a dictionary module: a package that moves the
+ * registration into a helper the entry calls keeps the call and the const there.
+ * @param {string} entrySource - src/client/index.ts text (or a dictionary module).
  * @param {Record<string, string>} constTable - identifier -> value from dictionary modules.
  * @returns {string | undefined}
  */
@@ -321,8 +343,16 @@ async function loadPackages() {
       Object.assign(en, dict.en)
     }
     const entrySource = readFileSync(join(pkgDir, 'src/client/index.ts'), 'utf8')
-    const ns = deriveNamespace(entrySource, constTable)
-    if (ns === undefined) throw new Error(`${entry.pkg}: cannot derive locale namespace from src/client/index.ts`)
+    // The registration itself may sit in a helper the entry calls: dsh-agents
+    // wraps `locale.register` in registerAgentLocales() inside its dictionary
+    // module, so the entry names no namespace. Reading the dictionary sources as
+    // a fallback keeps that factoring legitimate instead of forcing every package
+    // to call `ctx.locale.register` from its entry.
+    const dictionarySources = entry.files
+      .map(({ file }) => readFileSync(join(pkgDir, file), 'utf8'))
+      .join('\n')
+    const ns = deriveNamespace(entrySource, constTable) ?? deriveNamespace(dictionarySources, constTable)
+    if (ns === undefined) throw new Error(`${entry.pkg}: cannot derive locale namespace from src/client/index.ts or its dictionary modules`)
     loaded.push({ pkg: entry.pkg, ns, zh, en })
   }
   return loaded
@@ -428,9 +458,7 @@ function checkMode(packages, ruDictionaries) {
     const diff = diffKeySets(zh, en)
     if (diff.missingInB.length > 0) errors.push(`[${pkg}] ns "${ns}": keys missing in en (${diff.missingInB.length}): ${diff.missingInB.join(', ')}`)
     if (diff.missingInA.length > 0) errors.push(`[${pkg}] ns "${ns}": keys missing in zh but present in en (${diff.missingInA.length}): ${diff.missingInA.join(', ')}`)
-    for (const issue of diffPlaceholders(zh, en)) {
-      errors.push(`[${pkg}] ns "${ns}" key "${key}": placeholder mismatch zh vs en (zh-only: ${issue.onlyA.join(', ') || 'none'}; en-only: ${issue.onlyB.join(', ') || 'none'})`)
-    }
+    errors.push(...placeholderMismatchErrors(pkg, ns, diffPlaceholders(zh, en), 'en'))
   }
 
   for (const file of walkClientFiles()) {
@@ -473,9 +501,7 @@ function checkMode(packages, ruDictionaries) {
         errors.push(`[${I18N_PACKAGE}] ns "${ns}" key "${key}": CJK inside a ru value (untranslated copy or wrong dict?)`)
       }
     }
-    for (const issue of diffPlaceholders(zh, ru)) {
-      errors.push(`[${I18N_PACKAGE}] ns "${ns}" key "${issue.key}": placeholder mismatch zh vs ru (zh-only: ${issue.onlyA.join(', ') || 'none'}; ru-only: ${issue.onlyB.join(', ') || 'none'})`)
-    }
+    errors.push(...placeholderMismatchErrors(I18N_PACKAGE, ns, diffPlaceholders(zh, ru), 'ru'))
   }
   const unknownNs = [...ruByNs.keys()].filter((ns) => !packages.some((p) => p.ns === ns))
   for (const ns of unknownNs) warnings.push(`[${I18N_PACKAGE}] ru dictionary for unknown ns "${ns}" (no audited package registers it)`)

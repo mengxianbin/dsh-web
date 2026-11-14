@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+.agents/notes/implemented/feature/2026-10-17-ssh-agent-forwarding.md: 727efc3e9966795819a7162e27b47932edb51406
+.agents/notes/implemented/feature/2026-10-17-ssh-agent-forwarding.zh.md: d7c5e62164e64c45f0e2111cbb88318597b7dd72

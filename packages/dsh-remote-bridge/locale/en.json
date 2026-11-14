@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Remote bridge",
+    "description": "Serve DSH as protocol v1 over one paired WebSocket route for native clients."
+  }
+}

@@ -324,13 +324,14 @@ function makePollEnv(): {
 }
 
 /** Open one SSE connection; collect the bytes the host writes and a close trigger. */
-function connect(sse: (req: unknown, res: unknown) => Promise<void>): { writes: string[]; close: () => void } {
+function connect(sse: (req: unknown, res: unknown) => Promise<void>): { writes: string[]; ended: () => number; close: () => void } {
   const writes: string[] = []
+  let ended = 0
   const closeHandlers: Array<() => void> = []
   const res = {
     writeHead: () => {},
     write: (chunk: unknown) => { writes.push(String(chunk)) },
-    end: () => {},
+    end: () => { ended += 1 },
     on: () => {},
   }
   const req = {
@@ -344,6 +345,7 @@ function connect(sse: (req: unknown, res: unknown) => Promise<void>): { writes: 
   sse(req as never, res as never)
   return {
     writes,
+    ended: () => ended,
     close: () => { for (const handler of closeHandlers) handler() },
   }
 }
@@ -464,6 +466,40 @@ describe('SSE poll loop', () => {
     expect(env.status).toHaveBeenCalledTimes(1)
   })
 
+  it('operator releases the routes, the heartbeat, and the stream when the disposer runs', async () => {
+    // Given a registered /git route pair whose SSE stream is polling status
+    const registrations: Array<{ kind: string; path: string; handler: (req: unknown, res: unknown) => Promise<void> }> = []
+    const disposed: string[] = []
+    const ctx = {
+      logger: { warn: vi.fn() },
+      webServer: {
+        register: (row: { kind: string; path: string; handler: (req: unknown, res: unknown) => Promise<void> }) => {
+          registrations.push(row)
+          return () => { disposed.push(row.path) }
+        },
+      },
+    }
+    const status = vi.fn(async () => makeStatus())
+    const disposeRoutes = registerGitRoutes(ctx as never, { status } as never)
+    const sse = registrations.find(row => row.kind === 'exact')
+    if (sse === undefined) throw new Error('SSE route not registered')
+    const conn = connect(sse.handler)
+    await vi.advanceTimersByTimeAsync(30_000)
+    const pollsBeforeDispose = status.mock.calls.length
+    const writesBeforeDispose = conn.writes.length
+
+    // When the plugin fiber disposes and the returned disposer runs
+    disposeRoutes()
+
+    // Then both registrations are released, the stream ends, and neither the
+    // heartbeat nor the poll guard writes or polls again
+    expect(disposed).toEqual(['/git', '/git/events'])
+    expect(conn.ended()).toBe(1)
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(status.mock.calls.length).toBe(pollsBeforeDispose)
+    expect(conn.writes.length).toBe(writesBeforeDispose)
+  })
+
   it('resumes polling when a subscriber reconnects after the loop stopped', async () => {
     const env = makePollEnv()
     env.status.mockResolvedValue(makeStatus())
@@ -558,3 +594,69 @@ describe('/git worktree routes', () => {
   })
 })
 
+/** The registered prefix handler of a fresh /git route table. */
+function prefixHandler(status: (path: string, signal: AbortSignal) => Promise<RepoStatus | null> = async () => null) {
+  const { ctx, registrations } = fakeCtx()
+  registerGitRoutes(ctx as never, { status } as never)
+  return registrations.find((row) => row.kind === 'prefix')!
+}
+
+describe('json body failure contract', () => {
+  it('user posting invalid JSON gets the malformed envelope and the request is not destroyed', async () => {
+    // Given: a /git status request whose body is not JSON, on a loopback client
+    const destroy = vi.fn()
+    const request = { ...fakeRequest('/git/status', { body: '{not json' }), destroy }
+
+    // When: the route handler reads the body
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the stable malformed-request envelope answers and the connection stays up
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({ ok: false, error: { code: 'internal', message: 'malformed request' } })
+    expect(destroy).not.toHaveBeenCalled()
+  })
+
+  it('user posting an empty body gets the malformed envelope and the request is not destroyed', async () => {
+    // Given: a /git status request with an empty JSON body
+    const destroy = vi.fn()
+    const request = { ...fakeRequest('/git/status', { body: '' }), destroy }
+
+    // When: the route handler reads the body
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the same envelope answers and the connection stays up
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({ ok: false, error: { code: 'internal', message: 'malformed request' } })
+    expect(destroy).not.toHaveBeenCalled()
+  })
+
+  it('user posting a body past the 1 MiB cap gets the malformed envelope and the request is destroyed', async () => {
+    // Given: a /git status request one byte past the 1 MiB cap the route family reads with
+    const destroy = vi.fn()
+    const request = { ...fakeRequest('/git/status', { body: 'x'.repeat(1024 * 1024 + 1) }), destroy }
+
+    // When: the route handler reads the body
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the malformed envelope answers and the shared reader tears the connection down
+    expect(response.status).toBe(200)
+    expect(JSON.parse(response.body)).toEqual({ ok: false, error: { code: 'internal', message: 'malformed request' } })
+    expect(destroy).toHaveBeenCalledTimes(1)
+  })
+
+  it('user reading the malformed envelope sees the family JSON headers', async () => {
+    // Given: a /git status request with an unreadable body
+    const request = fakeRequest('/git/status', { body: '{not json' })
+
+    // When: the route handler answers it
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the shared writer's family headers are on the response
+    expect(response.headers['content-type']).toBe('application/json; charset=utf-8')
+    expect(response.headers['referrer-policy']).toBe('no-referrer')
+  })
+})

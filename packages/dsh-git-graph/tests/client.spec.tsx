@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 /**
- * Branch-chip behavior tests: the input selector context entry renders the
- * branch chip from the session baseline, non-repository workspaces (and
- * sessions without a cwd) hide it, blank (hero) sessions keep it mounted,
+ * Branch-chip behavior tests: the composer input-dock entry renders the
+ * branch chip in the blank hero phase, non-repository workspaces (and
+ * sessions without a cwd) hide it, active sessions hide it,
  * the popover searches/filters and marks the current branch, the footer
  * flows fire the right verbs, switch rejections surface readable copy, and
  * the create/graph dialogs behave (validation, duplicate copy, lane
@@ -15,6 +15,7 @@ import type { BranchesView, GraphView, RepoStatus, SwitchResult, WorktreeListVie
 import type { GitGraphInjected } from '../src/client/index.ts'
 import type { BranchChipProps } from '../src/client/chips/BranchChip.tsx'
 import { BranchChip } from '../src/client/chips/BranchChip.tsx'
+import { resolvePopoverDirection } from '../src/client/chips/BranchPopover.tsx'
 import { GraphDialog } from '../src/client/graph/GraphDialog.tsx'
 import { zh, type GitGraphKey } from '../src/client/locales.ts'
 import css from '../src/client/chips/context.module.css'
@@ -75,11 +76,8 @@ interface BenchOptions {
   container?: HTMLElement
 }
 
-/** The seat whose props the bench should compose. */
-type BenchSeat = 'context' | 'dock'
-
 /** Render the branch chip with stub framework hooks and a scripted inject face. */
-function bench(options: BenchOptions = {}, seat: BenchSeat = 'context') {
+function bench(options: BenchOptions = {}) {
   const sessionId = sid('sess-1')
   const cwd = 'cwd' in options ? options.cwd : '/ws/proj'
   const repoStatus = options.repoStatus === undefined
@@ -141,14 +139,14 @@ function bench(options: BenchOptions = {}, seat: BenchSeat = 'context') {
     subscribeChanges: vi.fn((sessionId: SessionId | undefined, _onChange: () => void) => { record('subscribeChanges', sessionId); return () => {} }),
   }
 
-  const blank = options.blank ?? seat === 'context'
+  const blank = options.blank ?? true
   const sessionsState = {
     byId: { [sessionId]: { cwd, blank } },
   }
   const commonProps = {
-    // The context/dock holes read their state from the standard session kit +
-    // the inject face; the dock seat additionally carries the conversation
-    // snapshot used to identify the blank hero phase.
+    // The dock hole reads its state from the standard session kit + the inject
+    // face; its runtime share also carries the conversation snapshot used to
+    // identify the blank hero phase.
     useSession: (() => undefined) as never,
     useSessions: ((selector: (state: typeof sessionsState) => unknown) => selector(sessionsState)) as never,
     useWorkspaces: (() => undefined) as never,
@@ -157,22 +155,14 @@ function bench(options: BenchOptions = {}, seat: BenchSeat = 'context') {
     ...injected,
   } as const
 
-  let props: BranchChipProps
-  if (seat === 'dock') {
-    props = {
-      ...commonProps,
-      sessionId,
-      session: {
-        blank: options.blank ?? false,
-        openState: options.openState ?? 'open',
-      } as never,
-      input: {} as never,
-    }
-  } else {
-    props = {
-      ...commonProps,
-      sessionId,
-    }
+  const props: BranchChipProps = {
+    ...commonProps,
+    sessionId,
+    session: {
+      blank: options.blank ?? true,
+      openState: options.openState ?? 'open',
+    } as never,
+    input: {} as never,
   }
 
   const view = render(<BranchChip {...props} />, options.container !== undefined ? { container: options.container } : undefined)
@@ -217,15 +207,7 @@ describe('BranchChip', () => {
     expect(branchChip.textContent).toContain('main')
   })
 
-  it('hides the branch selector in active dock sessions', async () => {
-    const { injected } = bench({}, 'dock')
-    await act(async () => {})
-    expect(screen.queryByRole('button', { name: '分支' })).toBeNull()
-    expect(injected.repoStatus).not.toHaveBeenCalled()
-    expect(injected.subscribeChanges).not.toHaveBeenCalled()
-  })
-
-  it('hides the branch selector in active context sessions', async () => {
+  it('hides the branch selector in active sessions', async () => {
     const { injected } = bench({ blank: false })
     await act(async () => {})
     expect(screen.queryByRole('button', { name: '分支' })).toBeNull()
@@ -233,18 +215,8 @@ describe('BranchChip', () => {
     expect(injected.subscribeChanges).not.toHaveBeenCalled()
   })
 
-  it('keeps the full pill in the blank hero and context seats', async () => {
-    bench({ blank: true }, 'dock')
-    const heroChip = await screen.findByRole('button', { name: '分支' })
-    expect(heroChip.className).toContain('chipHero')
-    cleanup()
-    bench({ blank: true })
-    const contextChip = await screen.findByRole('button', { name: '分支' })
-    expect(contextChip.className).not.toContain('chipHero')
-  })
-
   it('styles the dock chip with the official hero seat in the blank phase', async () => {
-    bench({ blank: true, openState: 'open' }, 'dock')
+    bench({ blank: true, openState: 'open' })
     const branchChip = await screen.findByRole('button', { name: '分支' })
     const chipWrap = branchChip.parentElement as HTMLElement
     expect(chipWrap.className).toContain('chipWrap')
@@ -258,8 +230,22 @@ describe('BranchChip', () => {
     expect(chipWrap.contains(popover)).toBe(true)
   })
 
+  it('user sees the hero popover open below the chip while it has not been measured yet', async () => {
+    // Given the hero seat's own contract, where the official workspace picker
+    // beside the chip opens downward
+    bench({ blank: true, openState: 'open' })
+
+    // When the user opens the branch picker
+    fireEvent.click(await screen.findByRole('button', { name: '分支' }))
+    const popover = await screen.findByRole('listbox', { name: '搜索分支' })
+
+    // Then the card keeps that side until its first measurement says otherwise
+    expect(popover.getAttribute('data-gitgraph-side')).toBe('down')
+    expect(popover.className).toContain(css.popoverHero)
+  })
+
   it('enters the hero seat while a blank session composer is still loading', async () => {
-    bench({ blank: true, openState: 'loading' }, 'dock')
+    bench({ blank: true, openState: 'loading' })
     const branchChip = await screen.findByRole('button', { name: '分支' })
     const anchor = anchorOf(branchChip)
     expect(anchor.className).toContain('anchorHero')
@@ -277,7 +263,7 @@ describe('BranchChip', () => {
     stack.append(heroRow, outlet)
     document.body.append(stack)
     try {
-      bench({ blank: true, openState: 'open', container: outlet }, 'dock')
+      bench({ blank: true, openState: 'open', container: outlet })
       await waitFor(() => {
         const chip = screen.getByRole('button', { name: '分支' })
         const anchor = anchorOf(chip)
@@ -287,6 +273,41 @@ describe('BranchChip', () => {
         expect(preset.nextElementSibling).toBe(anchor)
         expect(anchor.className).toContain('anchorHero')
         expect(chip.className).toContain('chipHero')
+      })
+    } finally {
+      stack.remove()
+    }
+  })
+
+  it('user sees the hero chip before the right-pinned options group, beside the preset seat', async () => {
+    const stack = document.createElement('div')
+    const heroRow = document.createElement('div')
+    heroRow.className = 'heroWorkspaceRow'
+    const preset = document.createElement('span')
+    preset.className = 'presetSeat'
+    // The shipped hero row ends with an options group carrying margin-left: auto,
+    // so a chip appended after it renders above the composer card's top-right
+    // corner instead of beside the agent-preset seat.
+    const options = document.createElement('div')
+    options.className = 'heroOptions'
+    heroRow.append(preset, options)
+    const outlet = document.createElement('div')
+    stack.append(heroRow, outlet)
+    document.body.append(stack)
+    try {
+      // Given a hero row whose trailing options group is pinned right by
+      // margin-left: auto, and a dock outlet after that row
+      bench({ blank: true, openState: 'open', container: outlet })
+      await waitFor(() => {
+        const chip = screen.getByRole('button', { name: '分支' })
+        const anchor = anchorOf(chip)
+
+        // When React appends the portaled chip at the end of the row
+        // Then it is re-ordered directly after the preset seat and before the
+        // options group, which would otherwise push it to the composer corner
+        expect(anchor.parentElement).toBe(heroRow)
+        expect(preset.nextElementSibling).toBe(anchor)
+        expect(anchor.nextElementSibling).toBe(options)
       })
     } finally {
       stack.remove()
@@ -630,6 +651,60 @@ describe('popover search box focus', () => {
     fireEvent.click(chip)
     const input = await screen.findByPlaceholderText(/搜索分支/)
     expect(document.activeElement).toBe(input)
+  })
+})
+
+describe('popover side', () => {
+  const anchorAt = (top: number, bottom: number) => ({ top, bottom })
+
+  it('user sees the popover keep its seat side while the card fits there', () => {
+    // Given a chip mid-window and a card shorter than the room on either side.
+    const anchor = anchorAt(300, 328)
+
+    // When either seat measures the room around its own side.
+    const fromDock = resolvePopoverDirection(anchor, 200, 800, 'up')
+    const fromHero = resolvePopoverDirection(anchor, 200, 800, 'down')
+
+    // Then each keeps the side its seat ships with.
+    expect(fromDock).toBe('up')
+    expect(fromHero).toBe('down')
+  })
+
+  it('user gets the popover above the chip when the row sits at the window bottom', () => {
+    // Given the Claude Code studio home, where the hero row sits at 700 of an
+    // 800px window: 64px below it and 692 above.
+    const anchor = anchorAt(700, 728)
+
+    // When the hero seat asks for its downward side.
+    const side = resolvePopoverDirection(anchor, 300, 800, 'down')
+
+    // Then the card flips upward instead of running off the window.
+    expect(side).toBe('up')
+  })
+
+  it('user gets the popover below the chip when the row sits at the window top', () => {
+    // Given a dock row 20px under the window's top edge.
+    const anchor = anchorAt(20, 48)
+
+    // When the dock seat asks for its upward side.
+    const side = resolvePopoverDirection(anchor, 300, 800, 'up')
+
+    // Then the card flips downward, where the room is.
+    expect(side).toBe('down')
+  })
+
+  it('user gets the roomier side when neither side fits a card taller than the window', () => {
+    // Given a card taller than the window and a chip in the middle of it, where
+    // both sides differ by less than the card.
+    const anchor = anchorAt(380, 420)
+
+    // When each seat measures the room.
+    const fromHero = resolvePopoverDirection(anchor, 900, 800, 'down')
+    const fromTightTop = resolvePopoverDirection(anchorAt(60, 100), 900, 800, 'up')
+
+    // Then the side with the most room wins, whichever seat asked.
+    expect(fromHero).toBe('down')
+    expect(fromTightTop).toBe('down')
   })
 })
 

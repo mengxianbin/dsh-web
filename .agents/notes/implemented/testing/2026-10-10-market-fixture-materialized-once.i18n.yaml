@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-10-market-fixture-materialized-once.md: fed4d3ef13005125915a61dcb9acbf4d74ae2416
+2026-10-10-market-fixture-materialized-once.zh.md: 133ea20a1c749cb923c55930ef46b5eb774561b8

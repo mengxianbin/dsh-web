@@ -32,25 +32,25 @@ describe('isInside', () => {
 })
 
 describe('indexSessionDirs', () => {
-  it('indexes by the canonical id with sizes', () => {
+  it('indexes by the canonical id with sizes', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-session-archive-'))
     const project = join(home, 'sessions', '--demo--')
     mkdirSync(join(project, 'abc'), { recursive: true })
     writeFileSync(join(project, 'abc', 'session.jsonl.zstd'), Buffer.alloc(128, 1))
-    const index = indexSessionDirs(join(home, 'sessions'))
+    const index = await indexSessionDirs(join(home, 'sessions'))
     expect(index.byId.get('session-abc')).toBeDefined()
     expect(index.byId.has('abc')).toBe(false)
     expect(index.sizes.get('session-abc')).toBe(128)
   })
 
-  it('does not follow symlinks that escape the sessions root', () => {
+  it('does not follow symlinks that escape the sessions root', async () => {
     if (process.platform === 'win32') return
     const home = mkdtempSync(join(tmpdir(), 'dsh-session-archive-'))
     const outside = mkdtempSync(join(tmpdir(), 'dsh-session-archive-outside-'))
     const project = join(home, 'sessions', '--demo--')
     mkdirSync(project, { recursive: true })
     symlinkSync(outside, join(project, 'escape'))
-    const index = indexSessionDirs(join(home, 'sessions'))
+    const index = await indexSessionDirs(join(home, 'sessions'))
     expect(index.byId.size).toBe(0)
     expect(index.unreadable).toHaveLength(1)
     expect(existsSync(outside)).toBe(true)
@@ -188,6 +188,46 @@ describe('buildInventory', () => {
     expect(await readProjcacheFile(host.home, 'session-missing')).toBeUndefined()
   })
 
+  it('operator reads a session cache file named with either spelling, canonical first', async () => {
+    // Given one session whose projection cache exists only under the bare uuid name
+    const host = createFakeHost()
+    const bare = '3f0a1c2e-5d4b-4a19-9c7e-8b2d6f1a4c70'
+    writeProjcacheSessionFile(host.home, bare, { title: 'bare spelling' })
+
+    // When the archive reads that session's facts by its canonical id
+    const fromBare = await readProjcacheFile(host.home, `session-${bare}`)
+
+    // Then the bare-named file answers
+    expect(fromBare?.title).toBe('bare spelling')
+
+    // When both spellings exist, whichever spelling the caller holds
+    writeProjcacheSessionFile(host.home, `session-${bare}`, { title: 'canonical spelling' })
+    const heldCanonical = await readProjcacheFile(host.home, `session-${bare}`)
+    const heldBare = await readProjcacheFile(host.home, bare)
+
+    // Then the canonical file is the one that answers, exactly as before
+    expect(heldCanonical?.title).toBe('canonical spelling')
+    expect(heldBare?.title).toBe('canonical spelling')
+  })
+
+  it('operator sees a canonical row enriched from a cache file the harness named with the bare id', async () => {
+    // Given a canonical session row whose cache file carries the bare uuid name
+    const bare = '3f0a1c2e-5d4b-4a19-9c7e-8b2d6f1a4c70'
+    const id = `session-${bare}`
+    const host = createFakeHost({ archivedSessionIds: [id], dirs: [id] })
+    writeProjcacheSessionFile(host.home, bare, { title: '裸拼写', createdAt: 1788049691263, cwd: '/Users/demo' })
+
+    // When one inventory pass reads the fallback
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === id)
+
+    // Then the row carries every fact that file holds and is no longer flagged
+    expect(row?.title).toBe('裸拼写')
+    expect(row?.createdAt).toBe(1788049691263)
+    expect(row?.cwd).toBe('/Users/demo')
+    expect(row?.issues).not.toContain('no-title')
+  })
+
   it('canonicalizes bare harness ids and remembers their native spelling', async () => {
     const bare = '84777561-8adb-452d-a3ac-b25c7e72d36e'
     const bareArchived = '41030de9-301d-4ced-ba68-3c5cee113a1b'
@@ -236,5 +276,55 @@ describe('buildInventory', () => {
     const host = createFakeHost()
     const ctx = fakeContext(host) as { get(name: string): unknown }
     expect((ctx.get('workspaceRegistry') as FakeHost['registry']).archivedSessionIds).toEqual([])
+  })
+})
+
+describe('archivedAtSource', () => {
+  it('operator sees the ledger source of every archived row that has an archive time', async () => {
+    // Given three archived sessions, one per ledger source, and one archived with no entry at all
+    const host = createFakeHost({ archivedSessionIds: ['session-manual', 'session-auto', 'session-observed', 'session-unknown'] })
+    host.ledger.entries['session-manual'] = { archivedAt: 100, source: 'manual' }
+    host.ledger.entries['session-auto'] = { archivedAt: 200, source: 'auto' }
+    host.ledger.entries['session-observed'] = { archivedAt: 300, source: 'observed' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const byId = new Map(built.rows.map((row) => [row.id, row]))
+
+    // Then each row carries the source its own ledger entry recorded
+    expect(byId.get('session-manual')?.archivedAtSource).toBe('manual')
+    expect(byId.get('session-auto')?.archivedAtSource).toBe('auto')
+    expect(byId.get('session-observed')?.archivedAtSource).toBe('observed')
+    // And the backfilled rows still surface their time, so the marker has a time to qualify
+    expect(byId.get('session-observed')?.archivedAt).toBe(300)
+  })
+
+  it('operator sees no source on a row whose archive time is unknown', async () => {
+    // Given an archived session with no ledger entry (archived from the official sidebar)
+    const host = createFakeHost({ archivedSessionIds: ['session-unknown'] })
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-unknown')
+
+    // Then the row reports no archive time and no source to attribute it to
+    expect(row?.archivedAt).toBeUndefined()
+    expect(row && 'archivedAtSource' in row).toBe(false)
+    expect(row?.issues).toContain('no-archive-time')
+  })
+
+  it('operator sees no source on an unarchived row even when a ledger entry lingers', async () => {
+    // Given a stale ledger entry for a session that is no longer archived
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-live', updatedAt: 5 }] })
+    host.ledger.entries['session-live'] = { archivedAt: 400, source: 'observed' }
+
+    // When one inventory pass builds the rows
+    const built = await buildInventory(host.sources(), AbortSignal.timeout(5000))
+    const row = built.rows.find((entry) => entry.id === 'session-live')
+
+    // Then the unarchived row exposes neither an archive time nor a source
+    expect(row?.archived).toBe(false)
+    expect(row?.archivedAt).toBeUndefined()
+    expect(row && 'archivedAtSource' in row).toBe(false)
   })
 })

@@ -2,6 +2,10 @@
 # 优先级高于 core.autocrlf，Windows 检出时不再转 CRLF。
 * text=auto eol=lf
 
+# market/dist 是构建产物，字节必须与钉版内容一致：换行规范化会让干净检出
+# 与重新生成的产物对不上（market:check 因此判 stale，deploy-market 车道失败）。
+market/dist/** -text
+
 # 二进制文件（git 自动检测之外的显式声明，防止被 text=auto 误判）
 *.png binary
 *.jpg binary
@@ -25,3 +29,20 @@
 *.exe binary
 *.dll binary
 *.node binary
+*.wasm binary
+*.bin binary
+
+# 脚本与可执行文件强制 LF（确保跨平台与 CI / Linux / macOS / WSL 兼容执行，防止 bad interpreter）
+*.sh text eol=lf
+scripts/* text eol=lf
+
+# Windows 批处理脚本（如未来新增）保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# dsh-win-bash 随包 bash 载荷：二进制不得被 text=auto 或换行转换改写，
+# MSYS 运行时的文本配置保持 LF，使 checksums.sha256 覆盖的字节在检出后不变。
+packages/dsh-win-bash/runtime/win32-x64/usr/bin/* binary
+packages/dsh-win-bash/runtime/win32-x64/licenses/* text eol=lf
+packages/dsh-win-bash/runtime/win32-x64/etc/** text eol=lf
+packages/dsh-win-bash/runtime/win32-x64/checksums.sha256 text eol=lf

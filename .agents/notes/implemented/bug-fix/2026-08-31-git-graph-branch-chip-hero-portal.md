@@ -13,7 +13,7 @@ The root cause was that `BranchChip` calculated `top = rowRect.top - stackRect.t
 Instead of computing coordinate math with `getBoundingClientRect`, animation frame schedulers, and `position: absolute`, `BranchChip` now portals directly into `heroWorkspaceRow` via React `createPortal` when `heroSeat` is active.
 
 1. **DOM target resolution**: `findHeroRow(anchor)` resolves the connected element matching `.heroWorkspaceRow` (either `outlet.previousElementSibling` or inside `composerStack`).
-2. **Portaling**: When `heroSeat` is active and `heroRow` is resolved, `createPortal(chipNode, heroRow)` renders the chip directly into the official `heroWorkspaceRow` flex container. A hidden zero-dimension placeholder remains in `conversation.input.dock`.
+2. **Portaling**: When `heroSeat` is active and `heroRow` is resolved, `createPortal(chipNode, heroRow)` renders the chip directly into the official `heroWorkspaceRow` flex container, and a layout effect keeps it immediately before the row's trailing options group (`*`heroOptions``, pinned to the right edge with `margin-left: auto`) so it stays directly after the agent-preset seat. A hidden zero-dimension placeholder remains in `conversation.input.dock`.
 3. **Flex flow**: `.anchorHero` uses `display: inline-flex; align-items: center;` without `position: absolute;`. The chip participates naturally as a native flex child of `heroWorkspaceRow`, inheriting the official 2px gap, vertical alignment, and responsive flow with no coordinate calculations or resize observers.
 4. **Lifecycle & cleanup**: When the session leaves the hero state (e.g. sending a message or navigating to an active session), `BranchChip` unmounts and removes the portaled node cleanly.
 
@@ -25,6 +25,7 @@ Instead of computing coordinate math with `getBoundingClientRect`, animation fra
 ## Consequences
 
 - The Git branch chip is aligned inline with the workspace chip and agent preset chip with exact native spacing and alignment in blank sessions.
+- The chip is re-ordered before the trailing options group on every row child mutation: React appends portal children last, so an appended chip would otherwise land above the composer card's top-right corner on shells whose options group is pinned right.
 - Eliminates animation frames, `ResizeObserver` loops, and coordinate math.
 - The client bundle was rebuilt for `@linxin666/dsh-client-ui-git-graph`.
 

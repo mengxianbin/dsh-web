@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-12-plugin-manager-spawn-failure-settlement.md: dd8d9b3965250cf88f921b1d32524cb8209cd9ee
+2026-10-12-plugin-manager-spawn-failure-settlement.zh.md: ed9bfa2a125620ed39a0da655e38cc167c0f866d

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "web-all/ssh",
+    "description": "在远程主机上执行命令与传文件"
+  }
+}

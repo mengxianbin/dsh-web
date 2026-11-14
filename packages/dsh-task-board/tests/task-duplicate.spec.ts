@@ -33,9 +33,11 @@ describe('task-board duplicate and edit copy feature (Issue #1413)', () => {
     model: 'deepseek-chat',
     schedule: {
       enabled: true,
+      mode: 'cron',
       cron: '0 9 * * 1',
       nextRunAt: undefined,
       lastTriggeredAt: undefined,
+      runCount: 0,
     },
     executions: [
       {
@@ -128,7 +130,7 @@ describe('task-board duplicate and edit copy feature (Issue #1413)', () => {
     expect(mockController.createTaskConfirmed).toHaveBeenCalledWith(
       expect.objectContaining({
         title: '每周 AI 资讯周报',
-        schedule: { enabled: true, cron: '0 9 * * 1' },
+        schedule: { enabled: true, mode: 'cron', cron: '0 9 * * 1' },
         workspaceId: 'ws-main',
         mode: 'preset-code',
         permission: 'workspace-write',

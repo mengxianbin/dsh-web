@@ -1,0 +1,202 @@
+html[data-dsh-skin="verdandi"] {
+  --vd-crimson: #8e2438;
+  --vd-crimson-deep: #681626;
+  --vd-crimson-dark: #4e0f1d;
+  --vd-crimson-soft: #b4475c;
+  --vd-ivory: #fffdfb;
+  --vd-ivory-soft: #f8f2ed;
+  --vd-veil: #fffdfbeb;
+  --vd-blush: #f3dfe3;
+  --vd-warm-white: #fffaf4;
+  --vd-rose-paper: #faedf0;
+  --vd-gold: #c7a86b;
+  --vd-gold-light: #e6d5a9;
+  --vd-ink: #2c1c21;
+  --vd-ink-muted: #6f555d;
+  --vd-line: #742a3938;
+  --vd-line-strong: #8e243875;
+  --vd-paper: #fffdfbf5;
+  --vd-paper-solid: #fffdfb;
+  --vd-shadow: 0 14px 34px #43101e21;
+  --vd-slip: #fffdfbe6;
+  --vd-slip-solid: #fdfaf7;
+  --vd-slip-line: #c7a86b99;
+  --vd-slip-shadow: 0 4px 14px #3e111d1a;
+  --vd-ink-meta: #5f454d;
+  --vd-bare-ink: #1b1116;
+  --vd-danger: #9c1f30;
+  --vd-warn: #7d5310;
+  /* The stage veil compresses the artwork's range so bare ink survives it. In
+     light mode it used to be white (#fffdfb4d), which pushed the whole column
+     towards paper white and read as an overlay; a warm neutral at a lower alpha
+     darkens instead of washing, so the artwork keeps its depth and the reading
+     surfaces stay the brightest thing on screen. */
+  --vd-stage-veil: #fffdfb38;
+  --vd-stage-veil-edge: #fffdfb14;
+  --vd-stage-veil-hero: #fffdfb0d;
+  /* v1 applied these five official aliases through theme.overrideTokens
+     (THEME_TOKENS in src/client/index.ts); v2 declares them here instead. */
+  --dsw-alias-brand-primary: #8e2438;
+  --dsw-alias-button-primary-fill: #8e2438;
+  --dsw-alias-button-primary-fill-active: #651a2b;
+  --dsw-alias-button-primary-fill-hover: #752033;
+  --dsw-alias-label-primary-inverted: #fffdfb;
+  /* primary-action-tokens-v1.md: names the foreground on the fill explicitly,
+     with the same value v1 already used for the inverted label. */
+  --dsw-alias-label-primary-foreground: #fffdfb;
+  --dsw-font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --dsw-font-family-code: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  /* Art URL variables — moved from hooks.mjs body.style.setProperty to CSS :root
+     so that force-scope CSS keeps them alive through double-activation cleanup
+     (skin-center persisted-selection follower re-adopt bug). Inline SVGs are
+     inlined here; raster assets use relative paths resolved against the
+     stylesheet's <link> href (same pattern as maid-atelier). */
+  --vd-art-sidebar-bridal: url(assets/verdandi-bridal-cg-portrait-v1.webp);
+  --vd-art-workspace-light: url(assets/verdandi-library-day-v1.webp);
+  --vd-art-workspace-dark: url(assets/verdandi-library-night-v1.webp);
+  --vd-art-sword-crest: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%25238e2438%22%20stroke-width%3D%222.5%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M32%208%20L40%2016%20L32%2024%20L24%2016%20Z%22%2F%3E%3Cpath%20d%3D%22M32%2024%20L32%2052%22%2F%3E%3Cpath%20d%3D%22M32%2034%20L18%2028%22%2F%3E%3Cpath%20d%3D%22M32%2034%20L46%2028%22%2F%3E%3Cpath%20d%3D%22M18%2028%20L14%2018%22%2F%3E%3Cpath%20d%3D%22M46%2028%20L50%2018%22%2F%3E%3Cpath%20d%3D%22M14%2018%20L20%2016%22%2F%3E%3Cpath%20d%3D%22M50%2018%20L44%2016%22%2F%3E%3Cpath%20d%3D%22M18%2044%20Q10%2038%2012%2028%22%2F%3E%3Cpath%20d%3D%22M46%2044%20Q54%2038%2052%2028%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+  --vd-art-header-veil: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%201600%2076%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cdefs%3E%0A%20%20%20%20%3ClinearGradient%20id%3D%22veil%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%220%22%20y2%3D%221%22%3E%0A%20%20%20%20%20%20%3Cstop%20stop-color%3D%22%23fffdfb%22%20stop-opacity%3D%22.99%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23f9f1eb%22%20stop-opacity%3D%22.96%22%2F%3E%0A%20%20%20%20%3C%2FlinearGradient%3E%0A%20%20%20%20%3Cfilter%20id%3D%22shadow%22%20x%3D%22-20%25%22%20y%3D%22-30%25%22%20width%3D%22140%25%22%20height%3D%22170%25%22%3E%0A%20%20%20%20%20%20%3CfeDropShadow%20dx%3D%220%22%20dy%3D%222%22%20stdDeviation%3D%222%22%20flood-color%3D%22%2355202d%22%20flood-opacity%3D%22.18%22%2F%3E%0A%20%20%20%20%3C%2Ffilter%3E%0A%20%20%20%20%3Cpattern%20id%3D%22lace%22%20width%3D%2242%22%20height%3D%2214%22%20patternUnits%3D%22userSpaceOnUse%22%3E%0A%20%20%20%20%20%20%3Cpath%20d%3D%22M0%201h42M0%201c8%200%208%2011%2016%2011S24%201%2032%201s8%2011%2010%2011%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221%22%20opacity%3D%22.62%22%2F%3E%0A%20%20%20%20%20%20%3Ccircle%20cx%3D%2216%22%20cy%3D%228%22%20r%3D%221.8%22%20fill%3D%22%238e2438%22%20opacity%3D%22.45%22%2F%3E%0A%20%20%20%20%3C%2Fpattern%3E%0A%20%20%3C%2Fdefs%3E%0A%20%20%3Cpath%20d%3D%22M0%207c168%200%20242%2034%20408%2034%20150%200%20244-23%20392-23s242%2023%20392%2023c166%200%20240-34%20408-34v69H0z%22%20fill%3D%22url(%23veil)%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%207c168%200%20242%2034%20408%2034%20150%200%20244-23%20392-23s242%2023%20392%2023c166%200%20240-34%20408-34%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.4%22%20opacity%3D%22.82%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%2060h1600v16H0z%22%20fill%3D%22url(%23lace)%22%20opacity%3D%22.9%22%2F%3E%0A%3C%2Fsvg%3E");
+  --vd-art-sidebar-frame: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20280%201080%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Crect%20x%3D%228%22%20y%3D%228%22%20width%3D%22264%22%20height%3D%221064%22%20rx%3D%2213%22%20fill%3D%22none%22%20stroke%3D%22%23e6d5a9%22%20stroke-width%3D%221.2%22%20opacity%3D%22.82%22%2F%3E%0A%20%20%3Crect%20x%3D%2212%22%20y%3D%2212%22%20width%3D%22256%22%20height%3D%221056%22%20rx%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22%235b1424%22%20stroke-width%3D%221%22%20opacity%3D%22.7%22%2F%3E%0A%20%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%23e6d5a9%22%20stroke-width%3D%221.6%22%20stroke-linecap%3D%22round%22%20opacity%3D%22.9%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M8%2066c26-2%2032-18%2036-42%209%2018%2022%2026%2042%2028M272%2066c-26-2-32-18-36-42-9%2018-22%2026-42%2028%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M8%201014c26%202%2032%2018%2036%2042%209-18%2022-26%2042-28M272%201014c-26%202-32%2018-36%2042-9-18-22-26-42-28%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%20%20%3Cg%20fill%3D%22%23fffdfb%22%20stroke%3D%22%23c7a86b%22%20opacity%3D%22.28%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M43%2023c5%208%205%2015%200%2022-5-7-5-14%200-22Z%22%2F%3E%3Cpath%20d%3D%22M237%2023c-5%208-5%2015%200%2022%205-7%205-14%200-22Z%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M43%201057c5-8%205-15%200-22-5%207-5%2014%200%2022Z%22%2F%3E%3Cpath%20d%3D%22M237%201057c-5-8-5-15%200-22%205%207%205%2014%200%2022Z%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-invitation-lace: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20360%2072%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cpath%20d%3D%22M8%208h344v56H8z%22%20rx%3D%2214%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.3%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M18%2014h324v44H18z%22%20fill%3D%22none%22%20stroke%3D%22%238e2438%22%20stroke-width%3D%22.8%22%20opacity%3D%22.34%22%2F%3E%0A%20%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.2%22%20stroke-linecap%3D%22round%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2028c13%200%2020-7%2022-19%204%2011%2011%2018%2023%2020M351%2028c-13%200-20-7-22-19-4%2011-11%2018-23%2020%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2044c13%200%2020%207%2022%2019%204-11%2011-18%2023-20M351%2044c-13%200-20%207-22%2019-4-11-11-18-23-20%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-vow-seal: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20112%2072%22%3E%0A%20%20%3Cdefs%3E%3Cfilter%20id%3D%22s%22%3E%3CfeDropShadow%20dx%3D%220%22%20dy%3D%223%22%20stdDeviation%3D%222%22%20flood-color%3D%22%234e0f1d%22%20flood-opacity%3D%22.2%22%2F%3E%3C%2Ffilter%3E%3C%2Fdefs%3E%0A%20%20%3Cg%20filter%3D%22url(%23s)%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2025c17-7%2031-5%2047%205%2016-10%2030-12%2047-5v34c-18-6-32-3-47%207-15-10-29-13-47-7z%22%20fill%3D%22%23fffdfb%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%222%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M56%2030v36M17%2033c13-3%2024-1%2033%205M95%2033c-13-3-24-1-33%205%22%20fill%3D%22none%22%20stroke%3D%22%23d9c69a%22%20stroke-width%3D%221.3%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-composer-lace: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%201200%2036%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cpath%20d%3D%22M0%202h1200%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.5%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%205c20%200%2020%2020%2040%2020S60%205%2080%205s20%2020%2040%2020S140%205%20160%205s20%2020%2040%2020S220%205%20240%205s20%2020%2040%2020S300%205%20320%205s20%2020%2040%2020S380%205%20400%205s20%2020%2040%2020S460%205%20480%205s20%2020%2040%2020S540%205%20560%205s20%2020%2040%2020S620%205%20640%205s20%2020%2040%2020S700%205%20720%205s20%2020%2040%2020S780%205%20800%205s20%2020%2040%2020S860%205%20880%205s20%2020%2040%2020S940%205%20960%205s20%2020%2040%2020S1020%205%201040%205s20%2020%2040%2020S1100%205%201120%205s20%2020%2040%2020S1180%205%201200%205%22%20fill%3D%22none%22%20stroke%3D%22%238e2438%22%20stroke-width%3D%221%22%20opacity%3D%22.45%22%2F%3E%0A%20%20%3Cg%20fill%3D%22%23c7a86b%22%20opacity%3D%22.72%22%3E%0A%20%20%20%20%3Ccircle%20cx%3D%2240%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22120%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22200%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22280%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22360%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22440%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22520%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22600%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22680%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22760%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22840%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22920%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221000%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221080%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221160%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-character-left: url(assets/verdandi-barbecue-seated-v1.webp);
+  --vd-art-character-right: url(assets/verdandi-white-knight-v1.webp);
+  --vd-art-official-sacred-tree: url(assets/verdandi-sacred-tree-white-v1.webp);
+  --vd-art-vow-avatar-frame: url(assets/verdandi-vow-avatar-frame-v1.webp);
+  --vd-art-wedding-avatar: url(assets/verdandi-wedding-avatar-v1.webp);
+  --vd-art-vow-rings: url(assets/verdandi-vow-rings-v1.webp);
+  --vd-art-ring-tag: url(assets/verdandi-ring-tag-v1.webp);
+  --vd-art-vow-namecard: url(assets/verdandi-vow-namecard-v1.webp);
+  --vd-art-hero-chibi-left: url(assets/verdandi-chibi-left-v1.webp);
+  --vd-art-hero-chibi-right: url(assets/verdandi-chibi-right-v1.webp);
+  --vd-art-childhood-record: url(assets/verdandi-childhood-record-v1.webp);
+  --vd-art-sequence-sword: url(assets/verdandi-sequence-sword-v1.webp);
+  --vd-art-q-avatar: url(assets/verdandi-q-avatar-v1.webp);
+  --vd-art-bridal-floral-corner: url(assets/verdandi-bridal-floral-corner-v1.webp);
+  --vd-art-bridal-veil-corner: url(assets/verdandi-bridal-veil-corner-v1.webp);
+  --vd-art-vow-folder: url(assets/verdandi-vow-folder-v1.webp);
+  --vd-art-details-light: url(assets/verdandi-details-art-light-v1.jpg);
+  --vd-art-details-dark: url(assets/verdandi-details-art-dark-v1.jpg);
+  background-color: #f8f2ed;
+}
+html[data-dsh-skin="verdandi"] {
+  --dsw-alias-brand-primary: initial;
+  --dsw-alias-button-primary-fill: initial;
+  --dsw-alias-button-primary-fill-active: initial;
+  --dsw-alias-button-primary-fill-hover: initial;
+  --dsw-alias-label-primary-inverted: initial;
+  --dsw-alias-label-primary-foreground: initial;
+}
+
+html[data-dsh-skin="verdandi"] body {
+  --vd-crimson: #8e2438;
+  --vd-crimson-deep: #681626;
+  --vd-crimson-dark: #4e0f1d;
+  --vd-crimson-soft: #b4475c;
+  --vd-ivory: #fffdfb;
+  --vd-ivory-soft: #f8f2ed;
+  --vd-veil: #fffdfbeb;
+  --vd-blush: #f3dfe3;
+  --vd-warm-white: #fffaf4;
+  --vd-rose-paper: #faedf0;
+  --vd-gold: #c7a86b;
+  --vd-gold-light: #e6d5a9;
+  --vd-ink: #2c1c21;
+  --vd-ink-muted: #6f555d;
+  --vd-line: #742a3938;
+  --vd-line-strong: #8e243875;
+  --vd-paper: #fffdfbf5;
+  --vd-paper-solid: #fffdfb;
+  --vd-shadow: 0 14px 34px #43101e21;
+  --vd-slip: #fffdfbe6;
+  --vd-slip-solid: #fdfaf7;
+  --vd-slip-line: #c7a86b99;
+  --vd-slip-shadow: 0 4px 14px #3e111d1a;
+  --vd-ink-meta: #5f454d;
+  --vd-bare-ink: #1b1116;
+  --vd-danger: #9c1f30;
+  --vd-warn: #7d5310;
+  --vd-stage-veil: #fffdfb38;
+  --vd-stage-veil-edge: #fffdfb14;
+  --vd-stage-veil-hero: #fffdfb0d;
+  --dsw-alias-brand-primary: #8e2438;
+  --dsw-alias-button-primary-fill: #8e2438;
+  --dsw-alias-button-primary-fill-active: #651a2b;
+  --dsw-alias-button-primary-fill-hover: #752033;
+  --dsw-alias-label-primary-inverted: #fffdfb;
+  --dsw-alias-label-primary-foreground: #fffdfb;
+  --dsw-font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --dsw-font-family-code: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+  --vd-art-sidebar-bridal: url(assets/verdandi-bridal-cg-portrait-v1.webp);
+  --vd-art-workspace-light: url(assets/verdandi-library-day-v1.webp);
+  --vd-art-workspace-dark: url(assets/verdandi-library-night-v1.webp);
+  --vd-art-sword-crest: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cg%20fill%3D%22none%22%20stroke%3D%22%25238e2438%22%20stroke-width%3D%222.5%22%20stroke-linecap%3D%22round%22%20stroke-linejoin%3D%22round%22%3E%3Cpath%20d%3D%22M32%208%20L40%2016%20L32%2024%20L24%2016%20Z%22%2F%3E%3Cpath%20d%3D%22M32%2024%20L32%2052%22%2F%3E%3Cpath%20d%3D%22M32%2034%20L18%2028%22%2F%3E%3Cpath%20d%3D%22M32%2034%20L46%2028%22%2F%3E%3Cpath%20d%3D%22M18%2028%20L14%2018%22%2F%3E%3Cpath%20d%3D%22M46%2028%20L50%2018%22%2F%3E%3Cpath%20d%3D%22M14%2018%20L20%2016%22%2F%3E%3Cpath%20d%3D%22M50%2018%20L44%2016%22%2F%3E%3Cpath%20d%3D%22M18%2044%20Q10%2038%2012%2028%22%2F%3E%3Cpath%20d%3D%22M46%2044%20Q54%2038%2052%2028%22%2F%3E%3C%2Fg%3E%3C%2Fsvg%3E");
+  --vd-art-header-veil: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%201600%2076%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cdefs%3E%0A%20%20%20%20%3ClinearGradient%20id%3D%22veil%22%20x1%3D%220%22%20y1%3D%220%22%20x2%3D%220%22%20y2%3D%221%22%3E%0A%20%20%20%20%20%20%3Cstop%20stop-color%3D%22%23fffdfb%22%20stop-opacity%3D%22.99%22%2F%3E%0A%20%20%20%20%20%20%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23f9f1eb%22%20stop-opacity%3D%22.96%22%2F%3E%0A%20%20%20%20%3C%2FlinearGradient%3E%0A%20%20%20%20%3Cfilter%20id%3D%22shadow%22%20x%3D%22-20%25%22%20y%3D%22-30%25%22%20width%3D%22140%25%22%20height%3D%22170%25%22%3E%0A%20%20%20%20%20%20%3CfeDropShadow%20dx%3D%220%22%20dy%3D%222%22%20stdDeviation%3D%222%22%20flood-color%3D%22%2355202d%22%20flood-opacity%3D%22.18%22%2F%3E%0A%20%20%20%20%3C%2Ffilter%3E%0A%20%20%20%20%3Cpattern%20id%3D%22lace%22%20width%3D%2242%22%20height%3D%2214%22%20patternUnits%3D%22userSpaceOnUse%22%3E%0A%20%20%20%20%20%20%3Cpath%20d%3D%22M0%201h42M0%201c8%200%208%2011%2016%2011S24%201%2032%201s8%2011%2010%2011%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221%22%20opacity%3D%22.62%22%2F%3E%0A%20%20%20%20%20%20%3Ccircle%20cx%3D%2216%22%20cy%3D%228%22%20r%3D%221.8%22%20fill%3D%22%238e2438%22%20opacity%3D%22.45%22%2F%3E%0A%20%20%20%20%3C%2Fpattern%3E%0A%20%20%3C%2Fdefs%3E%0A%20%20%3Cpath%20d%3D%22M0%207c168%200%20242%2034%20408%2034%20150%200%20244-23%20392-23s242%2023%20392%2023c166%200%20240-34%20408-34v69H0z%22%20fill%3D%22url(%23veil)%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%207c168%200%20242%2034%20408%2034%20150%200%20244-23%20392-23s242%2023%20392%2023c166%200%20240-34%20408-34%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.4%22%20opacity%3D%22.82%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%2060h1600v16H0z%22%20fill%3D%22url(%23lace)%22%20opacity%3D%22.9%22%2F%3E%0A%3C%2Fsvg%3E");
+  --vd-art-sidebar-frame: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20280%201080%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Crect%20x%3D%228%22%20y%3D%228%22%20width%3D%22264%22%20height%3D%221064%22%20rx%3D%2213%22%20fill%3D%22none%22%20stroke%3D%22%23e6d5a9%22%20stroke-width%3D%221.2%22%20opacity%3D%22.82%22%2F%3E%0A%20%20%3Crect%20x%3D%2212%22%20y%3D%2212%22%20width%3D%22256%22%20height%3D%221056%22%20rx%3D%2210%22%20fill%3D%22none%22%20stroke%3D%22%235b1424%22%20stroke-width%3D%221%22%20opacity%3D%22.7%22%2F%3E%0A%20%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%23e6d5a9%22%20stroke-width%3D%221.6%22%20stroke-linecap%3D%22round%22%20opacity%3D%22.9%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M8%2066c26-2%2032-18%2036-42%209%2018%2022%2026%2042%2028M272%2066c-26-2-32-18-36-42-9%2018-22%2026-42%2028%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M8%201014c26%202%2032%2018%2036%2042%209-18%2022-26%2042-28M272%201014c-26%202-32%2018-36%2042-9-18-22-26-42-28%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%20%20%3Cg%20fill%3D%22%23fffdfb%22%20stroke%3D%22%23c7a86b%22%20opacity%3D%22.28%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M43%2023c5%208%205%2015%200%2022-5-7-5-14%200-22Z%22%2F%3E%3Cpath%20d%3D%22M237%2023c-5%208-5%2015%200%2022%205-7%205-14%200-22Z%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M43%201057c5-8%205-15%200-22-5%207-5%2014%200%2022Z%22%2F%3E%3Cpath%20d%3D%22M237%201057c-5-8-5-15%200-22%205%207%205%2014%200%2022Z%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-invitation-lace: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20360%2072%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cpath%20d%3D%22M8%208h344v56H8z%22%20rx%3D%2214%22%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.3%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M18%2014h324v44H18z%22%20fill%3D%22none%22%20stroke%3D%22%238e2438%22%20stroke-width%3D%22.8%22%20opacity%3D%22.34%22%2F%3E%0A%20%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.2%22%20stroke-linecap%3D%22round%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2028c13%200%2020-7%2022-19%204%2011%2011%2018%2023%2020M351%2028c-13%200-20-7-22-19-4%2011-11%2018-23%2020%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2044c13%200%2020%207%2022%2019%204-11%2011-18%2023-20M351%2044c-13%200-20%207-22%2019-4-11-11-18-23-20%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-vow-seal: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20112%2072%22%3E%0A%20%20%3Cdefs%3E%3Cfilter%20id%3D%22s%22%3E%3CfeDropShadow%20dx%3D%220%22%20dy%3D%223%22%20stdDeviation%3D%222%22%20flood-color%3D%22%234e0f1d%22%20flood-opacity%3D%22.2%22%2F%3E%3C%2Ffilter%3E%3C%2Fdefs%3E%0A%20%20%3Cg%20filter%3D%22url(%23s)%22%3E%0A%20%20%20%20%3Cpath%20d%3D%22M9%2025c17-7%2031-5%2047%205%2016-10%2030-12%2047-5v34c-18-6-32-3-47%207-15-10-29-13-47-7z%22%20fill%3D%22%23fffdfb%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%222%22%2F%3E%0A%20%20%20%20%3Cpath%20d%3D%22M56%2030v36M17%2033c13-3%2024-1%2033%205M95%2033c-13-3-24-1-33%205%22%20fill%3D%22none%22%20stroke%3D%22%23d9c69a%22%20stroke-width%3D%221.3%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-composer-lace: url("data:image/svg+xml,%0A%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%201200%2036%22%20preserveAspectRatio%3D%22none%22%3E%0A%20%20%3Cpath%20d%3D%22M0%202h1200%22%20stroke%3D%22%23c7a86b%22%20stroke-width%3D%221.5%22%2F%3E%0A%20%20%3Cpath%20d%3D%22M0%205c20%200%2020%2020%2040%2020S60%205%2080%205s20%2020%2040%2020S140%205%20160%205s20%2020%2040%2020S220%205%20240%205s20%2020%2040%2020S300%205%20320%205s20%2020%2040%2020S380%205%20400%205s20%2020%2040%2020S460%205%20480%205s20%2020%2040%2020S540%205%20560%205s20%2020%2040%2020S620%205%20640%205s20%2020%2040%2020S700%205%20720%205s20%2020%2040%2020S780%205%20800%205s20%2020%2040%2020S860%205%20880%205s20%2020%2040%2020S940%205%20960%205s20%2020%2040%2020S1020%205%201040%205s20%2020%2040%2020S1100%205%201120%205s20%2020%2040%2020S1180%205%201200%205%22%20fill%3D%22none%22%20stroke%3D%22%238e2438%22%20stroke-width%3D%221%22%20opacity%3D%22.45%22%2F%3E%0A%20%20%3Cg%20fill%3D%22%23c7a86b%22%20opacity%3D%22.72%22%3E%0A%20%20%20%20%3Ccircle%20cx%3D%2240%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22120%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22200%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22280%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22360%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22440%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22520%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22600%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22680%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22760%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22840%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%22920%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221000%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221080%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%3Ccircle%20cx%3D%221160%22%20cy%3D%2218%22%20r%3D%222%22%2F%3E%0A%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E");
+  --vd-art-character-left: url(assets/verdandi-barbecue-seated-v1.webp);
+  --vd-art-character-right: url(assets/verdandi-white-knight-v1.webp);
+  --vd-art-official-sacred-tree: url(assets/verdandi-sacred-tree-white-v1.webp);
+  --vd-art-vow-avatar-frame: url(assets/verdandi-vow-avatar-frame-v1.webp);
+  --vd-art-wedding-avatar: url(assets/verdandi-wedding-avatar-v1.webp);
+  --vd-art-vow-rings: url(assets/verdandi-vow-rings-v1.webp);
+  --vd-art-ring-tag: url(assets/verdandi-ring-tag-v1.webp);
+  --vd-art-vow-namecard: url(assets/verdandi-vow-namecard-v1.webp);
+  --vd-art-hero-chibi-left: url(assets/verdandi-chibi-left-v1.webp);
+  --vd-art-hero-chibi-right: url(assets/verdandi-chibi-right-v1.webp);
+  --vd-art-childhood-record: url(assets/verdandi-childhood-record-v1.webp);
+  --vd-art-sequence-sword: url(assets/verdandi-sequence-sword-v1.webp);
+  --vd-art-q-avatar: url(assets/verdandi-q-avatar-v1.webp);
+  --vd-art-bridal-floral-corner: url(assets/verdandi-bridal-floral-corner-v1.webp);
+  --vd-art-bridal-veil-corner: url(assets/verdandi-bridal-veil-corner-v1.webp);
+  --vd-art-vow-folder: url(assets/verdandi-vow-folder-v1.webp);
+  --vd-art-details-light: url(assets/verdandi-details-art-light-v1.jpg);
+  --vd-art-details-dark: url(assets/verdandi-details-art-dark-v1.jpg);
+  background-color: #f8f2ed;
+}
+
+
+html[data-dsh-skin="verdandi"] body[data-ds-dark-theme] {
+  --vd-crimson: #9d2d43;
+  --vd-crimson-deep: #721a2c;
+  --vd-crimson-dark: #3d0c17;
+  --vd-crimson-soft: #c65369;
+  --vd-ivory: #21151a;
+  --vd-ivory-soft: #2a1a20;
+  --vd-rose-paper: #341e25;
+  --vd-gold: #d0b276;
+  --vd-gold-light: #e4cfa0;
+  --vd-ink: #f7ecef;
+  --vd-ink-muted: #c7aeb5;
+  --vd-line: #dbaeb933;
+  --vd-line-strong: #d0b27675;
+  --vd-paper: #22151af5;
+  --vd-paper-solid: #24171c;
+  --vd-shadow: 0 16px 38px #00000057;
+  --vd-slip: #24171ce0;
+  --vd-slip-solid: #2a1a20;
+  --vd-slip-line: #d0b27666;
+  --vd-slip-shadow: 0 5px 16px #00000057;
+  --vd-ink-meta: #d9c0c7;
+  --vd-bare-ink: #fbf3f5;
+  --vd-danger: #ff9aa9;
+  --vd-warn: #f0cd8a;
+  --vd-stage-veil: #120b0f3d;
+  --vd-stage-veil-edge: #120b0f1a;
+  --vd-stage-veil-hero: #120b0f0f;
+  /* Dark half of the v1 theme.overrideTokens pair. */
+  --dsw-alias-brand-primary: #e4cfa0;
+  --dsw-alias-button-primary-fill: #e4cfa0;
+  --dsw-alias-button-primary-fill-active: #c6a767;
+  --dsw-alias-button-primary-fill-hover: #f0ddb1;
+  --dsw-alias-label-primary-inverted: #25151b;
+  --dsw-alias-label-primary-foreground: #25151b;
+  background-color: #171015;
+}
+
+html[data-dsh-skin="verdandi"] [id="root"] { background: transparent; }
+
+html[data-dsh-skin="verdandi"] body { --shiki-background: var(--dsw-alias-markdown-code-block); }

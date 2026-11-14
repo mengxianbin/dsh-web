@@ -12,15 +12,16 @@ import { mkdir, realpath } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-subprocess'
-import { subprocessRunner as sharedSubprocessRunner, type GitRunner } from './git-runner.ts'
+import { subprocessRunner as sharedSubprocessRunner, type GitRunResult, type GitRunner } from './git-runner.ts'
 import {
   branchDeleteForceArgv, checkRefFormatArgv, classifySwitchFailure, createBranchArgv,
-  forEachRefArgv, gitPathArgv, graphLogArgv, headBranchArgv, headShortArgv,
+  forEachRefArgv, gitPathArgv, graphLogArgv, headBranchArgv,
   operationMarkersArgv, OPERATION_MARKERS, sanitizeWorktreeName, statusPorcelainArgv,
   switchArgv, topLevelArgv, unmergedArgv, validateBranchName, verifyRefArgv,
   verifyRevArgv, worktreeAddArgv, worktreeListArgv, worktreeRemoveArgv,
   WORKTREE_BRANCH_PREFIX,
 } from '../core/git-command.ts'
+import { parseStatusV2, rootAndHeadArgv, statusV2BranchArgv, type StatusCounts } from './status-porcelain.ts'
 import {
   parseBranches, parseGraph, parsePorcelain, parseWorktreeBranches, parseWorktrees,
   type BranchesView, type GitError, type GraphView, type RepoStatus, type SwitchResult,
@@ -96,31 +97,22 @@ export class GitService {
   private readonly statusFlights = new Map<string, Promise<RepoStatus | null>>()
 
   /**
-   * The plumbing every read view shares: gate, repo root, current branch, and
-   * the porcelain counts + operation marker. Null when the path is not a
-   * usable repository (the workspace-gate semantics both views keep).
+   * The plumbing every read view shares: gate, repository root, current branch,
+   * short head, the porcelain counts and the operation marker. Null when the
+   * path is not a usable repository (the workspace-gate semantics both views
+   * keep). Three spawns: one `rev-parse` for root+short-head, then the marker
+   * probe and the status scan in parallel.
    */
   private async snapshot(path: string, signal?: AbortSignal): Promise<{
     root: string
     branch: string
-    counts: ReturnType<typeof parsePorcelain>
+    head: string
+    counts: StatusCounts
     operationInProgress: boolean
   } | null> {
     const gated = await this.gate(path)
     if (!gated.ok) return null
-    const root = await this.repoRoot(gated.canonical, signal)
-    if (root === null) return null
-    const [branchResult, porcelain] = await Promise.all([
-      this.runner.run(headBranchArgv(), root, signal),
-      this.runner.run(statusPorcelainArgv(), root, signal),
-    ])
-    const branch = branchResult.stdout.trim()
-    return {
-      root,
-      branch: branch === DETACHED ? '' : branch,
-      counts: parsePorcelain(porcelain.stdout),
-      operationInProgress: await this.operationInProgress(root, signal),
-    }
+    return this.plumbing(gated.canonical, signal)
   }
 
   /**
@@ -147,13 +139,12 @@ export class GitService {
   }
 
   private async statusFromGatedPath(path: string, signal?: AbortSignal): Promise<RepoStatus | null> {
-    const snap = await this.snapshotFromGatedPath(path, signal)
+    const snap = await this.plumbing(path, signal)
     if (snap === null) return null
-    const headResult = await this.runner.run(headShortArgv(), snap.root, signal)
     return {
       root: snap.root,
       branch: snap.branch,
-      head: headResult.stdout.trim(),
+      head: snap.head,
       dirtyFiles: snap.counts.dirtyFiles,
       untrackedFiles: snap.counts.untrackedFiles,
       conflicts: snap.counts.conflicts,
@@ -161,24 +152,40 @@ export class GitService {
     }
   }
 
-  private async snapshotFromGatedPath(path: string, signal?: AbortSignal): Promise<{
+  /**
+   * Repository root and short head from ONE `rev-parse`. The combined call
+   * prints the root first and the short id second; an unborn HEAD makes the
+   * second half fail (exit 128) after the root has already been printed, which
+   * is the same verdict as the previous separate probes (root resolved, head
+   * empty). A path outside any repository prints nothing at all -> null.
+   */
+  private async rootAndHead(path: string, signal?: AbortSignal): Promise<{ root: string; head: string } | null> {
+    const result = await this.runner.run(rootAndHeadArgv(), path, signal)
+    const [rootLine = '', headLine = ''] = result.stdout.split('\n').map((line) => line.trim())
+    return rootLine === '' ? null : { root: rootLine, head: headLine }
+  }
+
+  /** The three-spawn plumbing shared by `status` and `branches`. */
+  private async plumbing(path: string, signal?: AbortSignal): Promise<{
     root: string
     branch: string
-    counts: ReturnType<typeof parsePorcelain>
+    head: string
+    counts: StatusCounts
     operationInProgress: boolean
   } | null> {
-    const root = await this.repoRoot(path, signal)
-    if (root === null) return null
-    const [branchResult, porcelain] = await Promise.all([
-      this.runner.run(headBranchArgv(), root, signal),
-      this.runner.run(statusPorcelainArgv(), root, signal),
+    const base = await this.rootAndHead(path, signal)
+    if (base === null) return null
+    const [markers, status] = await Promise.all([
+      this.runner.run(operationMarkersArgv(), base.root, signal),
+      this.runner.run(statusV2BranchArgv(), base.root, signal),
     ])
-    const branch = branchResult.stdout.trim()
+    const parsed = parseStatusV2(status.stdout)
     return {
-      root,
-      branch: branch === DETACHED ? '' : branch,
-      counts: parsePorcelain(porcelain.stdout),
-      operationInProgress: await this.operationInProgress(root, signal),
+      root: base.root,
+      branch: parsed.branch,
+      head: base.head,
+      counts: parsed.counts,
+      operationInProgress: await this.operationVerdict(base.root, markers, signal),
     }
   }
 
@@ -438,6 +445,15 @@ export class GitService {
     // markers (and an absolute one for worktree/linked stores); resolve
     // covers both.
     const resolved = await this.runner.run(operationMarkersArgv(), root, signal)
+    return this.operationVerdict(root, resolved, signal)
+  }
+
+  /**
+   * Marker verdict from an already-run combined probe (the status plumbing
+   * runs it in parallel with the status scan), with the per-marker fallback
+   * kept for a non-zero combined exit.
+   */
+  private async operationVerdict(root: string, resolved: GitRunResult, signal?: AbortSignal): Promise<boolean> {
     if (resolved.exitCode === 0) {
       const markerPaths = resolved.stdout
         .split('\n')

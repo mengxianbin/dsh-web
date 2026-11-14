@@ -5,11 +5,16 @@
  * @module @linxin666/dsh-session-archive/client/locales
  */
 
+// Type-only: the locale service translate signature. The locale service
+// itself is injected by the host through ctx.locale, never imported here.
+import type { Translate } from '@deepseek-ai/dsh-client-ui-slots'
+
 /** Dictionary namespace this package registers. */
 export const NS = 'dsh-web-ui-session-archive'
 
 /** Chinese copy (key source). */
 export const zh = {
+  'arch.nav': '已归档会话',
   'arch.title': '会话归档管理',
   'arch.refresh': '刷新',
   'arch.refreshing': '刷新中…',
@@ -43,6 +48,7 @@ export const zh = {
   'arch.row.lastActivity.unknown': '最后活动：未知',
   'arch.row.archivedAt': '归档时间：{time}',
   'arch.row.archivedAt.unknown': '归档时间：未知',
+  'arch.row.archivedAt.backfilled': '（补记）',
   'arch.row.size': '大小：{size}',
   'arch.row.children': '{n} 个子会话',
   'arch.row.created': '创建于 {time}',
@@ -101,6 +107,8 @@ export const zh = {
   'arch.reason.unreadable': '无法读取会话数据',
   'arch.reason.missing-seam': '当前 SDK 环境不支持该操作',
   'arch.reason.busy': '其他操作正在进行',
+  'arch.reason.seal-required': '会话未收口（收口哨兵判定未通过），按归档收口闸跳过',
+  'arch.reason.identity-denied': '执行者身份无权归档该会话（裁决表拒绝）',
   'arch.reason.error': '操作失败',
   'arch.preview.title': '会话预览',
   'arch.preview.messages': '共 {n} 条对话消息',
@@ -114,6 +122,8 @@ export const zh = {
   'arch.auto.archiveDays': '未活动天数阈值',
   'arch.auto.deleteToggle': '自动物理删除超过保留期的归档会话',
   'arch.auto.deleteDays': '归档保留天数',
+  'arch.auto.recordManualToggle': '为外部归档的会话补记归档时间',
+  'arch.auto.recordManualNote': '默认关闭。开启后，在这些会话被本插件首次观测到的时刻补记一条归档时间，它们会从此开始进入保留期倒计时，到期后可能被自动删除；列表中的归档时间会标注（补记）。关闭时不会写入任何台账。',
   'arch.auto.days.unit': '天',
   'arch.auto.invalidDays': '天数必须是 {min} 到 {max} 之间的整数',
   'arch.auto.preview': '按当前配置预览',
@@ -129,6 +139,7 @@ export const zh = {
   'arch.auto.neverRun': '尚未运行',
   'arch.auto.basis': '口径说明：自动归档按会话最后活动时间判断（不是创建时间）；自动删除按归档时间判断（不是文件时间）。归档时间未知的历史归档会话不会被自动删除，恢复后再次归档将重新计算保留期。运行中、当前正在查看以及有运行中子会话的会话始终受保护。',
   'arch.auto.cycleRunning': '自动检查正在运行…',
+  'arch.auto.saveFailed': '保存失败：宿主未接受该设置，请重试',
   'arch.auto.runError': '执行失败：{error}',
   'arch.time.unknown': '未知',
   'arch.current.badge': '当前',
@@ -138,6 +149,7 @@ export type ArchKey = keyof typeof zh
 
 /** English mirror (same key set). */
 export const en: Record<ArchKey, string> = {
+  'arch.nav': 'Archived sessions',
   'arch.title': 'Session Archive Manager',
   'arch.refresh': 'Refresh',
   'arch.refreshing': 'Refreshing…',
@@ -171,6 +183,7 @@ export const en: Record<ArchKey, string> = {
   'arch.row.lastActivity.unknown': 'Last activity: unknown',
   'arch.row.archivedAt': 'Archived: {time}',
   'arch.row.archivedAt.unknown': 'Archived: unknown',
+  'arch.row.archivedAt.backfilled': ' (backfilled)',
   'arch.row.size': 'Size: {size}',
   'arch.row.children': '{n} sub-sessions',
   'arch.row.created': 'Created {time}',
@@ -229,6 +242,8 @@ export const en: Record<ArchKey, string> = {
   'arch.reason.unreadable': 'Session data unreadable',
   'arch.reason.missing-seam': 'Not supported by the current SDK environment',
   'arch.reason.busy': 'Another operation is in progress',
+  'arch.reason.seal-required': 'Session is not sealed (seal sentinel check did not pass); skipped by the archive seal gate',
+  'arch.reason.identity-denied': "The actor's identity may not archive this session (decision table)",
   'arch.reason.error': 'Operation failed',
   'arch.preview.title': 'Session preview',
   'arch.preview.messages': '{n} messages in total',
@@ -242,6 +257,8 @@ export const en: Record<ArchKey, string> = {
   'arch.auto.archiveDays': 'Inactivity threshold (days)',
   'arch.auto.deleteToggle': 'Auto-delete archived sessions past their retention',
   'arch.auto.deleteDays': 'Archive retention (days)',
+  'arch.auto.recordManualToggle': 'Record an archive time for sessions archived elsewhere',
+  'arch.auto.recordManualNote': 'Off by default. When enabled, the moment this plugin first observes such a session is recorded as its archive time, so its retention countdown starts from there and it may later be auto-deleted; the list marks that time as (backfilled). While it is off, nothing is written to the ledger.',
   'arch.auto.days.unit': 'days',
   'arch.auto.invalidDays': 'Days must be an integer between {min} and {max}',
   'arch.auto.preview': 'Preview with current settings',
@@ -257,6 +274,7 @@ export const en: Record<ArchKey, string> = {
   'arch.auto.neverRun': 'Never run',
   'arch.auto.basis': 'How it counts: auto-archive uses the session last-activity time (not creation time); auto-delete uses the recorded archive time (not file times). Historical archives with unknown archive time are never auto-deleted; restoring and re-archiving restarts the retention clock. Running sessions, the session you are viewing, and sessions with running children are always protected.',
   'arch.auto.cycleRunning': 'An automatic check is running…',
+  'arch.auto.saveFailed': 'Save failed: the Host did not accept the setting; please retry',
   'arch.auto.runError': 'Run failed: {error}',
   'arch.time.unknown': 'unknown',
   'arch.current.badge': 'current',
@@ -270,16 +288,46 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /**
- * Active dictionary, picked by the document language at call time (the
- * settings section has no framework locale seat of its own).
+ * Unwired fallback dictionary, picked by the document language at call time.
+ * A zh/en-only pick, so it can only ever answer the two languages this
+ * package ships: it stays in force exactly while the locale service seat
+ * below is unwired.
  */
 export function dictionary(): Record<ArchKey, string> {
   const lang = typeof document !== 'undefined' ? document.documentElement.lang : 'zh'
   return lang.toLowerCase().startsWith('en') ? en : zh
 }
 
-/** Translate a key with optional `{name}` template params; missing keys degrade to the key. */
+/**
+ * Locale-service translate seat, wired by the browser apply() through
+ * ctx.locale.bind(NS) (setRuntimeTranslate). The bound function resolves the
+ * ACTIVE language at call time, so every card surface reads the dictionary
+ * the host currently serves: this package's zh/en plus any language a pack
+ * registers for this namespace (dsh-i18n's ru), walked along that language's
+ * declared fallback chain. Reading the document language instead sent every
+ * non-en language into the zh branch, which left the card body Chinese while
+ * the nav label of the same namespace localized correctly.
+ *
+ * Undefined until wired, so the document-language fallback above stays in
+ * force when the locale service is absent or a caller runs before the
+ * plugin mounts.
+ */
+let runtimeT: Translate<string> | undefined
+
+/**
+ * Wire the locale-service translate seat; pass undefined to restore the
+ * document-language fallback.
+ */
+export function setRuntimeTranslate(translate: Translate<string> | undefined): void {
+  runtimeT = translate
+}
+
+/**
+ * Translate a key with optional `{name}` template params in the active
+ * language; a missing key degrades to the key itself.
+ */
 export function t(key: string, params?: Record<string, unknown>): string {
+  if (runtimeT !== undefined) return runtimeT(key, params)
   let text: string = (dictionary() as Record<string, string>)[key] ?? key
   if (params !== undefined) {
     for (const [name, value] of Object.entries(params)) {

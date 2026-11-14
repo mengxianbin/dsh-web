@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-依赖产物的测试在 runner 产物缺失时显式 skip，原因里写明补救方式（`packages/dsh-perf/lib/better-session-import.mjs is a build artifact; run pnpm build first`）；parseArgv 测试不依赖产物，始终运行。因此免构建一致性门禁（deploy-market 以及任何全新 checkout 的 `test:scripts`）跑除产物依赖用例之外的完整套件，而 ci.yml 构建后仍全量覆盖它们。CLI 的 `loadCore()` 遇到缺失产物时也给出同样的可操作提示，而不是裸的 module-not-found 错误。
+依赖产物的测试在 runner 产物缺失时显式 skip，原因里写明补救方式（`packages/dsh-perf/lib/better-session-import.mjs is a build artifact; run pnpm build first`）；parseArgv 测试不依赖产物，始终运行。因此免构建一致性门禁（deploy-market 以及任何全新 checkout 的 `test:scripts`）跑除产物依赖用例之外的完整套件，而 ci.yml 当时在 Build 之后仍全量覆盖它们。后续改动把这套机制连同它的对象一起移出了仓库——`packages/dsh-perf` 与 `scripts/dsh-better-session.test.mjs` 都不再存在——Build 步骤现在位于 ci.yml 的 `static-checks` 通道，`test:scripts` 则跑在免构建的 `consistency` 通道。CLI 的 `loadCore()` 遇到缺失产物时也给出同样的可操作提示，而不是裸的 module-not-found 错误。
 
 ## Alternatives considered
 
@@ -18,7 +18,7 @@ Status: implemented
 
 ## Consequences
 
-全新 checkout 不先构建就永远跑不到那三个产物依赖测试——skip 原因已写明——这意味着免构建通道里 `test:scripts` 变绿不再隐含 better-session 接线被实际执行；该覆盖由 ci.yml 构建后与本地运行承担。今后任何脚本测试若要 import 包构建产物，必须声明同样的 skip 模式，否则 deploy-market 门禁会退化回 module-not-found 失败。
+全新 checkout 不先构建就永远跑不到那三个产物依赖测试——skip 原因已写明——这意味着免构建通道里 `test:scripts` 变绿并不隐含 better-session 接线被实际执行；该覆盖当时由 ci.yml 的 Build 之后与本地运行承担。这套机制现已随它服务的包一起离开仓库，而 `test:scripts` 现在跑在 ci.yml 免构建的 `consistency` 通道里，因此该 skip 模式没有剩余对象——规则本身仍然有效：今后任何脚本测试若要 import 包构建产物，必须声明同样的 skip 模式，否则每一条免构建通道都会退化回 module-not-found 失败。
 
 ## Testing
 

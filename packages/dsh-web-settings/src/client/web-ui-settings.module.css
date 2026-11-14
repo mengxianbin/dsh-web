@@ -1,30 +1,207 @@
-/* Web UI plugins first-level settings section chrome.
- * Renders a static heading plus the family plugin cards directly. */
+/* Web Extensions parent and the Web Plugins TAB. The page follows the host's
+   own settings rows: no side padding of its own (the dialog's options column
+   carries it), 16px above the heading so it lands where another page's first
+   row text does, 16px between the heading, the strip and the page. */
+
+/* The native settings dialog keeps its own width; this surface never resizes it. */
+.extensions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+  padding: 16px 0 0;
+  box-sizing: border-box;
+}
+
+.extensionsHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.extensionsTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+
+/* The heading's link to the repository, at the row's right end. */
+.extensionsRepository {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--dsw-alias-label-secondary);
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.extensionsRepository:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover, color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));
+}
+
+.extensionsRepository:focus-visible {
+  color: var(--dsw-alias-label-primary);
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/* The TAB strip is the shared segmented control (SegmentGroup.tsx) stretched
+   across the page, every TAB an equal share. A page too narrow for one line of
+   TABs wraps the strip: a TAB never shrinks under its label's one-line width,
+   and the highlight follows the active TAB onto the line it lands on. */
+.extensionTabs {
+  display: flex;
+  align-self: stretch;
+}
+
+.extensionTabs > .extensionTab {
+  flex: 1 1 0;
+  min-width: max-content;
+  font-size: 14px;
+  text-align: center;
+}
+
+/* The open TAB's page, and the holder its predecessor's still copy leaves from.
+   The holder clips only downward, so a longer page leaving over a shorter one
+   never stretches the scroller. */
+.extensionPages {
+  position: relative;
+  min-width: 0;
+}
+
+.extensionLeaving {
+  position: absolute;
+  inset: 0;
+  overflow-x: visible;
+  overflow-y: clip;
+  pointer-events: none;
+}
+
+.extensionPage {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+/* A TAB change slides the pages the way the strip reads: the open TAB arrives
+   from the side it sits on through a short blur while the still copy of the
+   one it replaced leaves to the other side (250ms, matching PAGE_MOTION_MS in
+   WebExtensionsSection.tsx). The TAB the page opens on arrives without motion. */
+.extensionPage[data-enter='forward'],
+.extensionPage[data-leave='back'] {
+  --page-shift: 8px;
+}
+
+.extensionPage[data-enter='back'],
+.extensionPage[data-leave='forward'] {
+  --page-shift: -8px;
+}
+
+.extensionPage[data-enter] {
+  animation: page-in 250ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.extensionPage[data-leave] {
+  animation: page-out 250ms cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+@keyframes page-in {
+  from { opacity: 0; transform: translateX(var(--page-shift)); filter: blur(3px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+
+@keyframes page-out {
+  from { opacity: 1; transform: none; filter: blur(0); }
+  to { opacity: 0; transform: translateX(var(--page-shift)); filter: blur(3px); }
+}
+
+.extensionUnavailable {
+  margin: 0;
+  padding: 16px 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ---------- The Web Plugins TAB ---------- */
 
 .section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
-.heading {
-  margin: 0 0 4px;
-  font-size: 17px;
+/* A group's label opens it with no hairline under it, so the label and its
+   rows read as one section; a group after another carries the line that
+   separates the two. */
+.group {
+  padding: 24px 0 4px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+  font-size: 12px;
   font-weight: 600;
-  line-height: 1.4;
+  line-height: 18px;
+  letter-spacing: 0.04em;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.group:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+/* A plugins label over a list no family plugin filled says nothing. */
+.group:has(+ .subcards:empty) {
+  display: none;
+}
+
+/* One settings row: title and description on the left, the control on the
+   right. The row keeps its control on the right while the two share a line and
+   hands it the next line only when the text's room would fall under its basis. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 8px;
+  padding: 16px 0;
+}
+
+.group + .row {
+  padding-top: 8px;
+}
+
+.rowText {
+  flex: 1 1 140px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-right: 48px;
+}
+
+.rowTitle {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
   color: var(--dsw-alias-label-primary);
 }
 
-.lede {
-  margin: 0 0 12px;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--dsw-alias-label-tertiary);
+.rowDesc {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
 }
 
-.sectionList {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* A line under the description, in the business colour, saying why the row
+   does not act the way its control reads. */
+.rowNote {
+  display: block;
+  margin-top: 2px;
+  color: var(--dsw-alias-state-business-primary, var(--dsw-alias-brand-primary));
 }
 
 .subcards {
@@ -32,64 +209,12 @@
   flex-direction: column;
   gap: 10px;
   margin: 0;
-  padding: 0;
+  padding: 8px 0 0;
   list-style: none;
 }
 
-/* Family section nav icons: the DSH settings shell hard-codes nav icons by
-   section id and falls back to the gear for every other section. The four
-   family sections (orders 110-140) are the last four nav cells, so the group
-   swaps the gear for per-section masks over the shell's stable class
-   suffixes. The override applies only while exactly eight nav cells exist
-   (all four family sections installed); otherwise the gear stays, so a
-   partial install never shows a wrong icon. */
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(5) > [class*="_navIcon"],
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(6) > [class*="_navIcon"],
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(7) > [class*="_navIcon"],
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(8) > [class*="_navIcon"] {
-  display: none;
-}
-
-/* Web Plugins: a 2x2 plugin grid. */
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(5)::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  flex: none;
-  background: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M2 2h5v5H2zM9 2h5v5H9zM2 9h5v5H2zM9 9h5v5H9z'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-
-/* Skin Center: a color swatch ring. */
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(6)::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  flex: none;
-  background: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zm0-4a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M8 14a6 6 0 1 0 0-12 6 6 0 0 0 0 12zm0-4a2 2 0 1 0 0-4 2 2 0 0 0 0 4z'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-
-/* Pet: a paw print. */
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(7)::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  flex: none;
-  background: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='11' rx='4.2' ry='2.8'/%3E%3Ccircle cx='2.8' cy='6.2' r='1.9'/%3E%3Ccircle cx='8' cy='4.6' r='1.9'/%3E%3Ccircle cx='13.2' cy='6.2' r='1.9'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cellipse cx='8' cy='11' rx='4.2' ry='2.8'/%3E%3Ccircle cx='2.8' cy='6.2' r='1.9'/%3E%3Ccircle cx='8' cy='4.6' r='1.9'/%3E%3Ccircle cx='13.2' cy='6.2' r='1.9'/%3E%3C/svg%3E") center / contain no-repeat;
-}
-
-/* Community Plugins: two people. */
-[class*="_navList"]:has(> [class*="_navCell"]:nth-child(8)):not(:has(> [class*="_navCell"]:nth-child(9))) > [class*="_navCell"]:nth-child(8)::before {
-  content: "";
-  width: 16px;
-  height: 16px;
-  flex: none;
-  background: currentColor;
-  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5.5' cy='5.5' r='3'/%3E%3Ccircle cx='11' cy='5.5' r='3'/%3E%3Cpath d='M2.5 13.5c0-3 2-4.2 3-4.2H11c1.5 0 3 1.2 3 4.2z'/%3E%3C/svg%3E") center / contain no-repeat;
-  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5.5' cy='5.5' r='3'/%3E%3Ccircle cx='11' cy='5.5' r='3'/%3E%3Cpath d='M2.5 13.5c0-3 2-4.2 3-4.2H11c1.5 0 3 1.2 3 4.2z'/%3E%3C/svg%3E") center / contain no-repeat;
+@media (prefers-reduced-motion: reduce) {
+  .extensionsRepository {
+    transition: none;
+  }
 }

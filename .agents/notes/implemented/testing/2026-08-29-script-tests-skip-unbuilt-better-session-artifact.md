@@ -8,7 +8,7 @@ The `dsh-better-session` maintenance CLI loads its core from `packages/dsh-perf/
 
 ## Decision
 
-The artifact-dependent tests declare an explicit skip when the runner artifact is absent, with the reason naming the remedy (`packages/dsh-perf/lib/better-session-import.mjs is a build artifact; run pnpm build first`); the parseArgv test needs no artifact and always runs. No-build consistency gates (deploy-market, and any fresh-checkout `test:scripts`) therefore exercise the full suite minus the artifact-dependent cases, while ci.yml still covers them fully after its Build step. The CLI's `loadCore()` also reports a missing artifact with that same actionable hint instead of a raw module-not-found error.
+The artifact-dependent tests declare an explicit skip when the runner artifact is absent, with the reason naming the remedy (`packages/dsh-perf/lib/better-session-import.mjs is a build artifact; run pnpm build first`); the parseArgv test needs no artifact and always runs. No-build consistency gates (deploy-market, and any fresh-checkout `test:scripts`) therefore exercise the full suite minus the artifact-dependent cases, while ci.yml covered them fully behind its Build step. Later work removed that subject from the repository — `packages/dsh-perf` and `scripts/dsh-better-session.test.mjs` no longer exist — and the Build step itself now runs in ci.yml's `static-checks` lane while `test:scripts` runs in the build-free `consistency` lane. The CLI's `loadCore()` also reports a missing artifact with that same actionable hint instead of a raw module-not-found error.
 
 ## Alternatives considered
 
@@ -18,7 +18,7 @@ The artifact-dependent tests declare an explicit skip when the runner artifact i
 
 ## Consequences
 
-A fresh checkout can never run the three artifact-dependent tests without building first — the skip message says so — meaning `test:scripts` green in a no-build lane no longer implies the better-session wiring is exercised; that coverage lives in ci.yml post-build and in local runs. Any future script test that imports a package build artifact must declare the same skip pattern or the deploy-market gate regresses to module-not-found failures.
+A fresh checkout can never run the three artifact-dependent tests without building first — the skip message says so — meaning `test:scripts` green in a no-build lane did not imply the better-session wiring was exercised; that coverage lived behind ci.yml's Build step and in local runs. That mechanism has since left the repository with the package it served, and `test:scripts` now runs in ci.yml's build-free `consistency` lane, so this skip pattern has no remaining subject — the rule still binds: any future script test that imports a package build artifact must declare the same skip pattern, or every build-free lane regresses to module-not-found failures.
 
 ## Testing
 

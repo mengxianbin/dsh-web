@@ -3,8 +3,8 @@ import {
   parseFailuresSnapshot,
   parseInstallStatus,
   parseInstalledPlugin,
-  parsePluginControlSnapshot,
   parsePluginList,
+  parseRestartRequired,
   parseUpdateList,
 } from '../src/core/protocol.ts'
 
@@ -62,6 +62,19 @@ describe('parsePluginList', () => {
   })
 
 
+describe('parseRestartRequired', () => {
+  it('user keeps the restart fact the host lists and loses nothing when it cannot be read', () => {
+    // Given the values a gateway job can carry for the restart-required list
+    // When each one is read
+    // Then names are kept and an unusable value degrades to "no restart needed",
+    // because the update already landed and this is only its hint
+    expect(parseRestartRequired(['dsh-memoir', 'dsh-pet'])).toEqual(['dsh-memoir', 'dsh-pet'])
+    expect(parseRestartRequired(['dsh-memoir', '', 42])).toEqual(['dsh-memoir'])
+    expect(parseRestartRequired(undefined)).toEqual([])
+    expect(parseRestartRequired('dsh-memoir')).toEqual([])
+  })
+})
+
 describe('parseInstalledPlugin', () => {
   it('parses a valid plugin wrapper', () => {
     expect(parseInstalledPlugin({ plugin: pluginRow })).toEqual(pluginRow)
@@ -69,23 +82,6 @@ describe('parseInstalledPlugin', () => {
 
   it('rejects a missing plugin row', () => {
     expect(() => parseInstalledPlugin({})).toThrow(/plugin row/)
-  })
-})
-
-describe('parsePluginControlSnapshot', () => {
-  it('parses valid controls', () => {
-    const controls = parsePluginControlSnapshot({
-      controls: [
-        { id: 'web-ui', name: 'dsh-web', repository: 'https://github.com/zhu1090093659/dsh-web', state: 'enabled' },
-        { id: 'genui', name: 'dsh-genui', repository: 'https://github.com/omdsh-dev/dsh-genui', state: 'mixed' },
-      ],
-    })
-    expect(controls).toHaveLength(2)
-    expect(controls[0].state).toBe('enabled')
-  })
-
-  it('rejects an unknown state', () => {
-    expect(() => parsePluginControlSnapshot({ controls: [{ id: 'a', name: 'a', repository: 'r', state: 'on' }] })).toThrow(/control row 0/)
   })
 })
 

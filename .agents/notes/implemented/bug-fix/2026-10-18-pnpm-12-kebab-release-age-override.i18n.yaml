@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+.agents/notes/implemented/bug-fix/2026-10-18-pnpm-12-kebab-release-age-override.md: 42be4189630c83b4d1e9d791e7d726793ec801c5
+.agents/notes/implemented/bug-fix/2026-10-18-pnpm-12-kebab-release-age-override.zh.md: 3893614c10c78d7033270390226a70b6569f2a5f

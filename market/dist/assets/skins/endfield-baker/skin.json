@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schemas.linxin666.org/dsh-skin/v2.json",
+  "skinManifestVersion": 2,
+  "id": "endfield-baker",
+  "name": "终末地 · BAKER",
+  "nameEn": "Endfield Baker",
+  "version": "0.9.1",
+  "author": "Yuji6278（基于 blue-fantasy / powerdog996 DreamSkin 社区作品改作）",
+  "tagline": "《明日方舟：终末地》工业终端 · BAKER 会话界面 · 信号青与警示黄",
+  "description": "把 dsh Web GUI 改造成终末地现场终端：会话区按 BAKER 通讯界面重做（青色标头竖条、信号黄选中行、切角控制台卡片、白色胶囊输入条、磨砂灰聊天底板），其余壳层用终末地的工业语汇补齐——细网格与斜纹信号条、等宽微标签、单像素浅灰描边。浅色与深色模式共用同一套终端配色。",
+  "tags": [
+    "endfield",
+    "arknights",
+    "industrial",
+    "baker",
+    "terminal",
+    "cyan"
+  ],
+  "accent": "#17c3e6",
+  "order": 1052,
+  "license": "CC BY-NC-SA 4.0",
+  "licenseUrl": "https://creativecommons.org/licenses/by-nc-sa/4.0/",
+  "sourceUrl": "https://github.com/Yuji6278/endfield-skin-release",
+  "attribution": "皮肤工程由 Yuji6278 完成，含终端布局、配色/token映射、CSS组合、状态适配与双端兼容；底色与骨架改作自 blue-fantasy（powerdog996 / DreamSkin 社区），基底代码遵守原许可证。来源分类见随包 NOTICE：chat.peilika.beer 装饰提取后调整；两SVG提取换色而非重绘；聊天/顶栏贴图由参考截图裁调；new-session按贡献者确认说明为截图抠图，精确原图与坐标未核实；endfield-dark背景由无外部图片像素输入的几何脚本自绘。整套素材不声明为全原创或AI生成。对应作品《明日方舟：终末地》，源站引用声明将相关图片及游戏知识产权归上海鹰角网络科技有限公司（Hypergryph），其他权利归相应权利人；顶栏为匿名人形，无可辨识具名角色。国际官网公开二创指南 https://endfield.gryphline.com/zh-tw/news/4497 为个人非营利二创政策依据，同时要求尊重第三方权利、不得冒充官方，禁止直接复制擷取官方素材且缺明显创作性；对本批源站素材及软件包UI切片的适用仍有不确定处，不代表逐文件官方授权。CC BY-NC-SA 4.0仅适用于贡献者有权许可的新增内容，排除第三方素材且不覆盖基底原许可，详见LICENSE与NOTICE。本皮肤非官方、个人非商业，与Hypergryph、GRYPHLINE、来源网站及本仓无隶属合作背书；贡献者承担版权合规责任。第三方来源与再分发权利未完整确立，不保证有权分发。",
+  "preview": {
+    "light": "preview/light.jpg",
+    "dark": "preview/light.jpg"
+  },
+  "contributes": {
+    "stylesheet": "skin.css",
+    "patches": "patches.css",
+    "backgroundMedia": {
+      "light": {
+        "type": "image",
+        "src": "assets/endfield-dark.jpg",
+        "scrim": "linear-gradient(rgba(8, 10, 12, 0.30) 0%, rgba(10, 13, 16, 0.42) 60%, rgba(12, 16, 19, 0.50) 100%)"
+      },
+      "dark": {
+        "type": "image",
+        "src": "assets/endfield-dark.jpg",
+        "scrim": "linear-gradient(rgba(8, 10, 12, 0.30) 0%, rgba(10, 13, 16, 0.42) 60%, rgba(12, 16, 19, 0.50) 100%)"
+      }
+    }
+  }
+}

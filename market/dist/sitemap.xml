@@ -17,6 +17,21 @@
     <priority>0.5</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=frutiger-aero</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=porco-rosso</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=verdandi</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=whale-song</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
@@ -27,7 +42,22 @@
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=last-exile</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=harbor</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=white-snake</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=blueprint</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -38,6 +68,11 @@
   </url>
   <url>
     <loc>https://dsh-market.com/tryon/?skin=dragon-heir</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=cafe-roastery</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -82,12 +117,37 @@
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=island-life</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=ice-princess</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=observatory</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=stellar-diva</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=hive-maw</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=starry-nocturne</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=ember-fall</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -102,12 +162,92 @@
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=astral-choir</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=pixel-anime</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=black-gold</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=shangmei-jinbi</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=mid-autumn</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=national-day</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=whale-fantasy</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=model-dorm</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=rainy-night</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=claude</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=xinghai-heart</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=shuimo-danqing</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=lucy-nightsignal</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=crt-phosphor</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=furina</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
   <url>
+    <loc>https://dsh-market.com/tryon/?skin=diy-journal</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
     <loc>https://dsh-market.com/tryon/?skin=mint</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=remiel-starlit</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -128,6 +268,11 @@
   </url>
   <url>
     <loc>https://dsh-market.com/tryon/?skin=war-thunder</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=black-gold-vip</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>
@@ -158,6 +303,26 @@
   </url>
   <url>
     <loc>https://dsh-market.com/tryon/?skin=blue-throated-bee-eater</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=whalechan-harness</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=whale-maid</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=endfield-baker</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.7</priority>
+  </url>
+  <url>
+    <loc>https://dsh-market.com/tryon/?skin=midnight-contract</loc>
     <changefreq>monthly</changefreq>
     <priority>0.7</priority>
   </url>

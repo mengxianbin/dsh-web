@@ -1,0 +1,4 @@
+# Bilingual-pair consistency record (docs/i18n.md).
+# Both languages have equal authority; re-record with git hash-object after paired edits.
+2026-10-11-explicit-mount-smoke-artifact-intent.md: 2e7b790adbe7eb1d27d03f6631f86b5a6f0647ab
+2026-10-11-explicit-mount-smoke-artifact-intent.zh.md: 21cfdb8e53daa4f97e5fbea82d893d62735f22c0

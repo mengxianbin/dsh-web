@@ -1,6 +1,6 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveService, BusyError, PlanMismatchError } from '../src/host/janitor.ts'
@@ -38,12 +38,12 @@ describe('archive / unarchive ledger', () => {
   it('records a reliable archive time and is idempotent on re-archive', async () => {
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
     const service = await settledService(host)
-    const first = await service.archive(['session-a'], 'manual')
+    const first = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(first.results).toEqual([{ id: 'session-a', status: 'ok' }])
     const at1 = service.ledgerSnapshot().entries['session-a']?.archivedAt
     expect(at1).toBeGreaterThan(0)
 
-    const second = await service.archive(['session-a'], 'manual')
+    const second = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(second.results).toEqual([{ id: 'session-a', status: 'skipped', reason: 'already-archived' }])
     expect(service.ledgerSnapshot().entries['session-a']?.archivedAt).toBe(at1)
     expect(host.registry.archivedSessionIds).toEqual(['session-a'])
@@ -52,7 +52,7 @@ describe('archive / unarchive ledger', () => {
   it('drops the ledger entry on unarchive, so a re-archive restarts the clock', async () => {
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
     const service = await settledService(host)
-    await service.archive(['session-a'], 'auto')
+    await service.archive(['session-a'], 'auto', undefined, 'manual-test')
     expect(service.ledgerSnapshot().entries['session-a']).toBeDefined()
 
     const response = await service.unarchive(['session-a'])
@@ -60,7 +60,7 @@ describe('archive / unarchive ledger', () => {
     expect(host.registry.archivedSessionIds).toEqual([])
     expect(service.ledgerSnapshot().entries['session-a']).toBeUndefined()
 
-    const again = await service.archive(['session-a'], 'manual')
+    const again = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(again.results).toEqual([{ id: 'session-a', status: 'ok' }])
     expect(service.ledgerSnapshot().entries['session-a']?.archivedAt).toBeGreaterThanOrEqual(0)
   })
@@ -70,6 +70,61 @@ describe('archive / unarchive ledger', () => {
     const service = await settledService(host)
     const response = await service.unarchive(['session-a'])
     expect(response.results).toEqual([{ id: 'session-a', status: 'skipped', reason: 'not-archived' }])
+  })
+})
+
+describe('identity gate (triclass decision table)', () => {
+  function writeIdentity(host: FakeHost, sessions: Record<string, string>): void {
+    writeFileSync(
+      join(host.home, 'session-attention.json'),
+      JSON.stringify({
+        version: 1,
+        sessions: Object.fromEntries(Object.entries(sessions).map(([id, cls]) => [id, { class: cls, defaultApplied: true, source: 'dispatch', updatedAt: 't' }])),
+      }),
+      'utf8',
+    )
+  }
+
+  it('applies the decision table per id and stamps the actor into the ledger', async () => {
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-worker', updatedAt: 1 }, { sessionId: 'session-human', updatedAt: 2 }],
+      persistedIds: ['session-worker', 'session-human'],
+    })
+    writeIdentity(host, {
+      'session-boss': 'bot-boss',
+      'session-worker': 'bot-worker',
+      'session-human': 'human',
+    })
+    const service = await settledService(host)
+
+    // worker -> boss rules: a bot-boss archives its worker and the actor lands in the ledger.
+    const allowed = await service.archive(['session-worker'], 'manual', undefined, 'session-boss')
+    expect(allowed.results).toEqual([{ id: 'session-worker', status: 'ok' }])
+    expect(service.ledgerSnapshot().entries['session-worker']?.actor).toBe('session-boss')
+
+    // The same boss is refused on a human target — the 13:53 incident shape.
+    const denied = await service.archive(['session-human'], 'manual', undefined, 'session-boss')
+    expect(denied.results).toEqual([
+      { id: 'session-human', status: 'skipped', reason: 'identity-denied', detail: expect.stringContaining('bot-boss cannot archive human') },
+    ])
+    expect(host.registry.archivedSessionIds).toContain('session-worker')
+    expect(host.registry.archivedSessionIds).not.toContain('session-human')
+  })
+
+  it('denies an unclassified session actor while a channel actor archives as human', async () => {
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-w2', updatedAt: 1 }], persistedIds: ['session-w2'] })
+    const service = await settledService(host)
+
+    const denied = await service.archive(['session-w2'], 'manual', undefined, 'session-unknown')
+    expect(denied.results[0]).toMatchObject({
+      status: 'skipped',
+      reason: 'identity-denied',
+      detail: expect.stringContaining('unclassified'),
+    })
+
+    const allowed = await service.archive(['session-w2'], 'manual', undefined, 'manual')
+    expect(allowed.results).toEqual([{ id: 'session-w2', status: 'ok' }])
+    expect(service.ledgerSnapshot().entries['session-w2']?.actor).toBe('manual')
   })
 })
 
@@ -218,17 +273,54 @@ describe('operation lock', () => {
     const service = await settledService(host)
     // withLock takes the flag synchronously, so the second call fails fast
     // while the first is still in flight.
-    const first = service.archive(['session-a'], 'manual')
-    await expect(service.archive(['session-b'], 'manual')).rejects.toBeInstanceOf(BusyError)
+    const first = service.archive(['session-a'], 'manual', undefined, 'manual-test')
+    await expect(service.archive(['session-b'], 'manual', undefined, 'manual-test')).rejects.toBeInstanceOf(BusyError)
     await first
     // After the first completes, the lock is free again.
-    const second = await service.archive(['session-b'], 'manual')
+    const second = await service.archive(['session-b'], 'manual', undefined, 'manual-test')
     expect(second.results).toEqual([{ id: 'session-b', status: 'ok' }])
   })
 })
 
 describe('automatic cycles', () => {
   const DAY = 86_400_000
+
+  it('user auto-archives mixed native IDs without touching protected sessions or resetting archive times', async () => {
+    // Given: stale sessions use both harness ID spellings, with protected peers.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T04:00:00Z'))
+    const bare = '550e8400-e29b-41d4-a716-446655440000'
+    const canonical = `session-${bare}`
+    const host = createFakeHost({
+      feedItems: [
+        { sessionId: bare, updatedAt: Date.now() - 40 * DAY },
+        { sessionId: 'session-stale', updatedAt: Date.now() - 40 * DAY },
+        { sessionId: 'session-running', updatedAt: Date.now() - 40 * DAY, running: true },
+        { sessionId: 'session-current', updatedAt: Date.now() - 40 * DAY },
+      ],
+      persistedIds: [bare, 'session-stale', 'session-running', 'session-current'],
+    })
+    const service = await settledService(host, { autoArchiveEnabled: true, autoArchiveDays: 7 })
+    try {
+      // When: the user runs automatic archiving twice.
+      const first = await service.runAutoCycle('archive', 'session-current')
+      const archivedAt = service.ledgerSnapshot().entries[canonical]?.archivedAt
+      vi.setSystemTime(new Date('2026-10-04T04:00:00Z'))
+      const second = await service.runAutoCycle('archive', 'session-current')
+
+      // Then: native IDs are archived, canonical ledger keys remain stable, and protected peers survive.
+      expect(first).toMatchObject({ total: 2, ok: 2, skipped: 0, failed: 0 })
+      expect(first.entries).toEqual([])
+      expect(host.registry.archivedSessionIds.sort()).toEqual([bare, 'session-stale'].sort())
+      expect(service.ledgerSnapshot().entries[canonical]).toEqual({ archivedAt, source: 'auto' })
+      expect(archivedAt).toBe(new Date('2026-10-03T04:00:00Z').getTime())
+      expect(service.ledgerSnapshot().entries[bare]).toBeUndefined()
+      expect(second).toMatchObject({ total: 0, ok: 0, failed: 0 })
+    } finally {
+      service.stop()
+      vi.useRealTimers()
+    }
+  })
 
   it('auto-archives by last activity and skips running/current sessions', async () => {
     const host = createFakeHost({
@@ -325,5 +417,204 @@ describe('preview', () => {
     const broken = await service.preview('session-broken')
     expect(broken.messageCount).toBe(0)
     await expect(service.preview('session-missing')).rejects.toThrow('session not found')
+  })
+})
+
+describe('observed-archive backfill', () => {
+  /** The ledger file as it sits on disk, or undefined when nothing wrote one. */
+  function ledgerOnDisk(host: FakeHost): string | undefined {
+    const path = join(host.home, 'dsh-session-archive', 'archive-ledger.json')
+    return existsSync(path) ? readFileSync(path, 'utf8') : undefined
+  }
+
+  it('operator with the switch off gets no ledger write for an archive this plugin did not make', async () => {
+    // Given an archived session the sidebar archived, so the ledger has no entry, and the backfill switch off
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-sidebar', updatedAt: 1 }],
+      persistedIds: ['session-sidebar'],
+      archivedSessionIds: ['session-sidebar'],
+    })
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7, recordManualArchive: false })
+    const before = service.ledgerSnapshot().entries
+
+    // When a delete cycle runs
+    const stats = await service.runAutoCycle('delete')
+
+    // Then nothing was recorded and no ledger file was created at all
+    expect(service.ledgerSnapshot().entries).toEqual(before)
+    expect(service.ledgerSnapshot().entries['session-sidebar']).toBeUndefined()
+    expect(ledgerOnDisk(host)).toBeUndefined()
+    expect(stats.total).toBe(0)
+  })
+
+  it('operator with the switch on gets the archive recorded as observed, at the moment of observation', async () => {
+    // Given an archived session with no ledger entry and the backfill switch on, observed at a pinned instant
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-sidebar', updatedAt: 1 }],
+      persistedIds: ['session-sidebar'],
+      archivedSessionIds: ['session-sidebar'],
+    })
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T04:00:00Z'))
+    try {
+      const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7, recordManualArchive: true })
+
+      // When a delete cycle runs
+      await service.runAutoCycle('delete')
+
+      // Then the ledger holds one observed entry timed at the observation instant, not at a file timestamp
+      expect(service.ledgerSnapshot().entries['session-sidebar']).toEqual({
+        archivedAt: new Date('2026-10-03T04:00:00Z').getTime(),
+        source: 'observed',
+      })
+      // And the write is durable, not just in memory
+      const onDisk = JSON.parse(ledgerOnDisk(host) ?? '{}')
+      expect(onDisk.entries['session-sidebar']).toEqual({ archivedAt: new Date('2026-10-03T04:00:00Z').getTime(), source: 'observed' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('operator turning the switch on does not delete a session in the cycle that backfills it', async () => {
+    // Given an overdue archive with no ledger entry and a retention far shorter than its age
+    const now = Date.now()
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-sidebar', updatedAt: now - 400 * 86_400_000 }],
+      persistedIds: ['session-sidebar'],
+      archivedSessionIds: ['session-sidebar'],
+    })
+    const dir = writeSessionDir(host, 'session-sidebar')
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 1, recordManualArchive: true })
+
+    // When the delete cycle runs, then a second one runs right after
+    const first = await service.runAutoCycle('delete')
+    const second = await service.runAutoCycle('delete')
+
+    // Then the cycle backfilled the archive time and deleted nothing
+    expect(service.ledgerSnapshot().entries['session-sidebar']?.source).toBe('observed')
+    // And its deletion record stays empty: a backfill is not a deleted session
+    expect(first).toMatchObject({ total: 0, ok: 0, skipped: 0, failed: 0 })
+    expect(first.entries).toEqual([])
+    // And the session is still archived with its storage intact
+    expect(host.registry.archivedSessionIds).toEqual(['session-sidebar'])
+    expect(existsSync(dir)).toBe(true)
+    // And with the recorded time still inside the retention window, the next cycle keeps it too
+    expect(second.ok).toBe(0)
+    expect(existsSync(dir)).toBe(true)
+  })
+
+  it('operator with the switch on never backfills a row whose session data could not be read', async () => {
+    // Given three sidebar-archived sessions with no ledger entry: one the feed lists
+    // normally, one the feed cannot see, and one with no storage at all
+    const now = Date.now()
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-readable', updatedAt: now - 30 * 86_400_000 }],
+      persistedIds: ['session-readable', 'session-unreadable', 'session-nodata'],
+      archivedSessionIds: ['session-readable', 'session-unreadable', 'session-nodata'],
+    })
+    const readableDir = writeSessionDir(host, 'session-readable')
+    // session-unreadable has storage but the feed does not list it; session-nodata has
+    // neither. Both look exactly like a transient read failure on this pass.
+    writeSessionDir(host, 'session-unreadable')
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 1, recordManualArchive: true })
+    const byId = new Map((await service.inventory()).rows.map((row) => [row.id, row]))
+    expect(byId.get('session-unreadable')?.issues).toContain('unreadable')
+    expect(byId.get('session-nodata')?.issues).toContain('no-data')
+
+    // When the user previews and then runs the delete cycle
+    const preview = await service.autoPreview()
+    const stats = await service.runAutoCycle('delete')
+
+    // Then neither unreadable row was projected into the delete candidates
+    expect(preview.deleteCandidates).toEqual([])
+    expect(stats.ok).toBe(0)
+    // And neither got a ledger entry: a temporary read failure must never become an
+    // archived time that can end in an unrecoverable physical delete
+    expect(service.ledgerSnapshot().entries['session-unreadable']).toBeUndefined()
+    expect(service.ledgerSnapshot().entries['session-nodata']).toBeUndefined()
+    // And both stay archived, with the readable one's data untouched
+    expect(host.registry.archivedSessionIds.sort()).toEqual(['session-nodata', 'session-readable', 'session-unreadable'])
+    expect(existsSync(readableDir)).toBe(true)
+    // And the readable session in the same pass WAS backfilled, so the guard excludes
+    // the unreadable rows rather than disabling the backfill altogether
+    expect(service.ledgerSnapshot().entries['session-readable']?.source).toBe('observed')
+  })
+
+  it('operator previewing sees the backfill effect without any ledger write', async () => {
+    // Given an overdue no-entry archive whose overdue age only shows once a time is recorded
+    const now = Date.now()
+    const host = createFakeHost({
+      feedItems: [
+        { sessionId: 'session-overdue', updatedAt: now - 20 * 86_400_000 },
+        { sessionId: 'session-fresh', updatedAt: now - 20 * 86_400_000 },
+      ],
+      persistedIds: ['session-overdue', 'session-fresh'],
+      archivedSessionIds: ['session-overdue', 'session-fresh'],
+    })
+    // session-overdue was archived long ago but has no entry; session-fresh was archived just now.
+    host.ledger.entries['session-fresh'] = { archivedAt: now, source: 'manual' }
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7, recordManualArchive: true })
+
+    // When the user previews with the switch on
+    const withSwitch = await service.autoPreview()
+
+    // Then the preview writes nothing, yet the projected time is what the next cycle will use
+    expect(service.ledgerSnapshot().entries['session-overdue']).toBeUndefined()
+    expect(ledgerOnDisk(host)).toBeUndefined()
+    // The freshly observed row is excluded by the same run-start rule the real cycle applies
+    expect(withSwitch.deleteCandidates.map((entry) => entry.id)).toEqual([])
+  })
+
+  it('operator with the switch off previews the historical behaviour, where an unknown time never counts', async () => {
+    // Given an overdue no-entry archive observed with the backfill switch off
+    const now = Date.now()
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-overdue', updatedAt: now - 20 * 86_400_000 }],
+      persistedIds: ['session-overdue'],
+      archivedSessionIds: ['session-overdue'],
+    })
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7, recordManualArchive: false })
+
+    // When the user previews and then runs the cycle
+    const preview = await service.autoPreview()
+    const stats = await service.runAutoCycle('delete')
+
+    // Then no candidate is projected and no entry appears, exactly as before the switch existed
+    expect(preview.deleteCandidates).toEqual([])
+    expect(stats.total).toBe(0)
+    expect(service.ledgerSnapshot().entries['session-overdue']).toBeUndefined()
+  })
+
+  it('operator only backfilling and not auto-deleting still sees the recorded time after a scheduler tick', async () => {
+    // Given a deployment that enables the backfill alone, with one sidebar-archived session
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-sidebar', updatedAt: 1 }],
+      persistedIds: ['session-sidebar'],
+      archivedSessionIds: ['session-sidebar'],
+    })
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T04:00:00Z'))
+    try {
+      const service = await settledService(host, { recordManualArchive: true })
+
+      // When the scheduler reaches its first check (the default 60 minute cadence)
+      await vi.advanceTimersByTimeAsync(60 * 60_000)
+      await vi.waitFor(() => {
+        expect(service.ledgerSnapshot().entries['session-sidebar']?.source).toBe('observed')
+      })
+
+      // Then the backfill ran on its own, from its own lock acquisition, timed at the check
+      expect(service.ledgerSnapshot().entries['session-sidebar']).toEqual({
+        archivedAt: new Date('2026-10-03T05:00:00Z').getTime(),
+        source: 'observed',
+      })
+      // And the inventory the user sees carries the observed source for that row
+      const inventory = await service.inventory()
+      const row = inventory.rows.find((entry) => entry.id === 'session-sidebar')
+      expect(row?.archivedAtSource).toBe('observed')
+      service.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

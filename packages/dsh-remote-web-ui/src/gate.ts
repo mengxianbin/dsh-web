@@ -19,16 +19,7 @@
 
 import type { IncomingMessage } from 'node:http'
 import type { PairingService } from './pairing.ts'
-import { isLoopbackAddress, isLoopbackHostname } from './loopback.ts'
-
-/**
- * Loopback classification for the desktop client. The predicates now live in
- * the shared synced copy (shared/host/loopback.ts, mirrored to ./loopback.ts
- * by scripts/sync-shared.mjs): localhost, IPv6 loopback, and any IPv4 address
- * in 127/8.
- * @param hostname - WHATWG URL hostname (IPv6 literals retain brackets).
- * @returns true for localhost, IPv6 loopback, or any IPv4 address in 127/8.
- */
+import { isLoopbackAddress, isLoopbackHostname, isProxiedRequest } from './loopback.ts'
 
 /**
  * Read one cookie value from a Cookie header.
@@ -62,12 +53,49 @@ export function hostnameOf(request: IncomingMessage): string | undefined {
   }
 }
 
-/** Whether a request comes from the desktop loopback client (loopback socket AND loopback Host). */
-export function isLoopbackClient(request: IncomingMessage): boolean {
+/**
+ * Whether the request arrived at this process over a loopback upstream: a
+ * loopback socket and a loopback Host header, with the forwarding headers
+ * deliberately ignored. A reverse proxy (a Cloudflare tunnel, frp, nginx) dials
+ * 127.0.0.1:<port> and rewrites the Host to that upstream literal, so this is
+ * the shape of a tunneled request as much as of the desktop one.
+ *
+ * It answers "this process is reachable at a loopback authority", never "this
+ * request is the desktop": the desktop decision is {@link isLoopbackClient},
+ * which a forwarded request never satisfies. Only the fences that decide whether
+ * a Host is answerable at all (the pairing status view, the reachability beacon,
+ * the pairing entry pages) may be built on this predicate; every decision that
+ * hands out a credential or the desktop payload stays on {@link isLoopbackClient}
+ * (issue #1919 keeps #1906 shut: reachability for the visitor, payload and
+ * control plane for the desktop).
+ * @param request - node HTTP request.
+ * @returns true when the socket and the Host both name loopback.
+ */
+export function isLoopbackUpstream(request: IncomingMessage): boolean {
   const hostname = hostnameOf(request)
   if (hostname === undefined || !isLoopbackHostname(hostname)) return false
   const socket = request.socket as { remoteAddress?: string } | undefined
   return isLoopbackAddress(socket?.remoteAddress)
+}
+
+/**
+ * Whether a request comes from the desktop loopback client: a loopback upstream
+ * ({@link isLoopbackUpstream}) reached with no forwarding header. This is the
+ * same decision the shared copy makes in `isLoopbackRequest` (sans the browser
+ * same-origin markers, which the /api/pair routes apply separately through
+ * `isTrustedApiRequest`), and it carries the same proxy rule: a reverse proxy
+ * rewrites the Host to its own 127.0.0.1:<port> upstream and connects over
+ * loopback, so a request that arrives with CF-Connecting-IP or X-Forwarded-For
+ * is a forwarded one and is never the desktop (issue #1906). Every decision
+ * that grants the desktop payload or a control plane (the api/gate listener,
+ * the events stream, /api/pair/issue, /api/pair/stop, /api/pair/revoke,
+ * /api/pair/lan-bind) reads this predicate, so the rule holds for all of them.
+ * @param request - node HTTP request.
+ * @returns true for a local desktop request with no proxy in front of it.
+ */
+export function isLoopbackClient(request: IncomingMessage): boolean {
+  if (isProxiedRequest(request)) return false
+  return isLoopbackUpstream(request)
 }
 
 /**

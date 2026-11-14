@@ -8,13 +8,13 @@ Status: implemented
 
 ## Decision
 
-旧聚合包迁移是确定性、事务式的替换，分三层落地（更名决策见 [产品更名 note](../../architecture/2026-08-24-product-rename-dsh-web.md)）：
+旧聚合包迁移是确定性、事务式的替换，分三层落地（更名决策见 [产品更名 note](../architecture/2026-08-24-product-rename-dsh-web.md)）：
 
 - 发布管线双发布当前 `@linxin666/dsh-web-all` 与最终 `@linxin666/dsh-web-ui-all`。旧包 tarball 从当前聚合包构建，只改写浏览器 loader id 与 self 行为旧 npm identity，并携带描述目标包和版本的 `dsh.migrate` 元数据。
 - plugin-manager 更新路径识别旧包，返回迁移更新，并通过官方 `dsh plugin` writer 执行 CLI 迁移任务。任务先经官方 CLI 移除旧包，再安装当前聚合包，恢复旧层位置，执行 `--dump-config`，失败时经官方 remove/add 路径回滚。Windows 路径通过受限的 `cmd.exe` 参数调用可信 `dsh.cmd`。
-- Doctor Launcher 在 `autoMigrate`（默认开启）且目标包可用时，在启动 DSH 前执行迁移。它先安装当前聚合包再移除旧包，避免 profile 出现无可解析聚合包的中间状态；备份 `package.json` 与 `pnpm-lock.yaml`，排序 bundles，验证组合后的 profile 后才启动真实 DSH。registry 目标即使当前包已存在也会安装到精确版本；迁移失败后不会重新加回已移除的旧包；如果迁移前新旧包同时存在，回滚保留当前包。Doctor 使用同一受限 `cmd.exe` 参数契约调用 Windows `dsh.cmd`。共享迁移映射位于 `shared/host/legacy-migration.ts`，同步到两个消费端。
+- Doctor Launcher 那一半已随 [dsh-doctor 的移除](../simplification/2026-09-23-remove-dsh-doctor-and-describe-image.md)于 2026-09-23 离开家族，因此 plugin-manager 更新路径是唯一随版本发布的迁移入口。迁移映射位于 `packages/dsh-plugin-manager/src/host/legacy-migration.ts`；[共享模块合并](../simplification/2026-10-10-single-consumer-shared-modules-consolidated.md)确认它已无第二个消费端，于是以该包为唯一的家。
 
-Doctor 新增 `autoMigrate` 设置，默认开启且只对已知 `@linxin666/dsh-web-ui-all` -> `@linxin666/dsh-web-all` 映射生效；`autoRepair` 对常规修复保持原有默认值。
+当初用于控制启动路径的 Doctor `autoMigrate` 设置已随 Doctor 包离开家族，迁移不再由任何设置门控。
 
 ## Alternatives considered
 
@@ -25,8 +25,8 @@ Doctor 新增 `autoMigrate` 设置，默认开启且只对已知 `@linxin666/dsh
 
 ## Consequences
 
-- 启用 Doctor 的现有用户不会看到迁移提示，首次受保护启动会在 DSH 启动前完成迁移与验证。
-- 直接执行 `dsh web` 会绕过 Doctor Launcher，不属于零操作路径。
+- 迁移现在由 plugin-manager 更新路径执行，因此要等 profile 能启动到 GUI 才可达；无法启动的 profile 不再有启动期迁移。
+- 直接执行 `dsh web` 不受影响：迁移在 GUI 更新路径内执行，而不是在宿主启动前。
 - 迁移固定到精确目标版本；除非当前包可用且目标 bundle 组合成功，否则不会移除旧包。
 - 旧 npm 包在双发布窗口内继续存在，随后 deprecate。
 - 本版本说明已明确：当前具备全新安装、单元测试和 Linux 挂载 smoke 证据，但没有上一版本到目标版本的真实升级演练，也没有 macOS / Windows 真实升级矩阵；人工恢复使用 profile 备份、安装目标包、移除旧包和 `--dump-config` 验证。

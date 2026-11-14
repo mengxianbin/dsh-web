@@ -6,37 +6,47 @@
  * verify per-namespace coverage against every package's zh keys.
  * @module @linxin666/dsh-i18n/client/ru
  */
-import { ru as doctor } from './doctor.ts'
+import { ru as agents } from './agents.ts'
+import { ru as browserView } from './browser-view.ts'
 import { ru as gitGraph } from './git-graph.ts'
+import { ru as liangshen } from './liangshen.ts'
 import { ru as market } from './market.ts'
-import { ru as modelCapabilities } from './model-capabilities.ts'
+import { ru as messageEdit } from './message-edit.ts'
 import { ru as pet } from './pet.ts'
 import { ru as pluginManager } from './plugin-manager.ts'
+import { ru as presetCenter } from './preset-center.ts'
+import { ru as remoteBridge } from './remote-bridge.ts'
 import { ru as remoteWebUi } from './remote-web-ui.ts'
 import { ru as sessionId } from './session-id.ts'
 import { ru as sessionArchive } from './session-archive.ts'
 import { ru as skillExplorer } from './skill-explorer.ts'
 import { ru as ssh } from './ssh.ts'
 import { ru as taskBoard } from './task-board.ts'
-import { ru as describeImage } from './tool-describe-image.ts'
+import { ru as taskBoardGithub } from './task-board-github.ts'
+import { ru as update } from './update.ts'
 import { ru as usage } from './usage.ts'
 import { ru as webSettings } from './web-settings.ts'
 
 /** ru dictionaries keyed by the locale namespace each source package registers. */
 export const ruDictionaries: Record<string, Record<string, string>> = {
-  'doctor': doctor,
+  'dsh-agents': agents,
+  'browser-view': browserView,
   'git-graph': gitGraph,
+  'liangshen': liangshen,
   'dsh-web-ui-market': market,
-  'model-caps': modelCapabilities,
+  'message-edit': messageEdit,
   'pet': pet,
   'settings.pluginManager': pluginManager,
+  'dsh-web-ui-preset-center': presetCenter,
   'remote': remoteWebUi,
+  'remote-bridge': remoteBridge,
   'session-id': sessionId,
   'dsh-web-ui-session-archive': sessionArchive,
   'dsh-skill-explorer': skillExplorer,
   'dsh-ssh': ssh,
   'task-board': taskBoard,
-  'describe-image': describeImage,
+  'task-board-github': taskBoardGithub,
+  'update': update,
   'dsh-web-ui-usage': usage,
   'web-ui-plugins': webSettings,
 }

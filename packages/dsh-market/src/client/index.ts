@@ -9,37 +9,96 @@
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-import type { SettingsScope, SettingsScopeSpec } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { ConfigForm } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { MarketCardController, MarketSection, type MarketSettings } from './MarketCard.tsx'
+import {
+  MarketCardController,
+  MarketSection,
+  type MarketSettings,
+  type WorkshopPanelKeyProps,
+  type WorkshopPanelOwnerProps,
+} from './MarketCard.tsx'
+import { createExternalLinkOpener } from './external-link.ts'
+import { createServedEntryForm } from './settings-entry-form.ts'
 import { en, zh, type MarketKey } from './locales.ts'
 import { bridgePluginManager } from './plugin-manager-bridge.ts'
+import { bridgeNativePluginFaces } from './native-plugin-faces.ts'
 import { reportDailyHeartbeat } from './telemetry.ts'
+import { installWorkshopSection } from './extension-seat.ts'
 
-export type { MarketCardProps, MarketSectionProps } from './MarketCard.tsx'
+export type {
+  MarketCardProps,
+  MarketSectionProps,
+  WorkshopPanelKeyProps,
+  WorkshopPanelOwnerProps,
+  WorkshopPresetRecord,
+} from './MarketCard.tsx'
 export type { InstalledPluginItem, InstallProgressItem, PluginManagerService } from './plugin-manager-bridge.ts'
+export type {
+  NativePluginFacesSnapshot,
+  NativePluginManagerService,
+  NativeRemoteResult,
+  PluginNavigationService,
+} from './native-plugin-faces.ts'
 
+/**
+ * Settings namespace the store card edits: the family identity of this plugin's
+ * own settings form, and the locale namespace this half registers.
+ */
 const MARKET_NS = 'dsh-web-ui-market'
-const SECTION_ID = 'dsh-workshop'
+
+/** Profile entry id the family aggregate's generated row carries. */
+const AGGREGATE_ENTRY_ID = 'web-ui-market'
+
+/** Profile entry ids this package's patch rows carry, most likely first. */
+const MARKET_ENTRY_IDS: readonly string[] = [AGGREGATE_ENTRY_ID, 'ui-market', MARKET_NS]
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Market card copy. */
     'dsh-web-ui-market': MarketKey
   }
+
+  interface SlotMap {
+    /**
+     * Asset-kind panels contributed by their owning plugin; the store card
+     * declares the slot and renders one cell per contributed kind. Shape
+     * mirrors the contributor's declaration (both sides declare it
+     * identically, the same way the family plugin cards share
+     * `web-ui.plugin.item`).
+     */
+    'dsh-workshop.panel': {
+      kind: 'keyed'
+      scope: 'root'
+      owner: WorkshopPanelOwnerProps
+      keyProps: { preset: WorkshopPanelKeyProps }
+    }
+  }
 }
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
-    /** Optional rc.6 compatibility binder provided by dsh-web-settings. */
-    webUiSettings?: { bind<S>(spec: SettingsScopeSpec<S>): SettingsScope<S> }
+    /** Optional family settings binder provided by dsh-web-settings. */
+    webUiSettings?: { bind<T>(spec: MarketFormSpec<T>): ConfigForm<T> }
   }
 }
 
-export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote']
+/**
+ * Domain-owned description of one family settings namespace a card binds. The
+ * 0.1.7 client keeps this shape private (`ConfigFormSpec` is not exported), so
+ * the optional binder seat is declared structurally instead.
+ */
+interface MarketFormSpec<T> {
+  /** Settings namespace the card edits. */
+  namespace: string
+  /** Narrow one wire section; undefined keeps the last accepted value. */
+  decode?: (section: unknown) => T | undefined
+}
+
+export const inject = ['slots', 'locale', 'connection', 'configForms', 'remote']
 
 /** Register the market section and the plugin-manager bridge. */
 export function apply(ctx: ClientContext): void {
@@ -57,32 +116,32 @@ export function apply(ctx: ClientContext): void {
 
   bridgePluginManager(ctx)
 
-  const binder = ctx.get('webUiSettings') ?? ctx.settingsScope
-  const settingsScope = binder.bind<MarketSettings>({ namespace: MARKET_NS })
-  const controller = new MarketCardController(settingsScope)
+  // The official surfaces the store reuses: the in-process plugin manager's
+  // remote face (the install writer, and the only writer on the packaged
+  // Desktop client) and the Plugins page's navigation face it hands management
+  // over to. Both stay optional; without them the store keeps the family face
+  // and the copy-command degradation.
+  bridgeNativePluginFaces(ctx)
 
-  // The Workshop: one first-level settings section rendering the store
-  // card. Clients install skins / pets / plugins here; management of
-  // installed items lives in their own first-level sections (Skin Center,
-  // Pet) and in the official Plugins settings section (plugin manager).
-  // The section entry owns the controller: unregistering it (fiber
-  // disposal, hot reload) releases the scope subscription through dispose.
-  ctx.slots.inject('settings.section', () => {
-    try {
-      const unregister = ctx.slots.register({
-        name: 'settings.section',
-        id: SECTION_ID,
-        order: 150,
-        label: () => ctx.locale.bind(MARKET_NS)('settings.title'),
-        locale: MARKET_NS,
-        inject: () => controller.inject(),
-      }, MarketSection)
-      return () => {
-        unregister()
-        controller.dispose()
-      }
-    } catch {
-      return () => {}
-    }
+  // The family binder resolves the family namespace to the profile entry id
+  // the Host serves the store card's configuration under. Without it the shared
+  // forms service is addressed on the entry id the describe mirror justifies,
+  // rebound as soon as the mirror answers — the bare namespace is not an entry
+  // id on an aggregate install, and binding it failed every save.
+  const binder = ctx.get('webUiSettings')
+  const form = binder !== undefined
+    ? binder.bind<MarketSettings>({ namespace: MARKET_NS })
+    : createServedEntryForm<MarketSettings>({ forms: ctx.configForms, entryIds: MARKET_ENTRY_IDS })
+  const controller = new MarketCardController(form)
+
+  // The controller belongs to apply(), not a seat: migrating between the
+  // integrated TAB and the standalone section must not reset its form.
+  ctx.effect(() => () => { controller.dispose() }, 'dsh-web-ui-market: settings form')
+  const disposeSection = installWorkshopSection(ctx, {
+    label: () => ctx.locale.bind(MARKET_NS)('settings.title'),
+    locale: MARKET_NS,
+    inject: () => controller.inject(createExternalLinkOpener(ctx)),
+    component: MarketSection,
   })
+  ctx.effect(() => disposeSection, 'dsh-web-ui-market: settings seat')
 }

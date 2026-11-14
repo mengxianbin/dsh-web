@@ -5,9 +5,10 @@ import { ruDictionaries } from '../src/client/ru/index.ts'
 const CJK_RE = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/
 
 describe('ru dictionaries internal consistency', () => {
-  it('covers fifteen non-empty namespaces with string values', () => {
+  it('covers twenty non-empty namespaces with string values', () => {
+    // One per family package that ships a client locale namespace.
     const namespaces = Object.keys(ruDictionaries)
-    expect(namespaces).toHaveLength(15)
+    expect(namespaces).toHaveLength(20)
     for (const [ns, dict] of Object.entries(ruDictionaries)) {
       const keys = Object.keys(dict)
       expect(keys.length, ns).toBeGreaterThan(0)

@@ -1,0 +1,87 @@
+/* The `ui.present` transcript card: a header line, the page in a controlled
+   frame, and the one sentence telling the operator where an answer happens.
+   Colour comes only from the theme's semantic aliases; geometry and type resolve
+   through the scale below, so no element carries a one-off literal (KFL R4
+   centralizes the value, A3 keeps one spacing rhythm, H5 holds the card to two
+   type sizes: 13 for the header title and the page, 12 for state and notice). */
+
+.card,
+.row {
+  --card-space-1: 4px;
+  --card-space-2: 8px;
+  --card-space-3: 12px;
+  --card-title-size: 13px;
+  --card-title-line: 20px;
+  --card-state-size: 12px;
+  --card-state-line: 18px;
+  --card-radius: 8px;
+  --card-edge: 1px;
+  --card-default-height: 320px;
+}
+
+/* The header keeps one box across both states: the badge sits at the trailing
+   edge, so a title that grows or disappears never moves it. */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: var(--card-space-1) 0;
+  overflow: hidden;
+  border: var(--card-edge) solid var(--dsw-alias-border-l2);
+  border-radius: var(--card-radius);
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--card-space-2);
+  min-height: calc(var(--card-title-line) + var(--card-space-2) * 2);
+  padding: var(--card-space-2) var(--card-space-3);
+  border-bottom: var(--card-edge) solid var(--dsw-alias-border-l2);
+}
+
+.title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  font-size: var(--card-title-size);
+  line-height: var(--card-title-line);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--card-state-size);
+  line-height: var(--card-state-line);
+}
+
+/* The frame is a block of its own: its height is measured inside the sandboxed
+   document and applied here, and the presenter's suggestion only covers the
+   first paint. */
+.frame {
+  display: block;
+  width: 100%;
+  min-height: var(--card-default-height);
+  border: 0;
+  background: transparent;
+}
+
+.notice {
+  margin: 0;
+  padding: var(--card-space-2) var(--card-space-3);
+  border-top: var(--card-edge) solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: var(--card-state-size);
+  line-height: var(--card-state-line);
+}
+
+/* The neutral line of a call that carries no page: the keyed entry owns this
+   row, so it keeps a plain sentence rather than leaving the cell blank. */
+.row {
+  margin: var(--card-space-1) 0;
+}

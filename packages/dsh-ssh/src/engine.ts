@@ -51,6 +51,16 @@ export class SshEngine {
     this.sweepTimer.unref?.()
   }
 
+  /**
+   * Change the pre-ready ceiling (TCP connect + key exchange + user
+   * authentication) for connections opened from now on. A pooled connection
+   * keeps serving until it reconnects, because the ceiling governs the
+   * connect path only.
+   */
+  setConnectTimeout(timeoutMs: number): void {
+    this.opts.connectTimeoutMs = timeoutMs
+  }
+
   // ---------------------------------------------------------------- config
 
   /** Secret-free host list (filtered by the optional query). */
@@ -74,8 +84,8 @@ export class SshEngine {
   // ------------------------------------------------------------ exec
 
   /** Run one command on `alias` (reusing the pooled connection). */
-  async exec(alias: string, command: string, timeoutMs?: number): Promise<ExecResult> {
-    return execCommand(this, alias, command, timeoutMs)
+  async exec(alias: string, command: string, timeoutMs?: number, signal?: AbortSignal): Promise<ExecResult> {
+    return execCommand(this, alias, command, timeoutMs, signal)
   }
 
   /** Run one command against many hosts concurrently. */
@@ -86,6 +96,7 @@ export class SshEngine {
     tags?: string[]
     timeoutMs?: number
     maxWorkers?: number
+    signal?: AbortSignal
   }): Promise<ClusterResult[]> {
     return cluster(this, options)
   }

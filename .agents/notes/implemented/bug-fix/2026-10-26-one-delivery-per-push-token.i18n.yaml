@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-26-one-delivery-per-push-token.md: 2b5090d5d4803d6ffb8e2fdaa82c044b0cc981d4
+2026-10-26-one-delivery-per-push-token.zh.md: 01b3b2f5c2274c837aba74568da4ed507a3f7063

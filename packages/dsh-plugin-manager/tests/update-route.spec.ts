@@ -60,6 +60,21 @@ function updateHandler(
   return { handler, update, migrate }
 }
 
+/**
+ * Write a `@deepseek-ai/dsh` package.json declaring `version` and return its
+ * absolute path — the running installation's own manifest, which is what the
+ * launcher publishes as the profile's install anchor.
+ * @param version - the version the manifest declares.
+ * @returns the manifest path.
+ */
+function installedDshManifest(version: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'plugin-manager-installed-dsh-'))
+  tempDirs.push(dir)
+  const manifest = join(dir, 'package.json')
+  writeFileSync(manifest, JSON.stringify({ name: '@deepseek-ai/dsh', version }))
+  return manifest
+}
+
 function checkUpdatesHandler(
   facts: ProfileFacts,
   fetchManifest: (name: string) => Promise<RegistryVersionManifest | undefined>,
@@ -82,6 +97,31 @@ describe('gateway update route', () => {
     expect(captured.status()).toBe(200)
     expect(captured.body()).toEqual({ jobId: 'job-1' })
     expect(update).toHaveBeenCalledWith('dsh-memoir', '1.1.0')
+  })
+
+  it('user update check asks npm for an uncompressed registry manifest', async () => {
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    // Given the alpha.2 host fetch cannot decode a compressed body, so the
+    // default registry probe (no injected fetchManifest) must ask for identity.
+    const calls: Array<RequestInit | undefined> = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      calls.push(init)
+      return new Response(JSON.stringify({ version: '1.1.0' }), { status: 200 })
+    }))
+    try {
+      const gateway = { update: vi.fn(() => ({ jobId: 'job-1' })), migrate: vi.fn(() => ({ jobId: 'job-1' })), withMutationLock: async <T>(task: () => Promise<T>) => await task() } as unknown as CliGateway
+      const handler = makeGatewayRoutes({ facts, gateway, cliAvailable: () => true, dshVersion: async () => undefined })
+        .find(route => route.path === '/api/plugin-manager/update')!.handler
+      const captured = response()
+      // When the update route resolves the latest version.
+      await handler(request({ id: 'dsh-memoir' }), captured.res)
+      // Then the probe requested identity encoding and the update proceeded.
+      expect(new Headers(calls[0]?.headers).get('accept-encoding')).toBe('identity')
+      expect(captured.status()).toBe(200)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('starts a migration job for the legacy aggregate', async () => {
@@ -229,18 +269,158 @@ describe('gateway update route', () => {
     const unknownResponse = response()
     await unknownHost.handler(request({ id: 'dsh-memoir' }), unknownResponse.res)
     expect(unknownResponse.status()).toBe(412)
-    expect(unknownResponse.body()).toMatchObject({ error: expect.stringContaining('cannot verify the DSH version') })
+    // The copy must not blame a CLI the host may not even have: an unreadable
+    // host version is "we could not check", not "your DSH is too old" (#1819).
+    expect(unknownResponse.body()).toMatchObject({ error: expect.stringContaining('cannot verify the running DSH version') })
     expect(unknownHost.update).not.toHaveBeenCalled()
 
-    const unsupported = updateHandler(
+    // A readable host version does not make an unparsable declaration a
+    // "too old" verdict: nothing was compared, so the copy names the
+    // declaration instead of sending the user to upgrade a DSH that may
+    // already satisfy it (issue #1899).
+    const unparsable = updateHandler(
       facts,
-      async () => manifest('1.1.0', { dsh: { engines: { dsh: '^0.1.0-rc.8' } } }),
+      async () => manifest('1.1.0', { dsh: { engines: { dsh: 'not-a-range' } } }),
       async () => '0.1.0-rc.7',
     )
-    const unsupportedResponse = response()
-    await unsupported.handler(request({ id: 'dsh-memoir' }), unsupportedResponse.res)
-    expect(unsupportedResponse.status()).toBe(412)
-    expect(unsupported.update).not.toHaveBeenCalled()
+    const unparsableResponse = response()
+    await unparsable.handler(request({ id: 'dsh-memoir' }), unparsableResponse.res)
+    expect(unparsableResponse.status()).toBe(412)
+    expect(unparsableResponse.body()).toMatchObject({ error: expect.stringContaining('cannot verify the running DSH version') })
+    expect(unparsableResponse.body()).toMatchObject({ error: expect.stringContaining('not-a-range') })
+    expect(unparsable.update).not.toHaveBeenCalled()
+  })
+
+  it('operator gets an update gated by a multi-form range the way the official boot gate decides it', async () => {
+    // Given a release declaring dsh-context's two-alternative engines range
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const declared = '>=0.1.7-rc.2 || >=0.2.0-rc.2'
+
+    // When the host sits on the newer rc line
+    const allowed = updateHandler(facts, async () => manifest('1.1.0', { dsh: { engines: { dsh: declared } } }), async () => '0.2.1-rc.3')
+    const allowedResponse = response()
+    await allowed.handler(request({ id: 'dsh-memoir' }), allowedResponse.res)
+
+    // Then the update runs instead of being rejected as unverifiable
+    expect(allowedResponse.status()).toBe(200)
+    expect(allowed.update).toHaveBeenCalledWith('dsh-memoir', '1.1.0')
+
+    // When the host predates every alternative that range offers
+    const blocked = updateHandler(facts, async () => manifest('1.1.0', { dsh: { engines: { dsh: declared } } }), async () => '0.1.0-rc.8')
+    const blockedResponse = response()
+    await blocked.handler(request({ id: 'dsh-memoir' }), blockedResponse.res)
+
+    // Then the gate blocks it and names the declaration and the running version
+    expect(blockedResponse.status()).toBe(412)
+    expect(blockedResponse.body()).toMatchObject({ error: expect.stringContaining('requires DSH ' + declared) })
+    expect(blockedResponse.body()).toMatchObject({ error: expect.stringContaining('current DSH 0.1.0-rc.8') })
+    expect(blocked.update).not.toHaveBeenCalled()
+  })
+
+  it('operator gets an update allowed from the running installation manifest with no CLI at all (issue #1819)', async () => {
+    // Given a packaged-Desktop-shaped host: no dsh anywhere on PATH and no
+    // CLI probe that could ever answer, but a published install anchor whose
+    // manifest declares the running DSH version
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const installAnchor = installedDshManifest('0.2.0-rc.2')
+    const update = vi.fn(() => ({ jobId: 'job-1' }))
+    const gateway = { update, usesNativeWriter: () => true, withMutationLock: async <T>(task: () => Promise<T>) => await task() } as unknown as CliGateway
+    // No dshVersion seam: this case must be answered by the install anchor, and
+    // the CLI probe that would otherwise run cannot succeed on this host.
+    const handler = makeGatewayRoutes({
+      facts,
+      gateway,
+      cliAvailable: () => false,
+      fetchManifest: async () => manifest('1.1.0', { dsh: { engines: { dsh: '>=0.2.0-rc.2' } } }),
+      installAnchor,
+    }).find(route => route.path === '/api/plugin-manager/update')!.handler
+    const captured = response()
+
+    // When the user applies the update
+    await handler(request({ id: 'dsh-memoir' }), captured.res)
+
+    // Then the requirement is satisfied by the in-process fact alone: the
+    // update is not blocked even though no CLI exists to ask
+    expect(captured.status()).toBe(200)
+    expect(update).toHaveBeenCalledWith('dsh-memoir', '1.1.0')
+  })
+
+  it('operator gets the update still blocked when the running installation manifest is genuinely too old', async () => {
+    // Given the same no-CLI host whose install anchor declares an older DSH
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const gateway = { update: vi.fn(() => ({ jobId: 'job-1' })), usesNativeWriter: () => true, withMutationLock: async <T>(task: () => Promise<T>) => await task() } as unknown as CliGateway
+    const handler = makeGatewayRoutes({
+      facts,
+      gateway,
+      cliAvailable: () => false,
+      fetchManifest: async () => manifest('1.1.0', { dsh: { engines: { dsh: '>=0.3.0' } } }),
+      installAnchor: installedDshManifest('0.2.0-rc.2'),
+    }).find(route => route.path === '/api/plugin-manager/update')!.handler
+    const captured = response()
+
+    // When the user applies the update
+    await handler(request({ id: 'dsh-memoir' }), captured.res)
+
+    // Then the gate still fails closed, and now names the version it read
+    expect(captured.status()).toBe(412)
+    expect(captured.body()).toMatchObject({ error: expect.stringContaining('current DSH 0.2.0-rc.2') })
+  })
+
+  it('operator gets the running installation version reported on the update row when no CLI exists', async () => {
+    // Given the same no-CLI host with a satisfying install anchor
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const gateway = { update: vi.fn(() => ({ jobId: 'job-1' })), withMutationLock: async <T>(task: () => Promise<T>) => await task() } as unknown as CliGateway
+    const handler = makeGatewayRoutes({
+      facts,
+      gateway,
+      cliAvailable: () => false,
+      fetchManifest: async () => manifest('1.1.0', { dsh: { engines: { dsh: '>=0.2.0-rc.2' } } }),
+      installAnchor: installedDshManifest('0.2.0-rc.2'),
+    }).find(route => route.path === '/api/plugin-manager/check-updates')!.handler
+    const captured = response()
+
+    // When the user checks for updates
+    await handler(request({}), captured.res)
+
+    // Then the row is compatible and carries the version the verdict used, so
+    // the browser can tell "too old" apart from "could not be checked"
+    expect(captured.body()).toEqual({
+      updates: [{
+        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0',
+        requiresDsh: '>=0.2.0-rc.2', compatible: true, hostVersion: '0.2.0-rc.2',
+      }],
+    })
+  })
+
+  it('operator gets no host version when neither the installation manifest nor the CLI can answer', async () => {
+    // Given a host that publishes an unreadable anchor and has no CLI
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const gateway = { update: vi.fn(() => ({ jobId: 'job-1' })), withMutationLock: async <T>(task: () => Promise<T>) => await task() } as unknown as CliGateway
+    const handler = makeGatewayRoutes({
+      facts,
+      gateway,
+      cliAvailable: () => false,
+      fetchManifest: async () => manifest('1.1.0', { dsh: { engines: { dsh: '>=0.2.0-rc.2' } } }),
+      installAnchor: join(dir, 'absent', 'package.json'),
+    }).find(route => route.path === '/api/plugin-manager/check-updates')!.handler
+    const captured = response()
+
+    // When the user checks for updates
+    await handler(request({}), captured.res)
+
+    // Then the row is blocked but carries no hostVersion, which is exactly the
+    // signal the browser renders as "cannot confirm the local DSH version"
+    expect(captured.body()).toEqual({
+      updates: [{
+        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0',
+        requiresDsh: '>=0.2.0-rc.2', compatible: false,
+      }],
+    })
   })
 
   it('fails open only when the manifest declares no DSH requirement', async () => {
@@ -268,7 +448,61 @@ describe('gateway check-updates route', () => {
     expect(captured.status()).toBe(200)
     expect(captured.body()).toEqual({
       updates: [{
-        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0', requiresDsh: '>=0.1.0-rc.8', compatible: false,
+        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0',
+        requiresDsh: '>=0.1.0-rc.8', compatible: false, hostVersion: '0.1.0-rc.7',
+      }],
+    })
+  })
+
+  it('operator gets a blocked row without a host version when the declaration cannot be parsed', async () => {
+    // Given a host that reads its own version fine and a release whose
+    // engines.dsh is not a node-semver range
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const handler = checkUpdatesHandler(
+      facts,
+      async () => manifest('1.1.0', { dsh: { engines: { dsh: 'nonsense' } } }),
+      async () => '0.2.1-rc.3',
+    )
+    const captured = response()
+
+    // When the user checks for updates
+    await handler(request({}), captured.res)
+
+    // Then the row is blocked by the declaration it cannot read, and carries
+    // no hostVersion: that absence is exactly the signal the browser renders as
+    // "cannot verify", so the user is not told to upgrade a DSH the host never
+    // found to be too old (issue #1899)
+    expect(captured.body()).toEqual({
+      updates: [{
+        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0',
+        requiresDsh: 'nonsense', compatible: false,
+      }],
+    })
+  })
+
+  it('operator gets a blocked row without a host version when only part of a declaration parses', async () => {
+    // Given the same readable host and a declaration whose second alternative
+    // is garbage, so the whole range is unparsable
+    const { facts, dir } = profile('^1.0.0')
+    tempDirs.push(dir)
+    const declared = '>=0.1.0-rc.8 || garbage'
+    const handler = checkUpdatesHandler(
+      facts,
+      async () => manifest('1.1.0', { dsh: { engines: { dsh: declared } } }),
+      async () => '0.2.1-rc.3',
+    )
+    const captured = response()
+
+    // When the user checks for updates
+    await handler(request({}), captured.res)
+
+    // Then the raw declaration is passed through for display and the row is
+    // blocked without a hostVersion, exactly as for a wholly unparsable one
+    expect(captured.body()).toEqual({
+      updates: [{
+        id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0',
+        requiresDsh: declared, compatible: false,
       }],
     })
   })
@@ -287,7 +521,7 @@ describe('gateway check-updates route', () => {
       updates: [{
         id: '@linxin666/dsh-web-ui-all', current: '0.3.2', latest: '0.3.3',
         kind: 'migrate', target: '@linxin666/dsh-web-all', targetVersion: '0.3.3',
-        requiresDsh: '>=0.1.1-rc.1', compatible: true,
+        requiresDsh: '>=0.1.1-rc.1', compatible: true, hostVersion: '0.1.1-rc.2',
       }],
     })
   })
@@ -314,7 +548,7 @@ describe('gateway check-updates route', () => {
     expect(captured.body()).toEqual({ updates: [{ id: 'dsh-memoir', current: '1.0.0', latest: '1.1.0' }] })
   })
 
-  it('marks a declared requirement incompatible when the host version is unknown', async () => {
+  it('operator gets no host version on a blocked row when the running host cannot be read', async () => {
     const { facts, dir } = profile('^1.0.0')
     tempDirs.push(dir)
     const handler = checkUpdatesHandler(facts, async () => manifest('1.1.0', { dsh: { engines: { dsh: '>=0.1.0-rc.8' } } }), async () => undefined)

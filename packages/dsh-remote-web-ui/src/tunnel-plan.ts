@@ -28,14 +28,21 @@ export type TunnelPlan =
  * token AND a valid public hostname (the token does not carry the hostname,
  * so the QR base and the fence trust would have no source without it);
  * otherwise no tunnel and the manual public base applies.
+ *
+ * The quick target URL names the local webServer port, so a plan made before
+ * the listener binds cannot be quick: it comes back `off` and the caller —
+ * which can observe the port settle — re-plans. The planner itself never
+ * emits an `http://127.0.0.1:undefined` target.
  * @param value - the resolved settings slice that drives the tunnel.
- * @param port - the local webServer port the tunnel forwards to.
+ * @param port - the local webServer port the tunnel forwards to (undefined
+ *   before the listener binds).
  */
 export function tunnelPlanOf(
   value: { autoTunnel?: boolean; tunnelToken?: string; publicBaseUrl?: string },
-  port: number,
+  port: number | undefined,
 ): TunnelPlan {
   if (value.autoTunnel === true) {
+    if (port === undefined) return { mode: 'off' }
     const ignored: Array<'tunnelToken' | 'publicBaseUrl'> = []
     if (value.tunnelToken !== undefined && value.tunnelToken !== '') ignored.push('tunnelToken')
     if (value.publicBaseUrl !== undefined && value.publicBaseUrl !== '') ignored.push('publicBaseUrl')

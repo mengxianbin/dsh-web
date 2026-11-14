@@ -1,16 +1,15 @@
 /**
- * The git branch selector chip for blank sessions. It mounts in the selector
- * context hole (`conversation.input.selector.context`) beside the official
- * workspace selector. On shells that dropped the hole, it uses
- * `conversation.input.dock` only for the blank-session hero phase and lifts
- * itself into the official hero chip row. It is intentionally absent while a
- * session is running.
+ * The git branch selector chip for blank sessions. It mounts on the composer's
+ * input dock (`conversation.input.dock`) and, in the blank-session hero phase,
+ * lifts itself into the official hero chip row immediately after the
+ * agent-preset seat and before the row's trailing options group. It is
+ * intentionally absent while a session is running.
  * @module dsh-git-graph/client/chips/BranchChip
  */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { IconBranchOutline16 } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconBranchOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { BranchesView, RepoStatus } from '../../core/types.ts'
 import type { GitGraphInjected } from '../index.ts'
@@ -22,9 +21,9 @@ import { WorktreeManager } from '../worktrees/WorktreeManager.tsx'
 import { GraphDialog } from '../graph/GraphDialog.tsx'
 import css from './context.module.css'
 
-/** Full props of the branch chip: either seat's runtime share (the session-maybe context hole or the dock fallback's blank-session hero) + the git-graph inject face + the locale seat. */
+/** Full props of the branch chip: the input dock's runtime share (the blank-session hero) + the git-graph inject face + the locale seat. */
 export type BranchChipProps =
-  (PropsRuntime<'conversation.input.selector.context'> | PropsRuntime<'conversation.input.dock'>)
+  PropsRuntime<'conversation.input.dock'>
   & GitGraphInjected
   & PropsLocale<'git-graph'>
 
@@ -95,6 +94,20 @@ function findHeroRow(anchor: HTMLElement | null): HTMLElement | null {
 }
 
 /**
+ * Resolve the hero row's trailing options group. That group carries
+ * `margin-left: auto`, so every later sibling is pushed to the row's right
+ * edge: a chip appended after it would sit above the composer card's top-right
+ * corner instead of beside the agent-preset seat.
+ */
+function findHeroTrailingGroup(row: HTMLElement): HTMLElement | null {
+  for (const child of Array.from(row.children)) {
+    if (!(child instanceof HTMLElement)) continue
+    if ((child.getAttribute('class') ?? '').includes('heroOptions')) return child
+  }
+  return null
+}
+
+/**
  * The git branch selector chip for blank sessions.
  * @param props - the composed entry props of whichever seat it mounted in.
  */
@@ -108,15 +121,12 @@ export function BranchChip(props: BranchChipProps) {
     const sessions = state as { byId?: Record<string, { blank?: boolean }> }
     return sessions.byId?.[sessionId]?.blank === true
   })
-  // The dock seat carries the composer snapshot. It exposes the selector
-  // only in the blank hero phase; the session-maybe context seat uses the
-  // session baseline's blank flag instead.
-  const dockSeat = 'session' in props && 'input' in props
-  const sessionSnapshot = dockSeat ? props.session : undefined
+  // The dock seat carries the composer snapshot and exposes the selector only
+  // in the blank hero phase.
+  const sessionSnapshot = props.session
   // 0.1.2 cohort: the composer phase machine is gone from the snapshot; the
   // blank empty-log mirror plus open state covers the same show-selector seat.
   const heroSeat = sessionSnapshot?.blank === true && (sessionSnapshot.openState === 'open' || blankSession === true)
-  const showBranchSelector = dockSeat ? heroSeat : blankSession
   const stockLightTheme = useStockLightTheme()
 
   /** Repository state: undefined = loading, null = not a repository, else the snapshot. */
@@ -130,6 +140,7 @@ export function BranchChip(props: BranchChipProps) {
   const [worktreeManageOpen, setWorktreeManageOpen] = useState(false)
   const [heroRow, setHeroRow] = useState<HTMLElement | null>(null)
   const anchorRef = useRef<HTMLDivElement | null>(null)
+  const chipRef = useRef<HTMLDivElement | null>(null)
 
   // Hero-phase placement: the rc.6 shell renders the dock as its own row
   // between the official hero chip row and the composer card. In the blank
@@ -153,6 +164,25 @@ export function BranchChip(props: BranchChipProps) {
     return () => { observer.disconnect() }
   }, [heroSeat, repo !== undefined && repo !== null])
 
+  // The row ends with an options group that carries `margin-left: auto`, so an
+  // appended chip lands at the far right of the selector row. Keep the portaled
+  // chip immediately before that group: directly after the agent-preset seat.
+  useLayoutEffect(() => {
+    if (!heroSeat || heroRow === null) return undefined
+    const place = (): void => {
+      const anchor = chipRef.current
+      if (anchor === null || anchor.parentElement !== heroRow) return
+      const trailing = findHeroTrailingGroup(heroRow)
+      if (trailing === null || anchor.nextElementSibling === trailing) return
+      heroRow.insertBefore(anchor, trailing)
+    }
+    place()
+    if (typeof MutationObserver === 'undefined') return undefined
+    const observer = new MutationObserver(place)
+    observer.observe(heroRow, { childList: true })
+    return () => { observer.disconnect() }
+  }, [heroSeat, heroRow, repo])
+
   const refetch = useCallback(() => {
     let live = true
     props.repoStatus(sessionId)
@@ -166,11 +196,11 @@ export function BranchChip(props: BranchChipProps) {
   // or start a Git status round trip.
   const lastFocusRefetch = useRef(0)
   useEffect(() => {
-    if (!showBranchSelector) return undefined
+    if (!heroSeat) return undefined
     return refetch()
-  }, [showBranchSelector, refetch])
+  }, [heroSeat, refetch])
   useEffect(() => {
-    if (!showBranchSelector) return undefined
+    if (!heroSeat) return undefined
     const unsubscribe = props.subscribeChanges(sessionId, () => { refetch() })
     const onFocus = (): void => {
       const now = Date.now()
@@ -183,7 +213,7 @@ export function BranchChip(props: BranchChipProps) {
       unsubscribe()
       window.removeEventListener('focus', onFocus)
     }
-  }, [showBranchSelector, props.subscribeChanges, sessionId, refetch])
+  }, [heroSeat, props.subscribeChanges, sessionId, refetch])
 
   const closeCreate = (): void => {
     setCreateOpen(false)
@@ -194,16 +224,16 @@ export function BranchChip(props: BranchChipProps) {
   // above the data-gated returns so the hook order is stable while `repo`
   // settles from undefined (loading) to a snapshot.
   useEffect(() => {
-    if (!showBranchSelector || !branchOpen) return undefined
+    if (!heroSeat || !branchOpen) return undefined
     let live = true
     setBranchesView(null)
     props.branches(sessionId).then((view) => { if (live) setBranchesView(view) })
     return () => { live = false }
-  }, [showBranchSelector, branchOpen, props.branches, sessionId])
+  }, [heroSeat, branchOpen, props.branches, sessionId])
 
   // Active sessions intentionally expose no branch-selection control. Loading
   // and non-repository workspaces likewise render no dead control.
-  if (!showBranchSelector || repo === undefined || repo === null) return null
+  if (!heroSeat || repo === undefined || repo === null) return null
 
   const openBranchPopover = (): void => {
     setBranchOpen(open => !open)
@@ -211,6 +241,7 @@ export function BranchChip(props: BranchChipProps) {
 
   const chipNode = (
     <div
+      ref={chipRef}
       data-gitgraph-chip-anchor
       data-dsh-plugin="git-graph"
       data-dsh-part="chip"
@@ -220,7 +251,7 @@ export function BranchChip(props: BranchChipProps) {
       <div className={css.chipWrap}>
         <Chip
           hero={heroSeat}
-          icon={<IconBranchOutline16 size={14} />}
+          icon={<IconBranchOutlineRegular size={14} />}
           label={repo.branch === '' ? props.t('branch.detached') : repo.branch}
           ariaLabel={props.t('chip.aria.branch')}
           open={branchOpen}

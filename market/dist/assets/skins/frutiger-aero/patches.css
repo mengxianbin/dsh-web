@@ -1,0 +1,247 @@
+/* ============================================================
+   Frutiger Aero · 结构级补丁 (L3)
+   ------------------------------------------------------------
+   气泡装饰层、玻璃边缘、控件发光。全部是叠加型样式：
+   不隐藏元素、不改尺寸、不动布局，只做视觉增强。
+   ============================================================ */
+
+/* ---------- 气泡装饰层 ----------
+   6 枚气泡 / 500px 平铺，用 transform 在合成器线程上浮（只平移纹理，不触发重绘）。
+   元素底部刻意延长一个瓦片高度：平移最多一个瓦片，
+   任意时刻视口都被平铺图案覆盖（t<=500 时元素覆盖 [-t, V+500-t] ⊇ [0, V]），
+   因此不会出现"气泡带子扫过屏幕"的空档。 */
+[data-dsh-skin-layer="background"]::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 -500px 0;   /* 底部多出 500px = 一个瓦片，专为 transform 平移留的余量 */
+  pointer-events: none;
+
+  background-image:
+    /* ① 大 */
+    radial-gradient(circle 84px at 23% 24%,
+      #ffffff14 0%, #ffffff14 55%, #ffffff26 70%, #ffffff40 82%,
+      #ffffff73 92%, #ffffff66 97%, #ffffff00 100%),
+    /* ② 中 */
+    radial-gradient(circle 60px at 58% 36%,
+      #ffffff12 0%, #ffffff12 55%, #ffffff24 70%, #ffffff3d 82%,
+      #ffffff6b 92%, #ffffff5e 97%, #ffffff00 100%),
+    /* ③ 大 */
+    radial-gradient(circle 92px at 33% 70%,
+      #ffffff16 0%, #ffffff16 55%, #ffffff29 70%, #ffffff45 82%,
+      #ffffff7d 92%, #ffffff70 97%, #ffffff00 100%),
+    /* ④ 小 */
+    radial-gradient(circle 44px at 80% 82%,
+      #ffffff10 0%, #ffffff10 55%, #ffffff21 70%, #ffffff38 82%,
+      #ffffff5e 92%, #ffffff52 97%, #ffffff00 100%),
+    /* ⑤ 中 */
+    radial-gradient(circle 56px at 82% 14%,
+      #ffffff11 0%, #ffffff11 55%, #ffffff23 70%, #ffffff3b 82%,
+      #ffffff66 92%, #ffffff59 97%, #ffffff00 100%),
+    /* ⑥ 小 */
+    radial-gradient(circle 48px at 48% 54%,
+      #ffffff13 0%, #ffffff13 55%, #ffffff25 70%, #ffffff3f 82%,
+      #ffffff6e 92%, #ffffff61 97%, #ffffff00 100%);
+
+  background-size: 500px 500px;
+  background-repeat: repeat;
+
+  /* transform 动画：合成器线程，显卡只平移纹理，不触发重绘。
+     20s 平移 500px = 25px/s 上升；位移 = 瓦片整数倍，循环无缝。
+     底部已延长 500px，整个周期视口全覆盖，不会再有"带子"现象。 */
+  animation: aero-bubble-rise 20s linear infinite;
+  /* 零消耗开关：animation-play-state 由 --aero-bubble-motion 控制。
+     运行（running）= 气泡上浮（有显卡合成开销）
+     冻结（paused） = 气泡冻结在当前位置，合成器零每帧工作，面板模糊也只需
+               采样一次静态背景 —— 观感不变只是停下来，几乎零消耗。
+     切换方法：skin.css 里把 --aero-bubble-motion 改为 paused 后刷新。 */
+  animation-play-state: var(--aero-bubble-motion, running);
+}
+
+@keyframes aero-bubble-rise {
+  0%   { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(0, -500px, 0); }
+}
+
+/* 深色模式略微减淡 */
+body[data-ds-dark-theme] [data-dsh-skin-layer="background"]::after,
+[data-ds-dark-theme] [data-dsh-skin-layer="background"]::after {
+  opacity: .7;
+}
+
+/* 尊重系统"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce) {
+  [data-dsh-skin-layer="background"]::after { animation: none; }
+}
+
+/* 根容器不吃背景，让壁纸透上来 */
+[id="root"] {
+  background: none;
+}
+
+/* ---------- 玻璃水光：磨砂 + 高光描边 + 外发光 ----------
+   ★选择器来源★
+   用 CSS 模块的真实类名定位四个壳层区域：
+     .{hash}_sidebarCol     左侧工作区列
+     .{hash}_centerCol      主内容区
+     .{hash}_rightbarCol    右侧工作区列（展开时才存在）
+     .{hash}_frame          窗口框架；其 ::before 就是顶部标题栏条
+                             （height: var(--dsh-windows-titlebar-height)）
+   哈希前缀随 DSH 版本变化，故一律用 [class*=] 通配匹配。
+
+   ★1.1.0：实时磨砂改为"资源内预烘"★
+   1.0.0~1.1.0 的面板磨砂用的是 backdrop-filter。问题在于气泡一直在面板背后上浮：
+   背景每帧都在变，浏览器就只能每帧回读并重算整屏模糊。实测（Intel Iris Xe，
+   1920x1200 最大化、窗口前台、空白会话）3D 引擎占用 82.33%，其中约 59 个点
+   来自这一项 —— 把气泡冻结则只剩 6.50%，即开销几乎全部是"每帧重算"本身。
+   离线像素实测：blur(2px) 对观感的贡献只有 0.28 级（远低于可感知阈值），
+   真正被看见的是 saturate 的冷色偏移。因此 1.1.0 把"2px 柔化 + 冷色 1.06"
+   一次性烘进 assets/aero-sky.webp（并补抖动，太阳区色阶平台占比仍为 1.9%），
+   面板退回清玻璃 + 冷色底，与左侧栏材质统一。
+   结果：3D 引擎 82.33% → 22.79%（-72.3%），整窗观感差异 2~3 级以内。
+   想换回实时磨砂：把 skin.css 的 --aero-frost 设为 blur(1px) saturate(1.10)。
+   （历史）窗口级巨型层 [data-dsh-part="dialog"] 刻意不加模糊：那里约 +22%。 */
+@media (prefers-reduced-transparency: no-preference) {
+  [class*="sidebarCol"] {
+    /* 左侧工作区不使用 backdrop-filter：
+       该区域包含侧栏的收起/展开按钮（绝对定位元素），而 backdrop-filter 会为
+       后代创建包含块，把按钮的定位基准从窗口改为侧栏列——展开时按钮下移压住
+       侧栏标题，收起时被 overflow:hidden 裁掉。因此这里以"清玻璃"呈现，
+       材质差异靠 --dsw-specific-sidebar-fill 的填充浓度表达。 */
+  }
+  [class*="centerCol"] {
+    /* 主聊天区：面积最大的那块。1.1.0 起不再实时模糊，观感由预烘资源承担。 */
+    backdrop-filter: var(--aero-frost, none);
+    -webkit-backdrop-filter: var(--aero-frost, none);
+  }
+  [class*="rightbarCol"] {
+    /* 右侧工作区：原为比主区略实一档的磨砂，现已并入预烘资源。 */
+    backdrop-filter: var(--aero-frost, none);
+    -webkit-backdrop-filter: var(--aero-frost, none);
+  }
+  [class*="_frame"]::before {
+    backdrop-filter: var(--aero-frost, none);
+    -webkit-backdrop-filter: var(--aero-frost, none);
+    /* ★整窗唯一的顶边高光★ 光从上方落在这一整片玻璃的顶边上。
+       1px 亮线 + 约 12px 柔光渐隐（与面板用的是同一套衰减参数，观感统一）。 */
+    box-shadow:
+      inset 0 1px 0 #ffffff59,
+      inset 0 4px 7px -4px #ffffff3d;
+  }
+  body[data-ds-dark-theme] [class*="_frame"]::before {
+    box-shadow:
+      inset 0 1px 0 #ffffff2b,
+      inset 0 4px 7px -4px #ffffff1f;
+  }
+  [role="tooltip"] {
+    backdrop-filter: var(--aero-frost, none);
+    -webkit-backdrop-filter: var(--aero-frost, none);
+  }
+}
+
+/* ---------- 玻璃边缘：整窗一片玻璃 ----------
+   真实玻璃的边缘不是一圈等亮的白线，而是顶边最亮、左边微亮、底边微暗——
+   光从上方来，玻璃才有厚度感。
+   因此只保留【整窗】的两处受光：顶边（_frame::before）与最左边缘（侧栏左缘）；
+   面板之间不加边缘光、不加投影，只以极淡柔光暗示分区——
+   给每个面板各描一圈边会读成"多块玻璃拼接"。 */
+[class*="sidebarCol"] {
+  box-shadow: inset 4px 0 7px -4px #ffffff26;      /* 整窗最左边缘受光 15% */
+}
+
+[class*="centerCol"],
+[class*="rightbarCol"] {
+  /* 极淡接缝：6% 柔光，只"暗示"分区存在，不形成亮线。
+     想要更强的边界感就把透明度往上调；觉得又成亮线了就往下调或改用暗色接缝。 */
+  box-shadow: inset 4px 0 7px -4px #ffffff0f;
+}
+
+body[data-ds-dark-theme] [class*="sidebarCol"] {
+  box-shadow: inset 4px 0 7px -4px #ffffff12;
+}
+
+body[data-ds-dark-theme] [class*="centerCol"],
+body[data-ds-dark-theme] [class*="rightbarCol"] {
+  box-shadow: inset 4px 0 7px -4px #ffffff0a;
+}
+
+/* ---------- 发光按钮 ---------- */
+button,
+[role="button"],
+[role="tab"] {
+  transition: box-shadow .18s ease, background-color .18s ease, border-color .18s ease;
+}
+
+button:not(:disabled):hover,
+[role="button"]:not([aria-disabled="true"]):hover {
+  box-shadow:
+    0 0 0 1px #7FD0F066,
+    0 0 14px #5AC8F559,
+    0 1px 0 #ffffffb3 inset;
+}
+
+button:not(:disabled):active,
+[role="button"]:not([aria-disabled="true"]):active {
+  box-shadow:
+    0 0 0 1px #2E9BD880,
+    0 0 10px #2E9BD866 inset;
+}
+
+body[data-ds-dark-theme] button:not(:disabled):hover,
+body[data-ds-dark-theme] [role="button"]:not([aria-disabled="true"]):hover {
+  box-shadow:
+    0 0 0 1px #5AC8F573,
+    0 0 16px #5AC8F566,
+    0 1px 0 #ffffff1f inset;
+}
+
+/* 主按钮：冰蓝渐变 + 发光环 */
+[class*="primary"][class*="button"],
+button[data-variant="primary"] {
+  background-image: linear-gradient(180deg, #6FD0F5 0%, #2E9BD8 55%, #1E7FBF 100%);
+  border: 1px solid #ffffff8c;
+  text-shadow: 0 1px 0 #0B254033;
+}
+
+[class*="primary"][class*="button"]:hover,
+button[data-variant="primary"]:hover {
+  box-shadow:
+    0 0 0 1px #ffffffb3,
+    0 0 18px #5AC8F580,
+    0 1px 0 #ffffffd9 inset;
+}
+
+/* ---------- 焦点环 / 链接 / 提示 ---------- */
+:focus-visible {
+  outline: 2px solid var(--dsw-alias-state-business-primary);
+  outline-offset: 2px;
+}
+
+a { color: #1E7FBF; }
+a:visited { color: #6A5FA8; }
+
+body[data-ds-dark-theme] a { color: #7FD0F0; }
+body[data-ds-dark-theme] a:visited { color: #A58FDC; }
+
+[role="tooltip"] {
+  background: var(--dsw-alias-tooltip-bg);
+  color: var(--dsw-alias-tooltip-fg);
+  border: 1px solid #ffffff8c;
+}
+
+body[data-ds-dark-theme] [role="tooltip"] {
+  border-color: #5AC8F51f;
+}
+
+/* ===== 变体 a+b：侧栏上部局部垫底 + 文字白色柔光晕 =====
+   对应收编意见：浅色清玻璃侧栏把工作区列表压在云朵图像上、对比度偏低。
+   a 解决"底色是云"（局部背景 std 21.7 → 12.3）；
+   b 再把最差的那几行文字抬起来（p10 6.35 → 8.5）。
+   两条都只在侧栏上、只影响浅色、不换材质、不用 backdrop-filter、不碰两用 token。 */
+[class*="sidebarCol"] {
+  background-image: linear-gradient(180deg, rgba(247,252,255,.68) 0%, rgba(245,251,255,.52) 34%, rgba(242,249,255,0) 58%);
+  text-shadow: 0 0 1px rgba(255,255,255,.92), 0 1px 2px rgba(255,255,255,.74);
+}
+body[data-ds-dark-theme] [class*="sidebarCol"] {
+  background-image: none;
+  text-shadow: none;
+}

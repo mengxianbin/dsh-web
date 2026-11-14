@@ -25,6 +25,11 @@ env:
   # Single switch for the npm publish lane. Decision record:
   # .agents/notes/implemented/process/2026-08-28-pause-release-npm-publish-unstable-dsh-alpha.md
   NPM_PUBLISH_ENABLED: 'true'
+  # The DSH CLI verify-release installs, in one place inside this workflow: it
+  # is the only thing that installs the CLI now, so the pin lives here rather
+  # than in a package.json dependency (a workspace devDependency cannot run in
+  # this tree; see the install step).
+  DSH_CLI_VERSION: 0.2.1-rc.3
 
 permissions:
   contents: write
@@ -37,7 +42,9 @@ jobs:
   publish:
     name: Build, test, gated npm publish
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Gates, publish, then the registry assertion, which waits out a registry
+    # staging promotion (about thirty minutes worst case, v0.4.4).
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -71,8 +78,14 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Skin center consistency
-        run: pnpm skin-center:check
+      # Same pre-build consistency position as ci.yml: both checks compare
+      # COMMITTED artifacts against the committed sources, so they have to run
+      # before Build replaces the working tree with freshly built bytes.
+      - name: Shared host copy consistency
+        run: pnpm sync-shared:check
+
+      - name: Committed lib artifact fingerprints
+        run: pnpm libs:check
 
       - name: Build
         run: pnpm build
@@ -91,6 +104,18 @@ jobs:
       # tag pipeline must enforce it too, before anything reaches npm.
       - name: Runtime dependency guard
         run: pnpm runtime-deps:check
+
+      # The three text-scan rule gates ci.yml runs. Without them the one lane
+      # that publishes could ship a tree the pull-request gate would have
+      # rejected (emoji, test-discipline and bilingual-dictionary rules).
+      - name: Emoji rule
+        run: pnpm emoji:check
+
+      - name: Test standards
+        run: pnpm test:standards
+
+      - name: Bilingual dictionary consistency
+        run: pnpm i18n:check
 
       - name: Extract tag version
         id: tag
@@ -175,8 +200,21 @@ jobs:
     env:
       DSH_TELEMETRY_DISABLED: '1'
     steps:
+      # Same elastic checkout as static-checks: 3-minute first attempt, one 5-minute retry.
       - name: Checkout
+        id: checkout
         uses: actions/checkout@v5
+        continue-on-error: true
+        timeout-minutes: 3
+
+      - name: Drop a partial clone
+        if: steps.checkout.outcome == 'failure'
+        run: rm -rf "$GITHUB_WORKSPACE/.git"
+
+      - name: Checkout (retry)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v5
+        timeout-minutes: 5
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
@@ -190,10 +228,41 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # Pin the DSH CLI the lane mounts into (same pin as ci.yml's
-      # plugin-mount lane).
+      # Pin the DSH CLI the lane mounts into; the profile's bundle stack
+      # (dsh-base / dsh-web-app) resolves from this installation, and
+      # env.DSH_CLI_VERSION above is the pin's single home inside this
+      # workflow. Two alternatives were measured and rejected (PR #1864): a
+      # cached prefix install cost 41-44s cold against 32s for this global
+      # install, and a PR-scoped cache never restores on a first run; the CLI
+      # as a workspace devDependency does not run in this tree at all
+      # (dsh-app-boot declares @deepseek-ai/cordis-plugin-group as a peer while
+      # the workspace sets autoInstallPeers: false), and npm's global install
+      # resolves that peer.
       - name: Install dsh CLI (pinned)
-        run: npm install -g @deepseek-ai/dsh@0.1.2-rc.1
+        run: npm install -g "@deepseek-ai/dsh@$DSH_CLI_VERSION"
+
+      # scripts/e2e-mount.sh resolves `dsh` through PATH and falls back to
+      # `npx -y --package @deepseek-ai/dsh`, which would silently test an
+      # unpinned CLI. Assert a CLI resolves AND reports the pinned version: the
+      # global install path is runner-dependent, so the version is the check
+      # that cannot pass on the wrong CLI. Measured 2026-10-14 on the pinned
+      # install: `dsh --version` prints exactly the version, with no prefix.
+      - name: Verify the pinned dsh CLI resolves
+        run: |
+          resolved="$(command -v dsh || true)"
+          if [ -z "$resolved" ]; then
+            echo "::error::no dsh on PATH: the mount smoke would fall back to npx with an unpinned CLI"
+            exit 1
+          fi
+          if ! version="$(dsh --version 2>&1)"; then
+            echo "::error::dsh --version failed at $resolved: $version"
+            exit 1
+          fi
+          echo "dsh resolves to $resolved and reports $version"
+          if [ "$version" != "$DSH_CLI_VERSION" ]; then
+            echo "::error::dsh --version printed '$version', expected the pinned '$DSH_CLI_VERSION'"
+            exit 1
+          fi
 
       # The aggregate tarball must be produced from a fresh build.
       - name: Build

@@ -1,3 +1,20 @@
+/* The Windows desktop shell paints --dsw-specific-sidebar-fill on its
+   whole-window frame element, an ancestor of the conversation column. This skin
+   defines that token as an almost opaque #f2f5fae6 light / #1d2539e6 dark
+   (alpha .902), so on the desktop the frame covers the host's z-index: -2
+   contributes.backgroundMedia illustration and the art reads as a washed-out
+   plate; the web host consumes the same token on the sidebar only, which is why
+   it renders fine there. The scrim and blur sliders cannot reach the frame, so
+   the illustration stays masked at any slider value (issue #78).
+   Clear the frame's background only - geometry is the host's (see the frame
+   height note in the skin center docs). Suffix matching on _frame handles the
+   shell's CSS-module hash (e.g. BynINW_frame) without being neutralized by the
+   skin patch prefix pipeline; blue-fantasy, maid-atelier and cyber-night ship
+   the identical rule (issues #1763 / #1803). */
+[class*="_frame"] {
+  background: transparent !important;
+}
+
 [id="root"] {
   background: none;
 }

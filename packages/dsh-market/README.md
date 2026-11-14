@@ -1,25 +1,51 @@
-# @linxin666/dsh-client-ui-market
+# dsh-market · DSH Workshop In-GUI Marketplace & One-Click Asset Installer
 
 English | [中文](README.zh.md)
 
-Workshop store card for the DSH Web GUI settings page: one first-level Workshop
-section that browses [dsh-market.com](https://dsh-market.com) from inside the GUI and installs skins,
-pets and plugins locally with one click; installed items are managed by their own settings sections
-(Skin Center, Pet, and the plugin manager in the official Plugins section).
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-client-ui-market?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>In-GUI Workshop Marketplace & One-Click Asset Installer for DeepSeek Harness (DSH)</strong><br>
+  <em>Unified dsh-market.com Browser · One-Click Themes / Pets / Presets / Plugins · Trending Rankings · Zero Restart</em>
+</p>
+
+The in-GUI Workshop marketplace card for DeepSeek Harness (DSH) Web GUI and official desktop client: browse themes, skins, animated desktop pets, ecosystem plugins, and community agent presets from [dsh-market.com](https://dsh-market.com) with one-click local installation and instant activation directly inside Settings.
 
 ## What it does
 
-- Three-category catalog (skins / pets / plugins) with the same ranking used by the Workshop site:
+- Five tabs: a fixed 编辑推荐 (Editor's Picks) category leading the four catalog kinds. It pins a
+  hand-curated skins / pets / community-plugins list, never presets, in the published order, with no
+  search box and no category chips; each entry keeps its own kind's install, like and preview
+  affordances, and references this deployment cannot resolve are dropped.
+- Catalog tabs (skins / pets / plugins / presets) with the same ranking used by the Workshop site:
   device-backed likes first (tie-broken by the manifest order), a search box, and per-card preview
   links (skins open the live try-on simulator).
 - One-click asset install (loopback browsers): skins download into `$DSH_HOME/skins/<id>/` and pets
   into `$DSH_HOME/pets/<id>/` — the DSH home directories that the Skin Center and the pet registry
-  already scan, so no restart is needed (reopen the card to pick them up). Reinstalling an existing
-  directory asks for confirmation and replaces it atomically.
-- One-click plugin install through the optional `pluginManager` service (provided by
-  `@linxin666/dsh-client-ui-plugin-manager`); without it the card degrades to the copy-command index.
+  already scan, so no restart is needed (reopen the card to pick them up). Presets download into the
+  inert library `$DSH_HOME/agent-presets/<id>/`, which no discovery root scans; enabling one moves it
+  into the roster's user root through the Presets panel. Reinstalling an existing directory asks for
+  confirmation and replaces it atomically.
+- One-click plugin install reuses the official writer: it goes through the official in-process
+  plugin manager's remote face (`ctx.remote.pluginManager.installBundle`, the very call the official
+  Plugins page makes) whenever the host publishes it — on the packaged Desktop client that manager is
+  the only writer, because the CLI refuses the application-owned profile — and falls back to the
+  family `pluginManager` service (`@linxin666/dsh-client-ui-plugin-manager`) otherwise. Without
+  either the card degrades to the copy-command index.
+- An installed plugin is managed in the official container, not here: the card's manage action calls
+  that page's `pluginNavigation.openBundle(packageName)`, which opens the bundle's page in the
+  official Plugins panel, where enablement, uninstall and the install diagnostics stream already live.
 - Remote browsers see the read-only catalog: install buttons are hidden, the Workshop site link and
   copy-command fallbacks stay available.
+- External links — the Workshop site, a card name, a repository, a skin preview — open in the
+  official right-sidebar browser when the shell registers that tab type (alpha.2), and in a new
+  browser tab otherwise.
 - Each card also shows an independent Workshop install count next to likes, plus a plugin npm
   last-30-day download count (npm-backed plugins only); install counts record successful install
   events, npm downloads use the public registry convention, and neither merges with likes.
@@ -30,14 +56,16 @@ pets and plugins locally with one click; installed items are managed by their ow
 dsh plugin --profile web add @linxin666/dsh-client-ui-market
 ```
 
-Restart `dsh web`; the Workshop section appears in the settings page and opens this store card
-directly (skins / pets / plugins tabs). The Skin Center, the Pet section and the plugin manager in the
-official Plugins section are separate first-level settings entries.
+Restart `dsh web`; Settings → Web Extensions → Workshop opens this store card directly
+(编辑推荐 / skins / pets / plugins / presets tabs). A standalone install keeps its first-level Workshop
+entry. The presets tab is rendered by `@linxin666/dsh-client-ui-preset-center`, which contributes it
+into the child slot this card declares.
 
 ## Config
 
-- Enable switch: the card carries its own master switch in the plugin configuration section (persisted
-  in the `dsh-web-ui-market` settings namespace). Turning it off hides the catalog and keeps the switch only.
+- Enable switch: the card carries its own master switch in the plugin configuration section — the plugin's
+  own `enabled` config on its profile entry, which the Host serves as this row's settings page. Turning it
+  off hides the catalog and keeps the switch only.
 - No other configuration; the catalog data always comes from dsh-market.com.
 
 ## Known limitations
@@ -54,14 +82,23 @@ The browser half sends one anonymous install heartbeat per UTC day to dsh-market
 
 ## Architecture
 
-- The host half (`src/index.ts`) registers the `dsh-web-ui-market` settings namespace and mounts the
-  loopback-only gateway (`/api/market/installed`, `/api/market/install-skin`, `/api/market/install-pet`).
+- The host half (`src/index.ts`) owns no settings registration: the card's enable switch is the plugin's
+  own `Config` schema, which the Host serves as this row's settings page and the browser half reads back
+  through the entry's configuration form. It mounts the loopback-only gateway (`/api/market/installed`,
+  `/api/market/install-skin`, `/api/market/install-pet`, `/api/market/install-preset`).
 - The installer core (`src/core/installer.ts`) fetches the manifest from `dsh-market.com` itself,
   validates every path against a conservative allowlist, and writes atomically (temp dir then rename),
   so a failed download never leaves a half-written asset directory. The client never supplies URLs or
   file lists.
 - Every market asset carries an explicit file list, so a new skin pack ships to installs automatically
   as soon as `scripts/market-build` regenerates `market/dist`.
+- The 编辑推荐 category reads `manifest/editor-picks.json`: a hand-authored reference list
+  (`market/editor-picks.json`, skins / pets / plugins only) that `scripts/market-build` validates
+  against the catalogs it emits, so a pick naming a removed or renamed asset fails the build instead
+  of disappearing silently.
+- The card declares the keyed child slot `dsh-workshop.panel` and renders one cell per contributed
+  kind; the Presets panel registers the `preset` cell and receives the catalog records and the download
+  gateway as owner props, so the store keeps one catalog fetch and one gateway for every kind.
 
 ## Security model
 
@@ -69,9 +106,16 @@ The browser half sends one anonymous install heartbeat per UTC day to dsh-market
   cannot drive them.
 - All downloaded content comes from `https://dsh-market.com` (asset URLs are rebuilt from the
   validated manifest); skin CSS is sanitized by the Skin Center runtime before it is applied.
-- The manifest (1 MiB), the per-asset file count (200) and the per-file size (200 MiB) are capped and
-  every fetch has a 30 s timeout; a manifest or download exceeding a cap or timing out fails cleanly
-  and leaves the existing asset directory untouched.
+- The manifest (1 MiB), the per-asset file count (2000) and the per-file size (200 MiB) are capped and
+  every fetch has a 120 s per-attempt timeout with exponential backoff (two retries by default); both
+  the timeout and the retry budget are operator settings, because the published manifest alone can
+  take a minute on a slow link. A manifest or download exceeding a cap or timing out fails cleanly
+  and leaves the existing asset directory untouched. A Cloudflare managed challenge in front of the
+  market origin is reported as a blocked install with the action to take (switch network or disable
+  the proxy) instead of a bare 403 (issue #1941).
+- Presets install into an inert library, never into a discovery root: a preset is code (its composition
+  can load local files and evaluate inline expressions in the host process), so downloading one must
+  not be the same act as running it. The preset center owns the enable step and its confirmation.
 - Every install writes `dsh-market.provenance.json` into the asset directory: the sha256 of each
   installed file, pinned to `https://dsh-market.com`. The Skin Center uses it to run a market
   skin's hooks only when the on-disk bytes hash-match what the market served (issue #1073);

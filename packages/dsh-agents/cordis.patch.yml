@@ -1,0 +1,8 @@
+# Bundle patch for the dsh-agents plugin: one host-half row that owns the agent
+# squad ledger, its /dsh-agents/api routes, and the member-brief system-prompt
+# section. The row id stays in this package's own namespace (the loader keeps
+# ONE entry per id across every bundle, later wins, and a shared id is a silent
+# loss), and the row's name is exactly the package name.
+- insert:
+    - id: dsh-agents
+      name: '@linxin666/dsh-agents'

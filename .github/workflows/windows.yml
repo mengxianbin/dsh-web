@@ -1,0 +1,79 @@
+name: Windows smoke
+
+# Why this lane exists. The only platform-colored change in the v0.4.9 release is
+# 5e551535c (packages/dsh-remote-bridge/src/core/devices.ts), which feeds roster
+# writes through one serial #writeQueue because Windows rejects overlapping
+# renames. Every existing lane runs on ubuntu-latest, so that Windows semantics
+# had never been executed by CI at all. This job runs the two suites that cover
+# it on windows-latest and nothing else.
+#
+# CI optimization checklist. This lane advances none of the fifteen items, and
+# that is the point: each item measures the latency or the runner cost of the
+# required check, and this job deliberately stays outside it. ci.yml is
+# untouched, this job is not a `needs` of the CI checks fan-in, and no job name in
+# an existing workflow changes, so the four frozen required contexts keep their
+# meaning and the required wall clock does not move. What the lane spends is one
+# job record per run: the resource item 12 counts, free on a public repository's
+# standard runners, and item 12's own trade (a frozen required context against
+# parallel work) is untouched because this work is not required. Item 9
+# (filtered install) is answered the way the other lanes answer it, with a
+# workspace-wide install, since a filtered resolve would be a second tree with
+# its own resolution. Item 5 (lighter checkout) is satisfied by the checkout
+# action's default fetch-depth, and the elastic retry block is not repeated
+# here: that block bounds a stalled clone sitting on the critical path, and this
+# job sits off it.
+#
+# No build. Both suites read `src/` through vitest, and the shard lane already
+# runs them with no build at all; the row "the build belongs to static-checks,
+# and the shard lanes do not build" applies here unchanged.
+#
+# Scope: both suites run whole. Neither needs POSIX permission bits, a real
+# Chrome, or a shell script. The remote-bridge pairing suite already guards its
+# 0600/0700 assertion with `process.platform !== 'win32'` (tests/pairing.spec.ts),
+# and the browser-view host suites drive fakes and loopback listeners rather
+# than launching Chromium (tests/host/chrome.spec.ts launches nothing real; the
+# launch probe lives in tests/helpers/probe-chrome.ts, which vitest does not
+# collect). Were a spec to fail for a reason unrelated to this release, the
+# narrowing would be recorded here before it was made; no narrowing is in place.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-smoke:
+    name: windows-smoke
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Remote bridge tests
+        run: pnpm --filter @linxin666/dsh-remote-bridge test
+
+      - name: Browser view tests
+        run: pnpm --filter @linxin666/dsh-client-ui-browser-view test

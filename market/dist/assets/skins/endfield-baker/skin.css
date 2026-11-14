@@ -1,0 +1,206 @@
+/* ============================================================================
+   终末地 · BAKER  —  L1 设计 token 重映射
+   【统一配色】浅色 / 深色两套模式共用同一份调色板，只在这里改一次即可。
+   取值来自 BAKER 原图（design/reference/baker-ui.png）逐点取样：
+     页面底 #131514 · 行 #40413F · 聊天页 #2B2D2A · 底栏 #3C3B39 · 输入条 #F0EEEE
+     信号青 #19CFFD · 信号黄 #FFEF00
+   ========================================================================== */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- 皮肤原语 ---- */
+  --ef-cyan: #19cffd;
+  --ef-cyan-rgb: 25 207 253;
+  --ef-cyan-bright: #6fe4ff;
+  --ef-cyan-deep: #0c86a6;
+  --ef-signal: #ffef00;
+  --ef-signal-rgb: 255 239 0;
+  --ef-signal-ink: #16160a;
+  --ef-alert: #ff6a52;
+  --ef-alert-rgb: 255 106 82;
+  --ef-ok: #35d69a;
+  --ef-ink: #131514;
+  --ef-ink-soft: #1b1d1c;
+  --ef-paper: #131514;
+  --ef-panel: #1b1d1c;
+  --ef-panel-2: #242625;
+  --ef-chat: 43 45 42;
+  --ef-bar: 60 59 57;
+  --ef-pill: 240 238 238;
+  --ef-line: rgba(255, 255, 255, 0.11);
+  --ef-line-strong: rgba(255, 255, 255, 0.22);
+  --ef-bk: 0.48;                               /* 侧栏名录换算系数（源站 526 设计 px 列 → 我们 ~252px 列），想整体缩放只改这个 */
+  --ef-baker-font: "HarmonyOS Sans SC Medium", "HarmonyOS Sans SC", MiSans, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --ef-edge: rgba(202, 201, 201, 0.58);        /* 聊天页描边（BAKER 取样 #CAC9C9，压暗后的半透明版） */
+  --ef-edge-dark: rgba(104, 104, 104, 0.55);   /* 顶栏描边（BAKER 取样 #686868，一直更暗） */
+  --ef-input-max: 140px;                       /* 输入框高度上限 */
+  --ef-input-inset: 8px;                       /* 输入条 / 输入条内文字的左右内缩（对齐左下角加号按钮的左右边） */
+  --ef-input-pad: 12px;                        /* 输入条文字左右内边距（左右同值） */
+  --ef-chat-bg: 52 54 52;                      /* 聊天页磨砂灰（BAKER 取样 #343634） */
+  --ef-deck: 6px;                              /* 聊天页顶边上方的黑色实体高度（正好填满顶栏与聊天页之间的缝） */
+  --ef-notch: 6px;                             /* 三色条区域的下凹深度（= 45° 斜边宽） */
+  --ef-strip-zone: 244px;                      /* 三色条区域宽度（斜边往里缩 6px → 斜边到三色条的间距 = 三色条之间 8px） */
+  --ef-right-flat: 26px;                       /* 右上角斜边右侧还要留一段平边（复刻 BAKER 右端；同上往里缩 6px） */
+  --ef-art-ratio: 7.2;                         /* 标头原图 baker-header.png 的宽高比 504:70（2026-09-28 重裁：补回右侧被少截的 105px；与 patches.css 第 2 节 aspect-ratio 必须一致） */
+  --ef-hatch: rgba(255, 239, 0, 0.22);
+  /* 思考行的行首图标（应用在展开时会把图标换成下拉箭头，皮肤里固定用这张） */
+  --ef-icon-think: url("data:image/svg+xml,%3Csvg%20width%3D%2214%22%20height%3D%2214%22%20viewBox%3D%220%200%2014%2014%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M7.06431%205.93342C7.68763%205.93342%208.19307%206.43904%208.19322%207.06233C8.19322%207.68573%207.68772%208.19123%207.06431%208.19123C6.44099%208.19113%205.9354%207.68567%205.9354%207.06233C5.93555%206.43911%206.44108%205.93353%207.06431%205.93342Z%22%20fill%3D%22%2319CFFD%22%3E%3C%2Fpath%3E%3Cpath%20fill-rule%3D%22evenodd%22%20clip-rule%3D%22evenodd%22%20d%3D%22M8.6815%200.963693C10.1169%200.447019%2011.6266%200.374829%2012.5633%201.31135C13.5%202.24805%2013.4277%203.75776%2012.911%205.19319C12.7126%205.74431%2012.4386%206.31796%2012.0965%206.89729C12.4969%207.54638%2012.8141%208.19018%2013.036%208.80647C13.5527%2010.2419%2013.6251%2011.7516%2012.6883%2012.6883C11.7516%2013.625%2010.242%2013.5527%208.8065%2013.036C8.19022%2012.8141%207.54641%2012.4969%206.89732%2012.0965C6.31797%2012.4386%205.74435%2012.7125%205.19322%2012.911C3.75777%2013.4276%202.2481%2013.5%201.31138%2012.5633C0.374859%2011.6266%200.447049%2010.1168%200.963724%208.68147C1.17185%208.10338%201.46321%207.50063%201.82896%206.8924C1.52182%206.35711%201.27235%205.82825%201.08872%205.31819C0.572068%203.88278%200.499714%202.37306%201.43638%201.43635C2.37308%200.499655%203.8828%200.572044%205.31822%201.08869C5.82828%201.27232%206.35715%201.5218%206.89243%201.82893C7.50066%201.46318%208.10341%201.17181%208.6815%200.963693ZM11.3573%208.01154C10.9083%208.62253%2010.3901%209.22873%209.80943%209.8094C9.22877%2010.3901%208.62255%2010.9083%208.01158%2011.3572C8.4257%2011.5841%208.8287%2011.7688%209.21275%2011.9071C10.5456%2012.3868%2011.4246%2012.2547%2011.8397%2011.8397C12.2548%2011.4246%2012.3869%2010.5456%2011.9071%209.21272C11.7688%208.82866%2011.5841%208.42568%2011.3573%208.01154ZM2.56529%208.02912C2.37344%208.39322%202.21495%208.74796%202.09263%209.08772C1.61291%2010.4204%201.74512%2011.2995%202.16001%2011.7147C2.57505%2012.1297%203.45415%2012.2618%204.78697%2011.7821C5.11057%2011.6656%205.44786%2011.5164%205.7938%2011.3367C5.249%2010.9223%204.70922%2010.4533%204.19029%209.9344C3.57578%209.31987%203.03169%208.67633%202.56529%208.02912ZM6.90708%203.2469C6.24065%203.70479%205.5646%204.26321%204.91392%204.91389C4.26325%205.56456%203.70482%206.24063%203.24693%206.90705C3.72674%207.63325%204.32777%208.37459%205.03892%209.08576C5.64943%209.69627%206.28183%2010.2265%206.90806%2010.6678C7.59368%2010.2025%208.2908%209.63076%208.96079%208.96076C9.6308%208.29075%2010.2025%207.59366%2010.6678%206.90803C10.2265%206.2818%209.69631%205.6494%209.08579%205.03889C8.37462%204.32773%207.63328%203.72672%206.90708%203.2469ZM11.7147%202.15998C11.2996%201.74509%2010.4204%201.61288%209.08775%202.0926C8.74835%202.21479%208.39382%202.37271%208.03013%202.56428C8.67728%203.03065%209.31995%203.5758%209.93443%204.19026C10.4534%204.7092%2010.9223%205.24896%2011.3368%205.79377C11.5164%205.44785%2011.6656%205.11052%2011.7821%204.78694C12.2618%203.45416%2012.1297%202.57502%2011.7147%202.15998ZM4.91197%202.2176C3.57922%201.73788%202.70004%201.86995%202.28501%202.28498C1.87001%202.70003%201.73791%203.5792%202.21763%204.91194C2.31709%205.18822%202.44112%205.47427%202.58677%205.7674C3.01931%205.1887%203.51474%204.6158%204.06529%204.06526C4.61584%203.5147%205.18872%203.01928%205.76743%202.58674C5.47431%202.4411%205.18824%202.31706%204.91197%202.2176Z%22%20fill%3D%22%2319CFFD%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E");
+  --ef-mono: Consolas, "Cascadia Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ef-ui: Bahnschrift, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+  --ef-cut: 9px;
+  --ef-radius: 12px;
+  --ef-shadow-1: 0 1px 0 rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --ef-shadow-2: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --ef-shadow-3: 0 14px 40px rgba(0, 0, 0, 0.62);
+  --ef-scrim: var(--dsw-skin-scrim, 0);
+  --ef-bubble-alpha: var(--dsh-skin-bubble-alpha, 1);
+
+  /* ---- 官方别名 token ---- */
+  color: #e9ebea;
+  background-color: var(--ef-ink);
+  --dsw-font-family: var(--ef-ui);
+  --dsw-alias-bg-base: rgba(19, 21, 20, calc(var(--ef-scrim) * .50));
+  --dsw-alias-bg-layer-1: rgba(27, 29, 28, calc(1 - var(--ef-scrim) * .42));
+  --dsw-alias-bg-layer-2: rgba(35, 37, 36, calc(1 - var(--ef-scrim) * .38));
+  --dsw-alias-bg-layer-3: rgba(43, 45, 44, calc(1 - var(--ef-scrim) * .34));
+  --dsw-alias-bg-mask-1: #000000a6;
+  --dsw-alias-bg-mask-2: #00000059;
+  --dsw-alias-bg-mask-3: #000000b3;
+  --dsw-alias-bg-mask-drop: #00000080;
+  --dsw-alias-bg-mask-photo: #0a0c0be6;
+  --dsw-alias-bg-module-platform: rgba(35, 37, 36, calc(1 - var(--ef-scrim) * .38));
+  --dsw-alias-bg-multi-select: #17323acc;
+  --dsw-alias-bg-overlay: #1b1d1ceb;
+  --dsw-alias-bg-skeleton: #ffffff0f;
+  --dsw-alias-border-inverted2: #fff9;
+  --dsw-alias-border-inverted: #fff6;
+  --dsw-alias-border-l1: rgba(255, 255, 255, 0.08);
+  --dsw-alias-border-l2-darkmode-thin: rgba(255, 255, 255, 0.10);
+  --dsw-alias-border-l2: rgba(255, 255, 255, 0.13);
+  --dsw-alias-border-l3: rgba(255, 255, 255, 0.19);
+  --dsw-alias-border-l4: rgba(255, 255, 255, 0.30);
+  --dsw-alias-brand-primary-invert: #061417;
+  --dsw-alias-brand-primary-new-colorprimary-new-color: #19cffd;
+  --dsw-alias-brand-primary: #19cffd;
+  --dsw-alias-brand-text: #8fe8ff;
+  --dsw-alias-button-contrast-fill: #e9ebea;
+  --dsw-alias-button-elevated-fill: #242625;
+  --dsw-alias-button-floating-fill: #1b1d1c;
+  --dsw-alias-button-floating-hover: #2b2d2c;
+  --dsw-alias-button-ghost-active-border: #2f7d90;
+  --dsw-alias-button-ghost-active-fill: #123039;
+  --dsw-alias-button-ghost-active-hover: #17414e;
+  --dsw-alias-button-info-fill: #19cffd;   /* 亮蓝=信号青（任务看板新建任务等主按钮实际吃的是 info-fill），与发送键一致 */
+  --dsw-alias-button-info-hover: #6fe4ff;
+  --dsw-alias-button-primary-dimmed: #6f9aa5;   /* 禁用态：黑字要读得清，底色不能压到深青（对比度门禁 ≥3:1） */
+  --dsw-alias-button-primary-fill: #19cffd;   /* 亮蓝=信号青（任务看板新建任务 / SSH 新增主机等主按钮），与发送键一致 */
+  --dsw-alias-button-primary-hover: #6fe4ff;
+  --dsw-alias-button-tool-bar-fill-invisible: rgb(var(--ef-cyan-rgb) / .36);
+  --dsw-alias-button-tool-bar-fill: rgb(var(--ef-cyan-rgb) / .5);
+  --dsw-alias-button-tool-bar-hover: rgb(var(--ef-cyan-rgb) / .6);
+  --dsw-alias-interactive-bg-active: rgb(var(--ef-cyan-rgb) / .14);
+  --dsw-alias-interactive-bg-hover-accent: rgb(var(--ef-cyan-rgb) / .18);
+  --dsw-alias-interactive-bg-hover-danger: #ff6a5224;
+  --dsw-alias-interactive-bg-hover-solid: #2b2d2c;
+  --dsw-alias-interactive-bg-hover: #ffffff0f;
+  --dsw-alias-label-caption: #717977;
+  --dsw-alias-label-dimmed: #575e5d;
+  --dsw-alias-label-primary-bluish: #ddf5fd;
+  --dsw-alias-label-primary-dimmed: #b7bfbd;
+  --dsw-alias-label-primary-foreground: #131514;   /* 信号青底上的黑字：与 #19cffd 对比度 9.9:1（白字只有 1.84:1，过不了门禁） */
+  --dsw-alias-label-primary-inverted: #131514;
+  --dsw-alias-label-primary: #e9ebea;
+  --dsw-alias-label-secondary: #b0b7b5;
+  --dsw-alias-label-tertiary: #878e8d;
+  --dsw-alias-markdown-citation: #2325249e;
+  --dsw-alias-markdown-code-block: #171918;
+  --dsw-alias-markdown-code-block-banner: #1c1e1d;
+  --dsw-alias-markdown-code-segment-selected: #262827bf;
+  --dsw-alias-markdown-code-segment-unselected: #1d1f1e99;
+  --dsw-alias-markdown-inline-code: #232524;
+  --dsw-alias-markdown-placeholder: #1d1f1e99;
+  --dsw-alias-markdown-tag: #232524;
+  --dsw-alias-scrollbar-bg-l1: #2c2f2e;
+  --dsw-alias-scrollbar-bg-l2: #2c2f2e;
+  --dsw-alias-scrollbar-hover-l1: #19cffd;
+  --dsw-alias-scrollbar-hover-l2: #19cffd;
+  --dsw-alias-state-business-primary: #19cffd;
+  --dsw-alias-state-business-tertiary: #0f3540;
+  --dsw-alias-state-error-primary: #ff6a52;
+  --dsw-alias-state-error-secondary: #ff8570;
+  --dsw-alias-state-success-primary: #35d69a;
+  --dsw-alias-state-success-secondary: #57e0ac;
+  --dsw-alias-state-success-tertiary: #10352a;
+  --dsw-alias-state-warn-label: #ffef00;
+  --dsw-alias-state-warn-primary: #ffef00;
+  --dsw-alias-state-warn-secondary: #fff45c;
+  --dsw-alias-state-warn-tertiary: #3a3608;
+  --dsw-alias-toast-bg: #17323a;
+  --dsw-alias-tooltip-bg: #141615;
+  --dsw-alias-tooltip-fg: #e9ebea;
+  --dsw-hovercard-bg: #1b1d1c;
+  --dsw-shadow-lv1: var(--ef-shadow-1);
+  --dsw-shadow-lv2: var(--ef-shadow-2);
+  --dsw-shadow-lv3: var(--ef-shadow-3);
+  --dsw-specific-bubble-highlight: #2b2d2c;
+  --dsw-specific-bubble: #232524;
+  --dsw-specific-input-major: rgba(27, 29, 28, calc(1 - var(--ef-scrim) * .35));
+  --dsw-specific-login-input: rgba(27, 29, 28, calc(1 - var(--ef-scrim) * .35));
+  --dsw-specific-menu: #191b1af0;
+  --dsw-specific-selector: #232524d9;
+  --dsw-specific-sidebar-fill: rgba(21, 23, 22, calc(1 - var(--ef-scrim) * .42));
+  --dsw-specific-sidebar-nav-item-active-accent: #19cffd;
+  --dsw-specific-sidebar-nav-item-active: #17323a;
+  --dsw-specific-sidebar-nav-item-hover: #232524;
+  --dsw-specific-tip: #1b1d1c;
+
+  /* aionui 面板 token */
+  --aion-bg-base: #1b1d1cd9;
+  --aion-bg-1: #1b1d1c80;
+  --aion-bg-2: #24262599;
+  --aion-bg-3: rgb(var(--ef-cyan-rgb) / .18);
+  --aion-bg-4: rgb(var(--ef-cyan-rgb) / .28);
+  --aion-bg-hover: rgb(var(--ef-cyan-rgb) / .12);
+  --aion-bg-active: rgb(var(--ef-cyan-rgb) / .18);
+  --aion-text-primary: #e9ebea;
+  --aion-text-secondary: #b0b7b5;
+  --aion-text-tertiary: #878e8d;
+  --aion-text-disabled: #575e5d;
+  --aion-primary: #19cffd;
+  --aion-success: #35d69a;
+  --aion-warning: #ffef00;
+  --aion-danger: #ff6a52;
+  --aion-brand: #6fe4ff;
+  --aion-aou-1: #1b1d1c;
+  --aion-aou-2: #242625;
+  --aion-aou-3: #2b4750;
+  --aion-aou-4: #0e7d95;
+  --aion-aou-5: #19cffd;
+  --aion-aou-6: #8fe8ff;
+  --aion-fill-2: #ffffff0f;
+  --aion-fill-3: rgb(var(--ef-cyan-rgb) / .18);
+  --aion-border-base: rgba(255, 255, 255, 0.13);
+  --aion-overlay-shadow: 0 14px 40px #000000a6;
+  --aion-font-sans: var(--ef-ui);
+  --aion-font-mono: var(--ef-mono);
+}
+
+/* ---- 滚动条：细槽 + 青色高亮 ---- */
+:root {
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+body::-webkit-scrollbar { width: 10px; height: 10px; }
+body::-webkit-scrollbar-track { background: #141615; }
+body::-webkit-scrollbar-thumb {
+  background: #2f3332;
+  border: 3px solid #141615;
+  border-radius: 6px;
+}
+body::-webkit-scrollbar-thumb:hover { background: var(--ef-cyan); }
+body::-webkit-scrollbar-corner { background: #141615; }
+
+/* ---- 选区 ---- */
+body::selection { background: rgb(var(--ef-cyan-rgb) / .30); color: #eaf9ff; }

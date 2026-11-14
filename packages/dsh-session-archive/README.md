@@ -1,8 +1,21 @@
-# dsh-session-archive
+# dsh-session-archive · Full-Text Session Search, Batch Archiving & Lifecycle Manager for DeepSeek Harness (DSH)
 
 English | [中文](README.zh.md)
 
-Session archive management for DSH Web: one place to see every session, archive or restore them in bulk, and physically delete sessions with a full, auditable pipeline. Optional (default-off) automatic policies archive long-inactive sessions and purge expired archives.
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-session-archive?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>Full-Text Session Search, Batch Archiving & Lifecycle Manager for DeepSeek Harness (DSH)</strong><br>
+  <em>Centralized Session View · Faceted Search & Filtering · Batch Archive & Cascade Delete · Automated Retention Rules</em>
+</p>
+
+A comprehensive session lifecycle and archive management plugin for DeepSeek Harness (DSH) Web GUI and official desktop client: centralized session inventory, batch archive/unarchive, and verifiable cascade physical deletion pipelines with disk space reclamation. Optional automated policies automatically archive inactive sessions and prune expired archives based on retention schedules.
 
 ## What it does
 
@@ -11,7 +24,7 @@ Session archive management for DSH Web: one place to see every session, archive 
 - **True multi-select**: per-row checkboxes, per-workspace select/deselect, and select-all that covers the complete filtered result set — not just rendered rows. Selection is kept across filter changes with an explicit note when selected items fall outside the current filter.
 - **Batch operations**: archive, unarchive, and physical delete over the selected set, executed as bounded server-side chunks with live progress, per-session results (success / skipped with reason / failed with reason), and a retry-failed-only action. The current session, running sessions, and sessions with running descendants are always protected and skipped with an explanation.
 - **Physical delete with cascade semantics**: deleting a session also removes its storage (jsonl.zstd directory or session-rdb rows), workspace accounting, archive-set entries, projection cache, and the plugin's archive ledger. Deleting a parent pulls in all descendants; a family containing any protected member is skipped whole — never half-deleted. Deletion requires an explicit confirmation that states the direct count, the cascade count, the final total, the skipped protected count, and the estimated freed space; large deletes require an extra acknowledgement.
-- **Optional automatic maintenance (off by default)**: auto-archive sessions inactive beyond a threshold (by last-activity time, never creation time) and auto-delete archived sessions past their retention (by the recorded archive time, never file times). Both are independent switches with pre-enable previews, run-now buttons, and persisted last-run/next-check status. Sessions archived before this plugin existed have no reliable archive time, are shown as "unknown", and are never auto-deleted.
+- **Optional automatic maintenance (off by default)**: auto-archive sessions inactive beyond a threshold (by last-activity time, never creation time) and auto-delete archived sessions past their retention (by the recorded archive time, never file times). Manual and automatic archiving both support bare UUID and `session-`-prefixed IDs, while the archive ledger uses canonical IDs. Both are independent switches with pre-enable previews, run-now buttons, and persisted last-run/next-check status. Sessions archived before this plugin existed have no reliable archive time, are shown as "unknown", and are never auto-deleted unless the optional backfill below is enabled.
 - **Safe by construction**: all routes are loopback-fenced (tunnels and LAN clients get 403), deletion never follows symlinks outside the sessions root, and operations serialize so two batches can never interleave.
 
 ## Install
@@ -26,7 +39,11 @@ The family bundle (`dsh-web-all`) includes this plugin. For a standalone profile
 dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 ```
 
-Restart `dsh web`. A first-level "会话归档管理" section appears in the web settings, below the Workshop entry.
+Restart `dsh web`. The plugin adds its own Archived sessions Settings entry: it seats the plugin's own `settings.section` id (`dsh-session-archive`) at nav order (25), carrying this plugin's management surface. The section opens on the archived view.
+
+The section id is deliberately this plugin's own namespace rather than the official `archived-sessions` id. The settings shell renders one nav row per registration and never merges same-id sections, and its registry refuses a second registration of the same `id` at the same `priority` (default 0) while `order` only sorts the rows. Two archive plugins claiming the same section id therefore collide whatever order they pick: one registration throws, or one of the two entries silently disappears. With its own id the entry coexists with the official Archived sessions page and with any third-party archive plugin, one entry each.
+
+A standalone install, or an install with no other archive plugin enabled, shows this single entry.
 
 ## Configuration
 
@@ -35,6 +52,7 @@ The settings section exposes:
 - `enabled` — turn the whole management surface off.
 - `autoArchiveEnabled` + `autoArchiveDays` (1–3650, default 7) — auto-archive threshold by last activity.
 - `autoDeleteEnabled` + `autoDeleteDays` (1–3650, default 7) — archive retention before physical deletion.
+- `recordManualArchive` (default off) — backfill an archive time for sessions archived outside this plugin; see below.
 - `checkIntervalMin` (15–1440, default 60) — scheduler cadence for the automatic checks.
 
 Invalid or out-of-range values are never saved; the form shows a validation message.
@@ -43,12 +61,21 @@ Invalid or out-of-range values are never saved; the form shows a validation mess
 
 - **Archiving never deletes data.** An archived session only disappears from grouping surfaces; unarchiving restores it with its workspace slot intact.
 - **Physical delete is unrecoverable.** It removes the session history, metadata, workspace association, archive records, projection cache, and other session-owned data. Shared, content-addressed attachments are left alone (they may be referenced by other sessions); orphaned attachment objects are not garbage-collected by this plugin.
-- **Archive times are recorded by this plugin.** Sessions archived before installation show "archive time unknown" and stay outside auto-delete until a human deletes them or they are unarchived and re-archived (which restarts the retention clock).
+- **Archive times are recorded by this plugin.** The archive ledger (`$DSH_HOME/dsh-session-archive/archive-ledger.json`) stays the only archive-time fact source; no file timestamp is ever used. Sessions archived before installation — including sessions archived from the official sidebar, which never reaches this plugin — show "archive time unknown" and stay outside auto-delete until a human deletes them, they are unarchived and re-archived (which restarts the retention clock), or the backfill below records a time for them.
+- **`recordManualArchive` is a backfill, off by default.** When enabled, the first time this plugin observes a session that is already archived with no ledger entry, it records one `observed` entry stamped with the observation moment, so the retention countdown starts from there and the session can later be auto-deleted. The observation moment is a lower bound, not the real archive moment, and the list marks it "(backfilled)" to keep the two distinguishable. The backfill never deletes in the same cycle that records a time: the existing rule that ignores archive times at or after the run start keeps the row out of that cycle. With the switch off, nothing is written to the ledger and behaviour is exactly as before.
+- **Auto-starting the clock is a deliberate trade.** A session archived long ago gets a countdown that starts now, not its real age; the backfill can therefore never delete something that was archived more recently than the retention window.
 - **Protected sessions are never deleted, manually or automatically**: running sessions, the session you are currently viewing, sessions with running children, and sessions already inside another archive operation. Forced stops never happen.
+- **Archiving is decided by identity (triclass decision table).** `POST /archive` requires an `actor` — the deciding session id or a human channel name such as `manual` — and answers 400 without it. The host resolves the actor against the dispatch plugin's attention ledger (`$DSH_HOME/session-attention.json`) and refuses, per id and without batch taint, everything the actor's class may not archive: a `bot-boss` archives `bot-worker` and `bot-boss` sessions but never a `human` one, a `bot-worker` archives nothing, an unclassified session actor archives nothing, and a target with no record counts as `human`. The resolved `actor` is persisted into each ledger entry it archives, so "who archived this" reads from the ledger instead of transcript archaeology.
+
+## Archive seal gate
+
+`POST /api/dsh-session-archive/archive` runs a per-id seal gate before archiving: the transcript is decoded (multi-frame zstd) and the last save sentinel decides a six-value grouping — `DONE` / `N_A` / `NEUTRAL` / `LEGACY` archive as usual, `sentinel-stale` (a save completed earlier, the conversation continued after it) passes through with `seal: "stale"` recorded, and true-red `UNSEALED` details plus `UNKNOWN` are refused per id with `reason: "seal-required"` and their `{verdict, detail}` grouping — one refused id never drags the rest of the batch down. Forcing a batch requires `force: true` **and** a non-empty `reason` in the same request (`400` otherwise); forced entries are written as `source: "override"` with the reason and the seal judgement. The grouping itself is served from the one shared implementation, also exposed as `POST /api/dsh-session-archive/seal-check {ids}` for the native archive dialog; `POST /api/dsh-session-archive/archive-override {ids, mode: "force" | "note", reason?, seal?}` is the native channel's ledger write-back (blank force reasons normalize to `override:no-reason`, note mode pins `seal: "stale"`), and neither write-back ever resets an existing `archivedAt`, so the retention countdown cannot be refreshed by one.
+
+- **Downgrade note**: a plugin build older than the `override` ledger source drops `override` entries when it reads (and next rewrites) the ledger — such a session's archive time becomes unknown, so the retention countdown does not start. Direction-safe by design: a downgrade can lose accounting, but never schedules an early physical delete.
 
 ## Security model
 
-All HTTP routes (`/api/dsh-session-archive/*`) are fenced to loopback sockets with a loopback Host header and browser same-origin markers; `X-Forwarded-For` is never trusted. Deletion resolves storage paths only through the plugin's own sessions-root index, re-validates realpaths before removal, and rejects anything outside `$DSH_HOME/sessions`. Clients send session IDs only — never file paths. The session-rdb store (SQLite) is fingerprint-checked before any row deletion.
+All HTTP routes (`/api/dsh-session-archive/*`) are fenced to loopback sockets with a loopback Host header and browser same-origin markers; `X-Forwarded-For` is never trusted. Deletion resolves storage paths only through the plugin's own sessions-root index, re-validates realpaths before removal, and rejects anything outside `$DSH_HOME/sessions`. Clients send session IDs only — never file paths. The session-rdb store (SQLite) is fingerprint-checked before any row deletion. Archive requests additionally declare an `actor` and pass the triclass identity gate (see Semantics); the actor is self-reported over the loopback REST — the same trust model as `recordManualArchive`, which stops mistaken automation rather than a lying caller.
 
 ## Known limitations
 

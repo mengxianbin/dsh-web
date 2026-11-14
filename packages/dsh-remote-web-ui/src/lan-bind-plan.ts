@@ -1,12 +1,14 @@
 /**
  * Pure decision helpers shared by the lan-bind sync path (index.ts) and the
- * status path (lanBindStatus). Extracted so the flags-win precedence, the
- * pending-restart divergence check, and the firewall re-apply gate have one
- * implementation and direct unit coverage.
+ * status path (lanBindStatus). Extracted so the LAN-edge plan and the firewall
+ * re-apply gate have one implementation and direct unit coverage.
+ *
+ * Since issue #1917 the plugin owns no bind: the host stays on loopback and LAN
+ * reachability comes from the forwarder in lan-forward.ts, so the only decision
+ * left here is which LAN address (if any) that forwarder may listen on.
  */
 
-/** The two bind hosts the managed block pins. */
-export type LanBindPlanHost = '0.0.0.0' | '127.0.0.1'
+import { isLoopbackBind } from './host-bind-capability.ts'
 
 /** webStartup facts the CLI hands the process (absent unless a flag was passed). */
 export interface StartupFacts {
@@ -15,53 +17,104 @@ export interface StartupFacts {
 }
 
 /**
- * The bind host the managed block should pin: an explicit CLI --host wins,
- * otherwise the toggle decides. CLI hosts outside the two managed literals
- * (a pinned specific IP) are not a state the toggle manages — the toggle
- * decides, and the card surfaces the divergence honestly.
+ * What the running host accepts, and which concrete addresses it could pin.
+ * Sampled once per boot: the webserver package cannot change under a running
+ * process, and the interface list is frozen for the same reason the QR bases
+ * are (see src/lan.ts).
+ */
+export interface LanBindCapability {
+  /** Whether the installed webserver schema accepts the wildcard bind (reported, never written). */
+  wildcardSupported: boolean
+  /** Local non-loopback IPv4 literals, in preference order (`lanIPv4Addresses()`). */
+  candidates: string[]
+}
+
+/** Why the LAN forwarder is not listening, when it is not. */
+export type ForwardStopReason =
+  /** The toggle is off (or was never flipped). */
+  | 'off'
+  /** The host itself binds a non-loopback address (`--host`): the forwarder yields the port. */
+  | 'host-bind'
+  /** The toggle is on but this machine has no LAN IPv4 address to listen on. */
+  | 'no-address'
+
+/** The LAN edge one sync should run: an address to listen on, or why not. */
+export interface ForwardPlan {
+  /** The LAN address the forwarder listens on; undefined when it must stay off. */
+  host: string | undefined
+  /** Why it stays off; undefined when a host is planned. */
+  reason: ForwardStopReason | undefined
+}
+
+/**
+ * The LAN address the forwarder may listen on, or the reason it must not.
+ *
+ * The order is: the toggle off keeps LAN off; a non-loopback `--host` means the
+ * operator asked the HOST to bind the network itself, so the forwarder yields
+ * the port instead of fighting it for the same address:port (issue #1917);
+ * otherwise this machine's first LAN candidate. A host with no LAN IPv4 address
+ * has nothing to listen on, which the caller reports instead of failing.
+ *
+ * Only a concrete interface address is ever returned: the wildcard would
+ * collide with the loopback listener on the same port, and a forwarder bound to
+ * `0.0.0.0` would additionally answer the loopback port a second time.
  * @param lanBind - the toggle value.
  * @param startupHost - the CLI-provided bind host, when given.
- * @returns the desired bind host literal.
+ * @param capability - the sampled interface candidates.
+ * @returns the address to listen on, or the reason there is none.
  */
-export function desiredBindHost(lanBind: boolean, startupHost: string | undefined): LanBindPlanHost {
-  if (startupHost === '0.0.0.0' || startupHost === '127.0.0.1') return startupHost
-  return lanBind ? '0.0.0.0' : '127.0.0.1'
-}
-
-/**
- * The port the managed block should pin: the CLI port when given, else the
- * currently bound port. Undefined when neither is readable yet (the caller
- * skips the write and reports why).
- * @param startupPort - the CLI-provided port, when given.
- * @param livePort - the currently bound port, when finite.
- */
-export function desiredBindPort(startupPort: number | undefined, livePort: number | undefined): number | undefined {
-  if (typeof startupPort === 'number' && Number.isFinite(startupPort)) return startupPort
-  return typeof livePort === 'number' && Number.isFinite(livePort) ? livePort : undefined
-}
-
-/**
- * Whether the running bind has not caught up with what the toggle (plus a
- * possibly overriding CLI host) will pin. Compared against the effective
- * desired host — not the raw toggle — so a flag-managed bind is not reported
- * as pending forever.
- * @param lanBind - the toggle value (undefined = untouched, never pending).
- * @param desiredHost - the effective desired host, or undefined when untouched.
- * @param liveHost - the currently bound host.
- */
-export function pendingRestartOf(
+export function forwardPlanOf(
   lanBind: boolean | undefined,
-  desiredHost: LanBindPlanHost | undefined,
-  liveHost: string | undefined,
-): boolean {
-  if (lanBind === undefined || desiredHost === undefined) return false
-  return liveHost !== desiredHost
+  startupHost: string | undefined,
+  capability: LanBindCapability,
+): ForwardPlan {
+  if (lanBind !== true) return { host: undefined, reason: 'off' }
+  if (typeof startupHost === 'string' && startupHost !== '' && isLanReachableBind(startupHost)) {
+    return { host: undefined, reason: 'host-bind' }
+  }
+  const host = capability.candidates[0]
+  return host === undefined ? { host: undefined, reason: 'no-address' } : { host, reason: undefined }
+}
+
+/**
+ * The reachability decision behind the QR bases, the status `lanUrls`, the
+ * firewall summary and the boot's LAN warning: a bind that is not loopback is
+ * reachable from another device, whatever literal it names. Equality with the
+ * wildcard is deliberately not the test - on a host that refuses wildcard
+ * binds the only LAN bind is a concrete interface address.
+ * @param host - the block host or the live bind (absent before it settles).
+ * @returns true when another device could dial the listener.
+ */
+export function isLanReachableBind(host: string | undefined): boolean {
+  return !isLoopbackBind(host)
 }
 
 /** The last firewall state this process applied. */
 export interface AppliedFirewallState {
   enabled: boolean
   port: number
+}
+
+/** The managed profile when neither the config nor the runtime names one. */
+export const DEFAULT_MANAGED_PROFILE = 'web'
+
+/**
+ * The profile whose `cordis.patch.yml` the LAN bind toggle manages. An
+ * explicit `profile` config wins; otherwise the launched profile the Host
+ * publishes is authoritative, because the DSH Desktop client boots the
+ * `desktop` profile without exporting `DSH_PROFILE` — an environment-only
+ * fallback edited `profiles/web` there, so the toggle looked applied while
+ * the running host never followed the block.
+ * @param configured - the explicit `profile` plugin config, when set.
+ * @param launched - the launched profile name the Host published, when available.
+ * @param env - the DSH_PROFILE environment value, when set.
+ */
+export function resolveManagedProfile(
+  configured: string | undefined,
+  launched: string | undefined,
+  env: string | undefined,
+): string {
+  return configured ?? launched ?? env ?? DEFAULT_MANAGED_PROFILE
 }
 
 /**

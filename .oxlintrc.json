@@ -1,0 +1,36 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "oxc", "import", "promise", "node"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "env": {
+    "builtin": true
+  },
+  "rules": {
+    "unicorn/no-array-sort": "off",
+    "eslint/no-underscore-dangle": "off",
+    "unicorn/require-module-specifiers": "off",
+    "import/no-empty-named-blocks": "off"
+  },
+  "ignorePatterns": [
+    "node_modules/",
+    ".git/",
+    ".pnpm-store/",
+    ".codegraph/",
+    ".zcode/",
+    ".wrangler/",
+    ".market-inputs/",
+    "satellites/",
+    "marketing/",
+    "market/dist/",
+    "market/shell/",
+    "packages/*/lib/",
+    "coverage/",
+    "playwright-report/",
+    "test-results/",
+    "gui-test-screenshots/"
+  ]
+}

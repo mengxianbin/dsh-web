@@ -185,7 +185,7 @@ describe('innerPathOf / loopbackOnlyDenial', () => {
 describe('remote desktop channel (/remote)', () => {
   it('refuses unpaired requests before forwarding', async () => {
     const service = makeService()
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: 1 }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => 1 }))
     try {
       const result = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-9', 'session.list', {}) })
       expect(result.status).toBe(403)
@@ -201,7 +201,7 @@ describe('remote desktop channel (/remote)', () => {
 
   it('refuses an unknown device cookie like a missing one', async () => {
     const service = makeService()
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: 1 }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => 1 }))
     try {
       const result = await call(port, 'POST', '/remote/api/session.list', {
         body: ENVELOPE('rpc-1', 'session.list', {}),
@@ -210,6 +210,44 @@ describe('remote desktop channel (/remote)', () => {
       expect(result.status).toBe(403)
     } finally {
       await close()
+    }
+  })
+
+  it('user receives 503 while the port is unbound and is proxied once it binds', async () => {
+    // Given a paired remote client and a route whose upstream port is initially unbound
+    // (0.2.1-rc.2 leaves ctx.webServer.port undefined until listen binds)
+    const service = makeService()
+    const cookie = pairedCookie(service)
+    const upstream = await startUpstream(() => ({
+      status: 200,
+      body: JSON.stringify({ type: 'server-response', rpcId: 'rpc-p', result: { ok: true } }),
+    }))
+    let bound: number | undefined
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => bound }))
+    try {
+      // When the user calls /remote/api before and after the port binds
+      const refused = await call(port, 'POST', '/remote/api/session.list', {
+        body: ENVELOPE('rpc-p', 'session.list', {}),
+        cookie,
+      })
+      // Then the unbound call is refused with 503 and the bound call is proxied
+      expect(refused.status).toBe(503)
+      const refusalBody = JSON.parse(refused.body) as { result: { ok: boolean; error: { code: string } } }
+      expect(refusalBody.result.ok).toBe(false)
+      expect(refusalBody.result.error.code).toBe('port-unbound')
+      expect(upstream.hits).toHaveLength(0)
+
+      bound = upstream.port
+      const proxied = await call(port, 'POST', '/remote/api/session.list', {
+        body: ENVELOPE('rpc-p', 'session.list', {}),
+        cookie,
+      })
+      expect(proxied.status).toBe(200)
+      expect(upstream.hits).toHaveLength(1)
+      expect(upstream.hits[0].host).toBe(`127.0.0.1:${String(upstream.port)}`)
+    } finally {
+      await close()
+      await upstream.close()
     }
   })
 
@@ -222,7 +260,7 @@ describe('remote desktop channel (/remote)', () => {
       }
       return { status: 404, body: 'no' }
     })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       const result = await call(port, 'POST', '/remote/api/session.list', {
         body: ENVELOPE('rpc-2', 'session.list', {}),
@@ -246,70 +284,100 @@ describe('remote desktop channel (/remote)', () => {
     }
   })
 
-  it('proxies an unpaired request when the pairing policy is off', async () => {
-    const service = makeService()
-    const upstream = await startUpstream((req) => {
-      if (req.url === '/api/session.list' && req.method === 'POST') {
-        return { status: 200, body: JSON.stringify({ type: 'server-response', rpcId: 'rpc-open', result: { ok: true } }) }
-      }
-      return { status: 404, body: 'no' }
-    })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port, requirePairingForLan: false }))
-    try {
-      const result = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-open', 'session.list', {}) })
-      expect(result.status).toBe(200)
-      expect(JSON.parse(result.body).result.ok).toBe(true)
-      expect(upstream.hits).toHaveLength(1)
-      expect(upstream.hits[0].url).toBe('/api/session.list')
-      expect(upstream.hits[0].host).toBe('127.0.0.1:' + String(upstream.port))
-    } finally {
-      await close()
-      await upstream.close()
-    }
-  })
-
-  it('re-reads the live pairing policy per request', async () => {
-    const service = makeService()
-    let policy = false
-    const upstream = await startUpstream((req) => {
-      if (req.url === '/api/session.list' && req.method === 'POST') {
-        return { status: 200, body: JSON.stringify({ type: 'server-response', rpcId: 'rpc-' + String(upstream.hits.length), result: { ok: true } }) }
-      }
-      return { status: 404, body: 'no' }
-    })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port, requirePairingForLan: () => policy }))
-    try {
-      const open = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-a', 'session.list', {}) })
-      expect(open.status).toBe(200)
-      policy = true
-      const locked = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-b', 'session.list', {}) })
-      expect(locked.status).toBe(403)
-      const body = JSON.parse(locked.body) as { result: { ok: boolean; error: { code: string } } }
-      expect(body.result.ok).toBe(false)
-      expect(body.result.error.code).toBe('unpaired')
-      policy = false
-      const openAgain = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-c', 'session.list', {}) })
-      expect(openAgain.status).toBe(200)
-      expect(upstream.hits.map(hit => hit.url)).toEqual(['/api/session.list', '/api/session.list'])
-    } finally {
-      await close()
-      await upstream.close()
-    }
-  })
-
-  it('still denies the control planes when the pairing policy is off', async () => {
+  it('user reaching /remote unpaired is refused even when the LAN pairing policy is off (issue #1665)', async () => {
+    // Given the desktop LAN pairing policy turned off; when an unpaired caller
+    // requests the channel; then it is refused and never reaches the host API.
+    // The channel attaches the process's own browser credential to everything
+    // it forwards, so the policy can never widen it: an unpaired caller must
+    // not inherit that authority by flipping requirePairingForLan.
     const service = makeService()
     const upstream = await startUpstream(() => ({ status: 200, body: '{"leaked":true}' }))
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port, requirePairingForLan: false }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
-      const pair = await call(port, 'POST', '/remote/api/pair/status', { body: '{}' })
+      const result = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-open', 'session.list', {}) })
+      expect(result.status).toBe(403)
+      const body = JSON.parse(result.body) as { result: { ok: boolean; error: { code: string } } }
+      expect(body.result.ok).toBe(false)
+      expect(body.result.error.code).toBe('unpaired')
+      expect(upstream.hits).toHaveLength(0)
+    } finally {
+      await close()
+      await upstream.close()
+    }
+  })
+
+  it('user paired and live keeps the channel until stop() lands, then loses it', async () => {
+    // Given a paired device with a live session; when it calls the channel and
+    // then the owner stops pairing; then the first call proxies and the later
+    // one is refused without reaching upstream again.
+    const service = makeService()
+    const cookie = pairedCookie(service)
+    const upstream = await startUpstream((req) => {
+      if (req.url === '/api/session.list' && req.method === 'POST') {
+        return { status: 200, body: JSON.stringify({ type: 'server-response', rpcId: 'rpc-live', result: { ok: true } }) }
+      }
+      return { status: 404, body: 'no' }
+    })
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
+    try {
+      const live = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-live', 'session.list', {}), cookie })
+      expect(live.status).toBe(200)
+      expect(upstream.hits.map(hit => hit.url)).toEqual(['/api/session.list'])
+      // Given the owner then stops pairing; when the same device calls again;
+      // then revocation holds and the host API is not reached a second time.
+      service.stop()
+      const revoked = await call(port, 'POST', '/remote/api/session.list', { body: ENVELOPE('rpc-after', 'session.list', {}), cookie })
+      expect(revoked.status).toBe(403)
+      expect(JSON.parse(revoked.body).result.error.code).toBe('unpaired')
+      expect(upstream.hits.map(hit => hit.url)).toEqual(['/api/session.list'])
+    } finally {
+      await close()
+      await upstream.close()
+    }
+  })
+
+  it('user paired may write the settings bridge while an unpaired caller cannot (issue #1665)', async () => {
+    // Given the reported chain (a paired device writes requirePairingForLan
+    // off through the re-exposed bridge); when it then drops its credential and
+    // repeats the write; then the paired write lands, the unpaired one is
+    // refused before the proxy leg, and the policy can no longer disarm the
+    // channel from outside.
+    const service = makeService()
+    const cookie = pairedCookie(service)
+    const upstream = await startUpstream((req) => {
+      if (req.url === '/api/dsh-web-ui-settings/mutate') return { status: 200, body: JSON.stringify({ ok: true }) }
+      return { status: 404, body: 'no' }
+    })
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
+    try {
+      const paired = await call(port, 'POST', '/remote/api/dsh-web-ui-settings/mutate', { cookie, body: '{}' })
+      expect(paired.status).toBe(200)
+      const unpaired = await call(port, 'POST', '/remote/api/dsh-web-ui-settings/mutate', { body: '{}' })
+      expect(unpaired.status).toBe(403)
+      expect(JSON.parse(unpaired.body).result.error.code).toBe('unpaired')
+      expect(upstream.hits.map(hit => hit.url)).toEqual(['/api/dsh-web-ui-settings/mutate'])
+    } finally {
+      await close()
+      await upstream.close()
+    }
+  })
+
+  it('user paired still reaches the configuration plane but not the control planes', async () => {
+    // Given a paired device; when it calls the settings plane and the pairing
+    // control plane; then settings proxies while pairing stays forbidden.
+    const service = makeService()
+    const cookie = pairedCookie(service)
+    const upstream = await startUpstream(() => ({ status: 200, body: '{"leaked":true}' }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
+    try {
+      const pair = await call(port, 'POST', '/remote/api/pair/status', { cookie, body: '{}' })
       expect(pair.status).toBe(403)
       const pairBody = JSON.parse(pair.body) as { result: { ok: boolean; error: { code: string } } }
       expect(pairBody.result.ok).toBe(false)
       expect(pairBody.result.error.code).toBe('forbidden')
-      // Non-control paths still proxy with the policy off (the stale client
-      // rewrite must not 403), including the configuration plane.
-      const settings = await call(port, 'POST', '/remote/api/settings/describe', { body: '{}' })
+      // Non-control paths still proxy for the paired device, including the
+      // configuration plane, which is the parity the bridge exists for.
+      const settings = await call(port, 'POST', '/remote/api/settings/describe', { cookie, body: '{}' })
       expect(settings.status).toBe(200)
       expect(upstream.hits.map(hit => hit.url)).toEqual(['/api/settings/describe'])
     } finally {
@@ -326,7 +394,7 @@ describe('remote desktop channel (/remote)', () => {
       if (req.url === '/sidebar/api/fs.tree') return { status: 200, body: JSON.stringify({ ok: true, value: { entries: [] } }) }
       return { status: 404, body: 'no' }
     })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       const pet = await call(port, 'GET', '/remote/api/pet/state', { cookie })
       expect(pet.status).toBe(200)
@@ -344,7 +412,7 @@ describe('remote desktop channel (/remote)', () => {
   it('denies every physically-local control plane with a forbidden envelope', async () => {
     const service = makeService()
     const cookie = pairedCookie(service)
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: 1 }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => 1 }))
     try {
       for (const prefix of LOCAL_ONLY_PREFIXES) {
         const result = await call(port, 'POST', `/remote${prefix}/probe`, {
@@ -368,7 +436,7 @@ describe('remote desktop channel (/remote)', () => {
     const service = makeService()
     const cookie = pairedCookie(service)
     const upstream = await startUpstream(() => ({ status: 200, body: '{"leaked":true}' }))
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       for (const path of ['/remote/api/pair/status', '/remote/api/pair/revoke', '/remote/api/pair/issue']) {
         const result = await call(port, 'POST', path, { cookie, body: '{}' })
@@ -390,7 +458,7 @@ describe('remote desktop channel (/remote)', () => {
       if (req.url === '/api/dsh-web-ui-settings/describe') return { status: 200, body: JSON.stringify({ ok: true, value: {} }) }
       return { status: 404, body: 'no' }
     })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       const result = await call(port, 'POST', '/remote/api/dsh-web-ui-settings/describe', { cookie, body: '{}' })
       expect(result.status).toBe(200)
@@ -411,7 +479,7 @@ describe('remote desktop channel (/remote)', () => {
       }
       return { status: 404, body: 'no' }
     })
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       const result = await call(port, 'GET', '/remote/api/session.export?sessionId=s-1&includeDescendants=1', { cookie })
       expect(result.status).toBe(200)
@@ -425,7 +493,7 @@ describe('remote desktop channel (/remote)', () => {
   it('rejects unknown shapes: wrong method, bare prefix, traversal', async () => {
     const service = makeService()
     const cookie = pairedCookie(service)
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: 1 }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => 1 }))
     try {
       expect((await call(port, 'OPTIONS', '/remote/api/session.list', { cookie })).status).toBe(405)
       expect((await call(port, 'POST', '/remote/api/', { body: ENVELOPE('r', 'x', {}), cookie })).status).toBe(404)
@@ -438,7 +506,7 @@ describe('remote desktop channel (/remote)', () => {
   it('returns a fixed 502 message instead of the upstream error text', async () => {
     const service = makeService()
     const cookie = pairedCookie(service)
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: 1 }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => 1 }))
     try {
       const result = await call(port, 'POST', '/remote/api/session.list', {
         body: ENVELOPE('rpc-502', 'session.list', {}),
@@ -474,7 +542,7 @@ describe('remote desktop channel (/remote)', () => {
       return { status: 404, body: 'no' }
     })
     const auth = createInnerAuth(() => `http://127.0.0.1:${String(upstream.port)}/?token=launch-1`)
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port, auth }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port, auth }))
     try {
       const result = await call(port, 'POST', '/remote/api/session.list', {
         body: ENVELOPE('rpc-auth', 'session.list', {}),
@@ -514,7 +582,7 @@ describe('remote desktop channel (/remote)', () => {
       return { status: 404, body: 'no' }
     })
     const auth = createInnerAuth(() => `http://127.0.0.1:${String(upstream.port)}/?token=launch-1`)
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port, auth }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port, auth }))
     try {
       const stale = await call(port, 'POST', '/remote/api/session.list', {
         body: ENVELOPE('rpc-stale', 'session.list', {}),
@@ -539,7 +607,7 @@ describe('remote desktop channel (/remote)', () => {
   it('accepts the cookieless header credential with no device cookie at all', async () => {
     const service = makeService()
     const upstream = await startUpstream(() => ({ status: 200, body: JSON.stringify({ type: 'server-response', rpcId: 'rpc-h', result: { ok: true } }) }))
-    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: upstream.port }))
+    const { port, close } = await serve(makeRemoteApiRoutes({ service, port: () => upstream.port }))
     try {
       service.issue()
       const device = service.accept('tok-1')

@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-20-aggregate-viewport-lock-without-has.md: c1ffb9c26923904c3af15813e88ebbb4ffcc4a31
+2026-10-20-aggregate-viewport-lock-without-has.zh.md: 7423a3c24f5d25c2b2e91b2c546eef91336a7c02

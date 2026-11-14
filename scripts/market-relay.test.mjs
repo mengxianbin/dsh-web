@@ -139,6 +139,52 @@ test('relay proxy forwards to the registered target with a rewritten Host', asyn
   }
 })
 
+test('relay proxy adds immutable caching to hashed build assets only', async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('asset-body', {
+    status: 200,
+    headers: { 'content-type': 'text/javascript; charset=utf-8' },
+  })
+  try {
+    const db = relayDb({ registrations: { abcd1234abcd1234: { secret_hash: 'x', target: TARGET } } })
+
+    // The tunneled instance sends no cache headers at all; the relay is the only
+    // place a hashed build asset can be given permission to stay on the client.
+    const hashed = await proxy(db, '/assets/index-5SrrfWpU.js', { method: 'GET', headers: { host: RELAY_HOST } })
+    assert.equal(hashed.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+    assert.equal(hashed.headers.get('content-type'), 'text/javascript; charset=utf-8', 'origin headers survive')
+    assert.equal(await hashed.text(), 'asset-body', 'the body passes through unchanged')
+
+    // Nested chunk paths carry the hash too (langs/fonts live one level down).
+    const chunk = await proxy(db, '/assets/langs/cpp-DIPi6g--.js', { method: 'GET', headers: { host: RELAY_HOST } })
+    assert.equal(chunk.headers.get('cache-control'), 'public, max-age=31536000, immutable')
+
+    // Everything else keeps whatever the origin sent — a year-long cache on an
+    // unhashed name, an API reply or a document would be wrong.
+    const barePaths = ['/assets/favicon.svg', '/assets/manifest.webmanifest', '/api/pair/status', '/']
+    const untouched = await Promise.all(barePaths.map((path) =>
+      proxy(db, path, { method: 'GET', headers: { host: RELAY_HOST } })))
+    untouched.forEach((response, i) => {
+      assert.equal(response.headers.get('cache-control'), null, barePaths[i] + ' must keep the origin headers')
+    })
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
+test('relay proxy never caches a non-200 for a hashed asset path', async () => {
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => new Response('gone', { status: 404 })
+  try {
+    const db = relayDb({ registrations: { abcd1234abcd1234: { secret_hash: 'x', target: TARGET } } })
+    const response = await proxy(db, '/assets/index-5SrrfWpU.js', { method: 'GET', headers: { host: RELAY_HOST } })
+    assert.equal(response.status, 404)
+    assert.equal(response.headers.get('cache-control'), null)
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
+
 test('relay proxy serves a bilingual offline page for unknown or dead ids', async () => {
   const db = relayDb()
   const response = await proxy(db, '/')

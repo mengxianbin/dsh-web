@@ -1,0 +1,14 @@
+# Bundle patch for dsh-task-board-remote: one host-half row that binds the task
+# board to the remote bridge's extension seam. The row id stays in this
+# package's own namespace (the loader keeps ONE entry per id across every
+# bundle, later wins, and a shared id is a silent loss), and the row's name is
+# exactly the package name.
+#
+# The row declares no injected service in either direction: it waits for the
+# remoteBridge seam and for the taskBoard face on its own, so a profile that
+# mounts it before (or without) either one still boots, and loses exactly this
+# surface. That is also why the row carries no "disabled" switch: with neither
+# service present it registers nothing.
+- insert:
+    - id: task-board-remote
+      name: '@linxin666/dsh-task-board-remote'

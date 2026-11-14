@@ -24,11 +24,11 @@ Status: implemented
 - Worker 行为：只拦截**对 `/` 的 GET 导航**。网络优先：携带同源凭据重新请求 `/pair-app`——配对有效则拿到当前应用壳并刷新 `lastSeenAt`（每次重开都在为会话续期）；被拒绝则把原导航放行（插件不在时由 harness 如实应答）；网络失败则回退缓存的壳（CacheStorage 中的 `dsh-remote-shell-v1`），短暂离线的打开仍能进入应用。install 预热缓存；activate 清理异名缓存并接管客户端。
 - `pairingFailurePage`（配对不再有效时由 worker 在 `/` 交付）现在同时覆盖两种入口——`/pair-accept` 上的死链接、`/` 上的过期会话——并说明重新配对即可恢复。
 - `DEFAULT_IDLE_EXPIRE_MS` 7 → 30 天：worker 的活跃刷新意味着只有真正弃用才会耗尽窗口，而 30 天与周边流程所依赖的浏览器凭据生命周期一致。`idleExpireMs` 配置本就存在，可按部署覆盖。
-- 仅限安全上下文：纯 HTTP 局域网源永远不会注册该 worker（https/localhost 之外没有 service worker）；局域网重开意味着重新扫码。两份 README 的已知限制均已记录。
+- service worker 只存在于安全上下文，因此 worker 在能注册的地方接管 `/`。纯 HTTP 局域网源装不了它，捕获脚本在那里改为把插件自有的落地路径留在地址栏：[Plain-HTTP LAN reopens stayed on a path no device credential can answer](2026-10-15-remote-plain-http-lan-reopen-path.zh.md)。
 
 ## Alternatives considered
 
-- **地址栏留在插件自有路径**（放弃 replaceState 到 `/`）。否决：replaceState 是为了让官方 SPA 停在 canonical root；把 `/pair-app?device=` 留在地址栏会把有效设备凭据持久化进浏览器历史与同步备份——比 worker 更差的取舍，还要先做一轮未经验证的 SPA 路径兼容。
+- **地址栏留在插件自有路径**（放弃 replaceState 到 `/`）。否决：replaceState 是为了让官方 SPA 停在 canonical root；把 `/pair-app?device=` 留在地址栏会把有效设备凭据持久化进浏览器历史与同步备份——比 worker 更差的取舍，还要先做一轮未经验证的 SPA 路径兼容。该路径不含凭据的形态后来成为 worker 装不上的那些源上的重开目标；它为何无需兼容性验证见[纯 HTTP 重开笔记](2026-10-15-remote-plain-http-lan-reopen-path.zh.md)。
 - **为配对手机铸 harness 浏览器认证 cookie**（插件可以为任意 authority 兑换启动令牌）。架构上否决：有了那枚 cookie，官方 SPA 会直连 `/api`、通过连接围栏、绕开配对门——本 cohort 没有任何组件发出 `api/gate`，停止将不再能切断设备。这正是无 cookie 设计要避免的。
 - **同时拦截深层 SPA 路径**而不只是 `/`。否决：SPA 始终位于 `/`（replaceState），深层路径入口在实践中不会出现；外科手术式的拦截把对官方 UI 的影响面压到最小。
 - **只写文档「坏了就重扫」。** 否决：从手机重开是这个功能的主要移动路径；每次恢复标签都确定性 401 是缺陷，不是限制。
@@ -37,7 +37,7 @@ Status: implemented
 
 - 配对有效期内，隧道（https）手机重开直接回到应用；撤销依然有牙——worker 的网络优先校验落在 `/pair-app`，被撤销设备在 `/` 看到双语重扫页。
 - 每次重开多两个小的同源请求（worker 更新检查与 `/pair-app` 壳刷新），设计上均被栅栏保护且不限流。
-- 纯 HTTP 局域网重开仍会撞 harness 401，需要重扫（局域网内成本很低）；已写入文档。
+- 纯 HTTP 局域网重开改为经设备门控的落地页回到应用，不再撞 harness 401（见[纯 HTTP 重开笔记](2026-10-15-remote-plain-http-lan-reopen-path.zh.md)）。浏览器拒绝注册 worker 的安全源维持原样，重开仍会退回 harness 栅栏，该限制已写入两份 README 的已知限制。
 - 插件被禁用或卸载后，残留的 worker 把导航放行给 harness——与之前相同的死路，没有新增失败模式。
 - 30 天空闲默认对新部署与既有部署一视同仁（常量供 schema 默认使用）；在 profile patch 里固定 `idleExpireMs` 的部署不受影响。
 
@@ -45,4 +45,5 @@ Status: implemented
 
 - `tests/routes.spec.ts`：`/pair-app.sw.js` 以 `text/javascript`、`no-store`、`service-worker-allowed: /` 应答；外来 authority 403；无 index provider 时不注册；打过补丁的应用壳注册该 worker；失效页文案断言更新。
 - `tests/app-sw.spec.ts`（新增）：在 mock 的 worker scope 上跑决策矩阵——处理器注册、非导航/非根请求忽略、网络优先应答与缓存刷新、拒绝时放行、离线缓存回退、空缓存放行、异名缓存清理、脚本根级路径。
+- `tests/app-shell-capture.spec.ts`：捕获脚本按源决定的重开目标（随纯 HTTP 重开路径新增）。
 - 包内 306 个测试全绿；仓库 `pnpm typecheck`、`pnpm test`、`pnpm docs:check` 通过；包内 `tsdown` 构建干净。

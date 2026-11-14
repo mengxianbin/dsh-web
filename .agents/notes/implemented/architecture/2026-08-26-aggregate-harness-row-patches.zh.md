@@ -24,3 +24,4 @@ dsh-perf 的 bundle patch 包含两类内容：自身的插件行（`- insert:` 
 - 聚合现在为 20 行 / 18 依赖；`aggregate:check`、聚合脚本测试（5/5）、`pnpm test:scripts`（211/211）以及 dsh-web-all、dsh-perf 包测试保持全绿。
 - 从 v0.3.5 起安装 `@linxin666/dsh-web-all` 的用户默认启用 dsh-perf（行配置：meter 2000ms、窗口 120s），官方写批延迟为 500ms。
 - 未来需要 patch 官方行的子包，在其 `cordis.patch.yml` 写一条顶层 bare `- id:` 行（带 name 与 config）即可，聚合器原样转发。子包的 patch 行必须重述目标行拥有的全部键——配置是整体替换，从不合并。
+- insert 行自身的行选项（name/config 之外的键，例如 host-only 子包携带的平台守卫 `disabled: !!js process.platform !== 'win32'`）同样原样透传：解析侧对 insert 与 patch 两类行都保留额外行键（嵌套子树整体移动），渲染侧把它们放在 name/config 之后以保持各解析方依赖的相邻性。曾静默丢弃（dsh-win-bash 接线时暴露），修复由 scripts/aggregate.test.mjs 的门禁用例钉住。

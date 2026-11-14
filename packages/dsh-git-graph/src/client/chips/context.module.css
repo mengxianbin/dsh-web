@@ -135,8 +135,26 @@
 }
 
 /* In the hero row the menu opens downward (top: calc(100% + 4px)), matching
-   the official workspace picker anchored under the same chip row. */
+   the official workspace picker anchored under the same chip row. The side is
+   measured per open (BranchPopover): the hero row sits at the bottom of the
+   page, so a card that only ever opened downward ran out of the window. */
 .popoverHero {
+  bottom: auto;
+  top: calc(100% + 4px);
+}
+
+/* Measured upward (the dock seat's own side, and the hero seat whenever the
+   room below it cannot hold the card). Declared last so it outranks both
+   anchors above for either seat. */
+.popoverUp {
+  top: auto;
+  bottom: calc(100% + 8px);
+}
+
+/* Measured downward: the hero seat's own side, and the dock seat's `up` when it
+   is crowded by the window's top edge. Must follow `.popover`: this file is a
+   CSS module whose classes share one specificity. */
+.popoverDown {
   bottom: auto;
   top: calc(100% + 4px);
 }
@@ -187,6 +205,10 @@ body[data-ds-dark-theme] .searchBox {
 .list {
   flex: 1;
   min-height: 64px;
+  /* The card is capped at 360px in total; the list takes what the search box,
+     the dirty line, the notice and the four-item footer leave of it. `auto`
+     keeps the list at its content height while that still fits. */
+  max-height: 178px;
   overflow-x: hidden;
   overflow-y: auto;
   padding: 2px 6px 6px;

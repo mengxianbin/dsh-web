@@ -52,4 +52,24 @@ describe('tunnelPlanOf', () => {
     expect(tunnelPlanOf({ tunnelToken: '' }, 3080)).toEqual({ mode: 'off' })
     expect(tunnelPlanOf({}, 3080)).toEqual({ mode: 'off' })
   })
+
+  it('operator defers the quick plan to off while the port is unbound (0.2.1-rc.2 port type)', () => {
+    // Given an autoTunnel configuration while the listener port is still undefined
+    // When tunnelPlanOf computes the plan
+    // Then the plan stays off instead of minting an http://127.0.0.1:undefined target
+    expect(tunnelPlanOf({ autoTunnel: true }, undefined)).toEqual({ mode: 'off' })
+    expect(tunnelPlanOf({ autoTunnel: true, tunnelToken: 'tok', publicBaseUrl: 'https://dsh.example.com' }, undefined)).toEqual({ mode: 'off' })
+  })
+
+  it('operator runs the named and off plans without needing the port', () => {
+    // Given named-tunnel and empty configurations while the port is undefined
+    // When tunnelPlanOf computes each plan
+    // Then named and off resolve normally without a local port
+    expect(tunnelPlanOf({ tunnelToken: 'tok', publicBaseUrl: 'https://dsh.example.com' }, undefined)).toEqual({
+      mode: 'named',
+      token: 'tok',
+      publicUrl: 'https://dsh.example.com',
+    })
+    expect(tunnelPlanOf({}, undefined)).toEqual({ mode: 'off' })
+  })
 })

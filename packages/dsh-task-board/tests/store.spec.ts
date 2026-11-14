@@ -173,7 +173,7 @@ describe('parseLedger', () => {
   })
   it('round-trips execution targets and repairs broken ones', () => {
     const pinned = createTask(
-      { title: 'pinned', description: '', prompt: '', workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only' },
+      { title: 'pinned', description: '', prompt: '', workspaceId: 'ws-1', mode: 'anchored', permission: 'read-only', model: 'p/m', reasoningEffort: 'high' },
       1,
       't-1',
     )
@@ -181,6 +181,7 @@ describe('parseLedger', () => {
     expect(parsed[0].workspaceId).toBe('ws-1')
     expect(parsed[0].mode).toBe('anchored')
     expect(parsed[0].permission).toBe('read-only')
+    expect(parsed[0].reasoningEffort).toBe('high')
 
     // Blank strings clear the pin; unknown permission strings (a future
     // version's value) fall back to the session default, not a dropped row.
@@ -189,11 +190,16 @@ describe('parseLedger', () => {
       workspaceId: '   ',
       mode: '',
       permission: 'sudo-everything',
+      reasoningEffort: '   ',
     }]))
     expect(repaired).toHaveLength(1)
     expect(repaired[0].workspaceId).toBeUndefined()
     expect(repaired[0].mode).toBeUndefined()
     expect(repaired[0].permission).toBeUndefined()
+    expect(repaired[0].reasoningEffort).toBeUndefined()
+
+    // A non-string effort is an invalid row, like any other execution-target field.
+    expect(parseLedger(JSON.stringify([{ ...pinned, reasoningEffort: 3 }]))).toEqual([])
   })
 
   it('keeps the session-reuse opt-in and normalizes a bare false (#1419)', () => {
@@ -246,7 +252,67 @@ describe('schedule persistence', () => {
     )
     store.save([task])
     expect(store.load()[0].schedule).toEqual({
-      enabled: true, cron: '0 9 * * *', nextRunAt: 100, lastTriggeredAt: 50,
+      enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: 100, lastTriggeredAt: 50, runCount: 0,
+    })
+  })
+
+  it('operator saving a rule with its own IANA zone gets it back on reload', () => {
+    // Given a card whose rule carries an explicit zone
+    // When it is saved and reloaded through storage
+    // Then the zone survives alongside the expression
+    const storage = new FakeStorage()
+    const store = new LocalStorageTaskStore('k', storage)
+    const task = withSchedule(
+      createTask({ title: 'A', description: '', prompt: '' }, 1, 't-1'),
+      { enabled: true, cron: '0 9 * * *', timeZone: 'Asia/Shanghai', nextRunAt: 100, lastTriggeredAt: 50 },
+      2,
+    )
+    store.save([task])
+    expect(store.load()[0].schedule).toEqual({
+      enabled: true, mode: 'cron', cron: '0 9 * * *', timeZone: 'Asia/Shanghai', nextRunAt: 100, lastTriggeredAt: 50, runCount: 0,
+    })
+  })
+
+  it('operator reloading an unresolvable stored zone gets it cleared, not kept', () => {
+    // Given stored rules with an unknown zone, a non-string zone and UTC
+    // A zone this runtime cannot resolve would make every later resolve fail,
+    // so the repair clears it and the rule falls back to the Host zone.
+    // When the ledger is parsed
+    // Then only the resolvable zone is kept and every rule still parses
+    const valid = createTask({ title: 'ok', description: '', prompt: '' }, 1, 't-1')
+    const raw = [
+      { ...valid, id: 't-1', schedule: { enabled: true, cron: '0 9 * * *', timeZone: 'Not/AZone' } },
+      { ...valid, id: 't-2', schedule: { enabled: true, cron: '0 9 * * *', timeZone: 42 } },
+      { ...valid, id: 't-3', schedule: { enabled: true, cron: '0 9 * * *', timeZone: 'UTC' } },
+    ]
+    const parsed = parseLedger(JSON.stringify(raw))
+    expect(parsed[0].schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
+    expect(parsed[1].schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
+    expect(parsed[2].schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', timeZone: 'UTC', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
+  })
+
+  it('operator reloading a ledger keeps a one-shot plan and drops an unusable one', () => {
+    // Given one-shot rules: a usable one, one with no instant, and a recurring
+    // rule carrying a bad cap, a spent counter and a stop record
+    // When the ledger is parsed back
+    // Then the unusable plan is dropped and the counter/stop record survive
+    const valid = createTask({ title: 'ok', description: '', prompt: '' }, 1, 't-1')
+    const raw = [
+      { ...valid, id: 't-1', schedule: { enabled: true, mode: 'once', at: 123 } },
+      { ...valid, id: 't-2', schedule: { enabled: true, mode: 'once' } },
+      { ...valid, id: 't-3', schedule: { enabled: true, mode: 'cron', cron: '0 9 * * *', maxRuns: 0 } },
+      {
+        ...valid, id: 't-4',
+        schedule: { enabled: true, mode: 'cron', cron: '0 9 * * *', runCount: 2, maxRuns: 2, endedAt: 9, endedReason: 'limit' },
+      },
+    ]
+    const parsed = parseLedger(JSON.stringify(raw))
+    expect(parsed[0].schedule).toEqual({ enabled: true, mode: 'once', at: 123, nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
+    expect(parsed[1].schedule).toBeUndefined() // a one-shot with no instant cannot fire
+    expect(parsed[2].schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
+    expect(parsed[3].schedule).toEqual({
+      enabled: true, mode: 'cron', cron: '0 9 * * *', maxRuns: 2,
+      nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 2, endedAt: 9, endedReason: 'limit',
     })
   })
 
@@ -266,7 +332,7 @@ describe('schedule persistence', () => {
     const parsed = parseLedger(JSON.stringify(raw))
     expect(parsed).toHaveLength(4) // no row dropped for a bad schedule
     expect(parsed[0].schedule).toEqual({
-      enabled: false, cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: 5,
+      enabled: false, mode: 'cron', cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: 5, runCount: 0,
     })
     expect(parsed[1].schedule).toBeUndefined() // blank cron → schedule dropped
     expect(parsed[2].schedule).toBeUndefined() // non-object schedule → dropped
@@ -281,8 +347,22 @@ describe('schedule persistence', () => {
       { ...valid, id: 't-3', schedule: { enabled: true, cron: '99 99 99 99 99' } },
     ]
     const parsed = parseLedger(JSON.stringify(raw))
-    expect(parsed[0].schedule).toEqual({ enabled: true, cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined })
+    expect(parsed[0].schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: undefined, lastTriggeredAt: undefined, runCount: 0 })
     expect(parsed[1].schedule).toBeUndefined() // not five fields
     expect(parsed[2].schedule).toBeUndefined() // values out of range
+  })
+
+  it('user reloading a ledger with the /goal opt-in keeps it and a stray false normalizes back', () => {
+    // Given a stored card that opted into goal runs
+    const optedIn = createTask({ title: 'goal', description: '', prompt: '', goalRun: true }, 1, 't-goal')
+
+    // When the ledger is parsed back
+    // Then the opt-in survives, and its canonical off-state stays absent
+    expect(parseLedger(JSON.stringify([optedIn]))[0].goalRun).toBe(true)
+    expect(parseLedger(JSON.stringify([{ ...optedIn, goalRun: false }]))[0].goalRun).toBeUndefined()
+
+    // And a non-boolean is an invalid row, like any other field
+    expect(parseLedger(JSON.stringify([{ ...optedIn, goalRun: 'no' }]))).toEqual([])
+    expect(isTaskRecord({ ...optedIn, goalRun: 1 })).toBe(false)
   })
 })

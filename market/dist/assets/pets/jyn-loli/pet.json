@@ -1,0 +1,278 @@
+{
+  "petManifestVersion": 2,
+  "id": "jyn-loli",
+  "displayName": "鲸鱼娘·萝莉",
+  "license": "MIT",
+  "renderer": "frames2d",
+  "description": "鲸鱼娘萝莉的站立待机循环（呼吸 / 发丝 / 裙摆滞后）；外加 4 个待机小动作 —— 挠头、抱鲸鱼枕头、舔棒棒糖、踏着拍子左右摇摆再挥手 —— 由 gameplay.idleDirector 每 10 秒判定一次、按权重随机插播；每个动作播一遍就回到待机；打工（gameplay.work）：点菜单里的打工，她会端着一大碗饭吭哧吭哧吃（work 循环轨，打工期间一直播），每 10 秒结算一次成败、五成概率成功 ——成功播 work-success（圆肚子 + 竖大拇指）、失败播 work-fail（捂嘴喷一道小彩虹），两条结果轨都正好 3 秒播完就接回 work；休息（gameplay.sleep，数值照抄女仆鲸鱼娘）：点菜单里的休息，她会打一个哈欠慢慢躺下（rest 入场轨，播一遍），然后躺着轻轻呼吸、每 30 秒回 energy 4 点（resting 循环轨）。全部帧由 MiniMax-H3 首尾帧锁定生成。",
+  "author": "11726",
+  "version": "1.0.0",
+  "frames2d": {
+    "dir": "thumb",
+    "defaultFrameMs": 40,
+    "tracks": {
+      "idle": {},
+      "scratch-head": {
+        "loop": false,
+        "fallback": "idle"
+      },
+      "whale-pillow": {
+        "loop": false,
+        "fallback": "idle"
+      },
+      "lollipop": {
+        "loop": false,
+        "fallback": "idle"
+      },
+      "dance-sway": {
+        "loop": false,
+        "fallback": "idle"
+      },
+      "work": {},
+      "work-success": {
+        "loop": false,
+        "fallback": "work"
+      },
+      "work-fail": {
+        "loop": false,
+        "fallback": "work"
+      },
+      "rest": {
+        "loop": false,
+        "fallback": "resting"
+      },
+      "resting": {}
+    },
+    "phases": {
+      "idle": "idle"
+    }
+  },
+  "gameplay": {
+    "stats": {
+      "hunger": {
+        "max": 100,
+        "initial": 100,
+        "decayPerMinute": 1,
+        "workingDecayPerMinute": 5
+      },
+      "mood": {
+        "max": 100,
+        "initial": 100,
+        "decayPerMinute": 0.5
+      },
+      "energy": {
+        "max": 100,
+        "initial": 100,
+        "decayPerMinute": 0.25
+      },
+      "affection": {
+        "max": 500,
+        "initial": 100,
+        "idleDecayPerMinute": 0.2
+      }
+    },
+    "hitBox": {
+      "x0": 0.0,
+      "y0": 0.0,
+      "x1": 1.0,
+      "y1": 1.0
+    },
+    "idleDirector": {
+      "intervalMs": 10000,
+      "maxMiss": 10,
+      "idleWeight": 3,
+      "acts": [
+        {
+          "track": "scratch-head",
+          "weight": 1
+        },
+        {
+          "track": "whale-pillow",
+          "weight": 1
+        },
+        {
+          "track": "lollipop",
+          "weight": 1
+        },
+        {
+          "track": "dance-sway",
+          "weight": 1
+        }
+      ]
+    },
+    "touch": {
+      "zones": [
+        {
+          "name": "head",
+          "y0": 0,
+          "y1": 0.3333,
+          "branches": [
+            {
+              "probability": 0.3,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 5
+                }
+              ],
+              "phrases": [
+                "呀！突然被摸头…好害羞~"
+              ]
+            },
+            {
+              "probability": 0.7,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 5
+                }
+              ],
+              "phrases": [
+                "唔…好舒服~"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "body",
+          "y0": 0.3333,
+          "y1": 0.6667,
+          "branches": [
+            {
+              "probability": 0.3,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 10
+                }
+              ],
+              "phrases": [
+                "呀！别…别碰那里啦~"
+              ]
+            },
+            {
+              "probability": 0.7,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 10
+                }
+              ],
+              "phrases": [
+                "喂！你在摸哪里啦？"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "legs",
+          "y0": 0.6667,
+          "y1": 1,
+          "branches": [
+            {
+              "probability": 0.3,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 30
+                }
+              ],
+              "phrases": [
+                "呀！…那就…稍微一下下哦~"
+              ]
+            },
+            {
+              "probability": 0.07,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": 30
+                }
+              ],
+              "phrases": [
+                "不…不可以偷看啦！"
+              ]
+            },
+            {
+              "probability": 0.63,
+              "effects": [
+                {
+                  "stat": "affection",
+                  "amount": -5
+                }
+              ],
+              "phrases": [
+                "哼！讨厌！"
+              ]
+            }
+          ]
+        }
+      ],
+      "clickBoost": {
+        "stat": "mood",
+        "min": 0,
+        "max": 3
+      }
+    },
+    "passiveIncome": {
+      "currency": "treats",
+      "amount": 1,
+      "intervalMs": 1800000
+    },
+    "work": {
+      "state": "work",
+      "successState": "work-success",
+      "failState": "work-fail",
+      "tickMs": 10000,
+      "resultMs": {
+        "success": 3000,
+        "fail": 3000
+      },
+      "successProbability": 0.5,
+      "success": {
+        "effects": [
+          {
+            "currency": "treats",
+            "amount": 1
+          }
+        ]
+      }
+    },
+    "sleep": {
+      "state": "rest",
+      "restore": {
+        "stat": "energy",
+        "amount": 4,
+        "intervalMs": 30000
+      }
+    },
+    "shop": {
+      "items": [
+        {
+          "id": "food1",
+          "label": "特制黄油面包",
+          "price": 2,
+          "currency": "treats",
+          "effects": [
+            {
+              "stat": "hunger",
+              "amount": 40
+            }
+          ]
+        },
+        {
+          "id": "food2",
+          "label": "红豆沙包",
+          "price": 4,
+          "currency": "treats",
+          "effects": [
+            {
+              "stat": "hunger",
+              "amount": 80
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

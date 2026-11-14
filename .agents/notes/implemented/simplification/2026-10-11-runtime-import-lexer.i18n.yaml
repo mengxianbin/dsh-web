@@ -1,0 +1,4 @@
+# Bilingual-pair consistency record (docs/i18n.md).
+# Both languages have equal authority; re-record with git hash-object after paired edits.
+2026-10-11-runtime-import-lexer.md: b2272d288870449b5f2fc03c6dc1140ef071bc97
+2026-10-11-runtime-import-lexer.zh.md: f53ba1dd6579f7095fdb6b8e54700330e28e624c
