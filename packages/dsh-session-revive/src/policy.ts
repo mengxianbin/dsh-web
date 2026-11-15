@@ -10,6 +10,7 @@ import {
   type ConditionLists,
   type FailureClass,
 } from './config.ts'
+import { SelfLearn, type SelfLearnEvent, type SelfLearnSnapshot } from './selflearn.ts'
 
 /** One detection of a `turn/end` error, always emitted. */
 export interface DetectRecord {
@@ -134,6 +135,8 @@ export interface PolicySnapshot {
   quota: Array<{ chainId: string; used: number }>
   /** Effective condition lists this policy classifies with (拍板账⑨ status 回显生效清单). */
   conditions: { revive: string[]; wall: string[]; overridden: string[] }
+  /** Self-learning statistics + learned whitelist state (拍板⑭ status 回显统计; 新增字段, 既有字段零改动). */
+  selflearn: SelfLearnSnapshot
 }
 
 interface SessionState {
@@ -189,6 +192,12 @@ export class RevivalPolicy {
    */
   private readonly quota = new Map<string, number[]>()
   private readonly waves = new Map<string, WaveState>()
+  /**
+   * The self-learning loop (拍板⑭): sample trail per refined code, threshold
+   * admission into the whitelist, strike eviction of LEARNED entries. Fed
+   * only from this policy's existing entry points — in-memory, event-driven.
+   */
+  private readonly selfLearn: SelfLearn
   private lastPlannedAt = 0
   private readonly counters: Record<string, number> = {
     detected: 0,
@@ -214,6 +223,43 @@ export class RevivalPolicy {
     this.staggerMs = options.staggerMs
     this.conditions = options.conditions ?? RULED_CONDITIONS
     this.conditionOverrides = options.conditionOverrides ?? []
+    // classOf resolves at call time: admission consults it, it consults the
+    // learner's admitted set — no construction-order cycle.
+    this.selfLearn = new SelfLearn({ classOf: (code) => this.classOf(code) })
+  }
+
+  /**
+   * The effective class of a code: the learner's admitted entries join the
+   * revive flow (拍板⑭ 自动准入), everything else classifies exactly as the
+   * config-overridable ruled lists say (拍板⑨ — the learner never mutates
+   * those, so 「配置值仍可覆盖」holds in both directions).
+   */
+  private classOf(code: string): FailureClass {
+    if (this.selfLearn.isAdmitted(code)) return 'revive'
+    return classifyFailure(code, this.conditions)
+  }
+
+  /** Ledger lines for admission/eviction verdicts (拍板⑭ 决策台账,被动可查零推送). */
+  private learnRecords(events: SelfLearnEvent[]): PolicyRecord[] {
+    const records: PolicyRecord[] = []
+    for (const event of events) {
+      records.push({
+        kind: 'log',
+        at: event.at,
+        event: 'selflearn-decision',
+        detail: { direction: event.type, code: event.code, n: event.n, rate: event.rate },
+      })
+      if (event.type === 'evict') {
+        // 一行报警 (拍板⑭): the eviction is the alarm — one line, log only.
+        records.push({
+          kind: 'log',
+          at: event.at,
+          event: 'selflearn-alarm',
+          detail: { code: event.code, sessionId: event.sessionId, strikes: event.strikes, n: event.n, rate: event.rate },
+        })
+      }
+    }
+    return records
   }
 
   /**
@@ -227,30 +273,43 @@ export class RevivalPolicy {
 
   /**
    * A turn ended without an error: the session demonstrably runs, so a wall
-   * suspension and a wave hold both lose their subject and are cleared.
+   * suspension and a wave hold both lose their subject and are cleared; the
+   * self-learning trail's pending sample (if any) decides recovered (拍板⑭).
    * @param sessionId - the session that completed a turn.
    * @param at - event timestamp.
-   * @returns records to log (only when something was actually cleared).
+   * @returns records to log (clears and/or self-learning verdicts; empty when neither applies).
    */
   onSuccess(sessionId: string, at: number): PolicyRecord[] {
+    const learn = this.selfLearn.onSuccess(sessionId, at)
+    const records: PolicyRecord[] = []
     const state = this.states.get(sessionId)
-    if (state === undefined) return []
-    const cleared: string[] = []
-    if (state.suspendedUntil !== undefined) {
-      state.suspendedUntil = undefined
-      state.wallRoute = undefined
-      cleared.push('suspended')
+    if (state !== undefined) {
+      const cleared: string[] = []
+      if (state.suspendedUntil !== undefined) {
+        state.suspendedUntil = undefined
+        state.wallRoute = undefined
+        cleared.push('suspended')
+      }
+      if (this.dropHeld(sessionId)) cleared.push('held')
+      if (cleared.length > 0) {
+        this.counters.cleared += 1
+        records.push({ kind: 'state', at, sessionId, event: 'clear', cleared })
+      }
     }
-    if (this.dropHeld(sessionId)) cleared.push('held')
-    if (cleared.length === 0) return []
-    this.counters.cleared += 1
-    return [{ kind: 'state', at, sessionId, event: 'clear', cleared }]
+    records.push(...this.learnRecords(learn))
+    return records
   }
 
   /**
    * One `turn/end` error. Every error is detected and classified first; only
    * revive-class codes enter the revival flow, wall-class codes record a
    * zero-consumption suspension, other codes are observed and skipped.
+   *
+   * Self-learning wrapper (拍板⑭): the trail feeds FIRST — this session's
+   * previous sample decides here (it died again), which may admit or evict a
+   * code — then an evicted code parks (detect + stop-parked evidence, no
+   * decision, no quota, no wave feed), and the ruled flow runs otherwise with
+   * any admission/eviction ledger lines appended.
    */
   onError(input: {
     sessionId: string
@@ -261,8 +320,46 @@ export class RevivalPolicy {
     /** Route the failing request used (folded `request/header`); anchors the 拍板⑩ wall route. */
     route?: { provider: string; model?: string }
   }): PolicyRecord[] {
+    const learn = this.selfLearn.onFailure(input.code, input.sessionId, input.at)
+    if (this.selfLearn.isEvicted(input.code)) {
+      this.counters.detected += 1
+      this.counters.otherClass += 1
+      return [
+        {
+          kind: 'detect',
+          at: input.at,
+          sessionId: input.sessionId,
+          code: input.code,
+          cls: 'other',
+          ...(input.origin === undefined ? {} : { origin: input.origin }),
+        },
+        {
+          kind: 'log',
+          at: input.at,
+          event: 'stop-parked',
+          sessionId: input.sessionId,
+          detail: { cause: input.code, selflearn: 'evicted' },
+        },
+        ...this.learnRecords(learn),
+      ]
+    }
+    const records = this.errorFlow(input)
+    records.push(...this.learnRecords(learn))
+    return records
+  }
+
+  /** The ruled error flow (the pre-拍板⑭ account verbatim), called by the {@link RevivalPolicy.onError} wrapper. */
+  private errorFlow(input: {
+    sessionId: string
+    code: string
+    providerRetryAfterMs?: number
+    at: number
+    origin?: string
+    /** Route the failing request used (folded `request/header`); anchors the 拍板⑩ wall route. */
+    route?: { provider: string; model?: string }
+  }): PolicyRecord[] {
     const { sessionId, code, providerRetryAfterMs, at, origin, route } = input
-    const cls = classifyFailure(code, this.conditions)
+    const cls = this.classOf(code)
     this.counters.detected += 1
     if (cls === 'revive') this.counters.reviveClass += 1
     else if (cls === 'wall') this.counters.wallClass += 1
@@ -331,6 +428,10 @@ export class RevivalPolicy {
    */
   onModelSelection(input: { sessionId: string; provider: string; model?: string; at: number }): PolicyRecord[] {
     const { sessionId, provider, model, at } = input
+    // 拍板⑭ 样本剔除: any durable route switch between a failure and its
+    // outcome confounds the sample — drop it before the wall logic looks at
+    // session state (a selection that changes nothing still confounds).
+    this.selfLearn.onRouteChange(sessionId)
     const state = this.states.get(sessionId)
     if (state === undefined || state.suspendedUntil === undefined) return []
     const routeLabel = (route: { provider: string; model?: string }): string =>
@@ -501,6 +602,8 @@ export class RevivalPolicy {
     // Chains are session-scoped, so the can dies with the session.
     this.quota.delete(sessionId)
     for (const wave of this.waves.values()) wave.held.delete(sessionId)
+    // 拍板⑭: an undecided sample dies with its session (no observation, no counter).
+    this.selfLearn.onForget(sessionId)
   }
 
   /** Bounded introspection for the status endpoint; `at` prunes the quota windows. */
@@ -537,6 +640,7 @@ export class RevivalPolicy {
         wall: [...this.conditions.wall],
         overridden: [...this.conditionOverrides],
       },
+      selflearn: this.selfLearn.snapshot(at),
     }
   }
 
@@ -645,6 +749,11 @@ export class RevivalPolicy {
   }): PolicyRecord[] {
     const { sessionId, code, at, allowWaveHold } = input
     const records: PolicyRecord[] = []
+    // 拍板⑭: a code evicted while a wave still holds its sessions parks them
+    // on release too — an evicted code never re-enters the decision chain.
+    if (this.selfLearn.isEvicted(code)) {
+      return [{ kind: 'log', at, event: 'stop-parked', sessionId, detail: { cause: code, selflearn: 'evicted' } }]
+    }
     const state = this.stateOf(sessionId)
     const chainId = sessionId
 
@@ -735,6 +844,10 @@ export class RevivalPolicy {
     const plannedAt = Math.max(at, this.lastPlannedAt + this.staggerMs)
     this.lastPlannedAt = plannedAt
     this.counters.revived += 1
+    // 拍板⑭ 除名判据: only a revival of a LEARNED entry arms the sample's
+    // strike — config-pinned codes are the human layer and never accumulate
+    // strikes (配置值仍可覆盖: the learner manages only what it admitted).
+    if (this.selfLearn.isAdmitted(code)) this.selfLearn.markRevived(sessionId)
     records.push({
       kind: 'decision',
       at,

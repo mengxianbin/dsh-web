@@ -34,6 +34,7 @@ import {
   refineFailureCode,
   resolveConfig,
 } from './config.ts'
+import { MechanismHealth, readHostReviveHalted, removeReviveHealth } from './health-state.ts'
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
@@ -88,7 +89,12 @@ interface SweepPersistence {
  */
 export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Config): void => {
   const validated = Config(config)
-  if (validated.enabled === false) return
+  if (validated.enabled === false) {
+    // 拍板⑮: disabled = the face disappears, not turns bad — drop any ledger
+    // a previous run left behind (the reader then sees 未接线, never a stale green).
+    removeReviveHealth()
+    return
+  }
   const resolved = resolveConfig(validated, (raw, clamped) => {
     ctx.logger.warn(
       `dsh-session-revive: staggerMs ${raw} is below the ${STAGGER_MIN_MS} ms design floor; clamped to ${clamped}`,
@@ -114,6 +120,20 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     const log = (record: PolicyRecord): void => {
       ctx.logger.info(`dsh-session-revive ${JSON.stringify({ mode: resolved.mode, ...record })}`)
     }
+
+    // 拍板⑮: five-fact mechanism health (插件激活 / mode=live / status 端点
+    // 可读 / 断路器无连跳 / 无 HALT). The status builder is shared with the
+    // route so 「端点可读」tests the exact payload the endpoint serves; the
+    // ledger writes only when a fact flips (事件驱动, 正常近零写入).
+    const statusPayload = (): Record<string, unknown> => ({ mode: resolved.mode, ...policy.snapshot(Date.now()) })
+    const health = new MechanismHealth({
+      mode: resolved.mode,
+      readStatus: () => {
+        statusPayload()
+        return 'ok'
+      },
+      readHalted: readHostReviveHalted,
+    })
 
     const sendNudge = (sessionId: string, plannedAt: number, code?: string): void => {
       const delay = Math.max(0, plannedAt - Date.now())
@@ -147,7 +167,14 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     }
 
     const applyRecords = (records: PolicyRecord[]): void => {
-      for (const record of records) log(record)
+      for (const record of records) {
+        log(record)
+        // 拍板⑮: a breaker trip feeds the mechanism-health streak; the sync
+        // below re-evaluates the five facts right after this record batch
+        // (a write lands only when a fact actually flipped).
+        if (record.kind === 'breaker' && record.event === 'trip') health.noteTrip()
+      }
+      health.sync()
       // Shadow gate: the account above is complete; only the send is withheld.
       if (resolved.mode !== 'live') return
       for (const record of records) {
@@ -242,6 +269,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           return
         }
         for (const record of policy.onSuccess(sessionId, at)) log(record)
+        // 拍板⑮: a completed turn clears the breaker-streak fact.
+        health.noteCompleted()
+        health.sync()
         return
       }
       if (event.type === 'assistant/message') {
@@ -313,10 +343,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         }
       },
     })
-    const disposeRoute = ctx.webServer.register(
-      makeStatusRoute(() => ({ mode: resolved.mode, ...policy.snapshot(Date.now()) })),
-    )
+    const disposeRoute = ctx.webServer.register(makeStatusRoute(statusPayload))
     armWake()
+    // 拍板⑮: initial publish — the state change from absent to present.
+    health.sync()
 
     // 拍板⑪ boot sweep: at activation the plugin actively scans for orphan
     // turns instead of waiting for events — the `interrupted` closer only
@@ -388,6 +418,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       for (const timer of sendTimers) clearTimeout(timer)
       sendTimers.clear()
       abort.abort()
+      // 拍板⑮: unload removes the ledger — 停用 = 面消失, not 面变坏.
+      health.dispose()
       try {
         disposeRoute()
       } catch {

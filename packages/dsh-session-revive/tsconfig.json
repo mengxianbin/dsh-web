@@ -1,4 +1,5 @@
 {
+  "//paths-note": "环境钉单副本（2026-11-15，非阈值/非配置语义）：dev 锁文件 3ce6d99a7 重解析后 typert-protocol@0.1.2 的 dsh-brand 解析到 0.2.1，链入第二份 dsh-session@0.2.1-rc.1，双份 declare module '@deepseek-ai/cordis' 事件表增广使 ctx.on('session/event') 回调参数双身份报 TS2345（stash 对照：零改动同样红 = 预存环境破损）。paths 把程序内一切非相对 '@deepseek-ai/dsh-session' 导入钉回根符号链接的 0.1.2-rc.1 单副本，作用域仅本包编译单元，不动根 package.json/lockfile/他包。",
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -12,7 +13,10 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@deepseek-ai/dsh-session": ["../../node_modules/@deepseek-ai/dsh-session"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

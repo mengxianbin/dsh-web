@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
+import { STAGGER_MIN_MS } from '../src/config.ts'
+import { RevivalPolicy } from '../src/policy.ts'
 import { REVIVE_API_PREFIX, makeStatusRoute } from '../src/host/routes.ts'
 
 /** Minimal req/res doubles: the route only reads method/url/headers/socket and writes one JSON response. */
@@ -67,6 +69,33 @@ describe('GET /api/session-revive/status', () => {
       ok: true,
       mode: 'shadow',
       conditions: { revive: ['TRANSPORT', 'TIMEOUT'], wall: ['QUOTA'], overridden: ['wallCodes'] },
+    })
+  })
+
+  it('echoes the selflearn statistics block while the existing fields keep their shape (拍板⑭ 统计回显)', async () => {
+    const policy = new RevivalPolicy({ staggerMs: STAGGER_MIN_MS })
+    const at = 1_760_000_000_000
+    policy.onError({ sessionId: 'A', code: 'TRANSPORT', at })
+    policy.onSuccess('A', at + 1_000)
+    const route = makeStatusRoute(() => ({ mode: 'live', ...policy.snapshot(at + 1_000) }))
+    const captured = await run(route.handler, fakeReq('GET'))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toMatchObject({
+      ok: true,
+      service: 'dsh-session-revive',
+      mode: 'live',
+      // 既有字段零改动 (验收②): counters/quota/skipReasons still ride unchanged.
+      counters: expect.objectContaining({ detected: expect.any(Number) }),
+      quota: expect.any(Array),
+      skipReasons: expect.any(Object),
+      // 新增字段 = the selflearn statistics echo (拍板⑭).
+      selflearn: {
+        windowDays: 30,
+        thresholds: { minN: 10, minRate: 0.55, evictStrikes: 3 },
+        admitted: [],
+        evicted: [],
+        codes: [{ code: 'TRANSPORT', n: 1, recovered: 1, rate: 1, excluded: 0, strikes: 0 }],
+      },
     })
   })
 
