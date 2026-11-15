@@ -1,6 +1,6 @@
 // @vitest-environment node
-import { describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveService, BusyError, PlanMismatchError } from '../src/host/janitor.ts'
@@ -38,12 +38,12 @@ describe('archive / unarchive ledger', () => {
   it('records a reliable archive time and is idempotent on re-archive', async () => {
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
     const service = await settledService(host)
-    const first = await service.archive(['session-a'], 'manual')
+    const first = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(first.results).toEqual([{ id: 'session-a', status: 'ok' }])
     const at1 = service.ledgerSnapshot().entries['session-a']?.archivedAt
     expect(at1).toBeGreaterThan(0)
 
-    const second = await service.archive(['session-a'], 'manual')
+    const second = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(second.results).toEqual([{ id: 'session-a', status: 'skipped', reason: 'already-archived' }])
     expect(service.ledgerSnapshot().entries['session-a']?.archivedAt).toBe(at1)
     expect(host.registry.archivedSessionIds).toEqual(['session-a'])
@@ -52,7 +52,7 @@ describe('archive / unarchive ledger', () => {
   it('drops the ledger entry on unarchive, so a re-archive restarts the clock', async () => {
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
     const service = await settledService(host)
-    await service.archive(['session-a'], 'auto')
+    await service.archive(['session-a'], 'auto', undefined, 'manual-test')
     expect(service.ledgerSnapshot().entries['session-a']).toBeDefined()
 
     const response = await service.unarchive(['session-a'])
@@ -60,7 +60,7 @@ describe('archive / unarchive ledger', () => {
     expect(host.registry.archivedSessionIds).toEqual([])
     expect(service.ledgerSnapshot().entries['session-a']).toBeUndefined()
 
-    const again = await service.archive(['session-a'], 'manual')
+    const again = await service.archive(['session-a'], 'manual', undefined, 'manual-test')
     expect(again.results).toEqual([{ id: 'session-a', status: 'ok' }])
     expect(service.ledgerSnapshot().entries['session-a']?.archivedAt).toBeGreaterThanOrEqual(0)
   })
@@ -70,6 +70,61 @@ describe('archive / unarchive ledger', () => {
     const service = await settledService(host)
     const response = await service.unarchive(['session-a'])
     expect(response.results).toEqual([{ id: 'session-a', status: 'skipped', reason: 'not-archived' }])
+  })
+})
+
+describe('identity gate (triclass decision table)', () => {
+  function writeIdentity(host: FakeHost, sessions: Record<string, string>): void {
+    writeFileSync(
+      join(host.home, 'session-attention.json'),
+      JSON.stringify({
+        version: 1,
+        sessions: Object.fromEntries(Object.entries(sessions).map(([id, cls]) => [id, { class: cls, defaultApplied: true, source: 'dispatch', updatedAt: 't' }])),
+      }),
+      'utf8',
+    )
+  }
+
+  it('applies the decision table per id and stamps the actor into the ledger', async () => {
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-worker', updatedAt: 1 }, { sessionId: 'session-human', updatedAt: 2 }],
+      persistedIds: ['session-worker', 'session-human'],
+    })
+    writeIdentity(host, {
+      'session-boss': 'bot-boss',
+      'session-worker': 'bot-worker',
+      'session-human': 'human',
+    })
+    const service = await settledService(host)
+
+    // worker -> boss rules: a bot-boss archives its worker and the actor lands in the ledger.
+    const allowed = await service.archive(['session-worker'], 'manual', undefined, 'session-boss')
+    expect(allowed.results).toEqual([{ id: 'session-worker', status: 'ok' }])
+    expect(service.ledgerSnapshot().entries['session-worker']?.actor).toBe('session-boss')
+
+    // The same boss is refused on a human target — the 13:53 incident shape.
+    const denied = await service.archive(['session-human'], 'manual', undefined, 'session-boss')
+    expect(denied.results).toEqual([
+      { id: 'session-human', status: 'skipped', reason: 'identity-denied', detail: expect.stringContaining('bot-boss cannot archive human') },
+    ])
+    expect(host.registry.archivedSessionIds).toContain('session-worker')
+    expect(host.registry.archivedSessionIds).not.toContain('session-human')
+  })
+
+  it('denies an unclassified session actor while a channel actor archives as human', async () => {
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-w2', updatedAt: 1 }], persistedIds: ['session-w2'] })
+    const service = await settledService(host)
+
+    const denied = await service.archive(['session-w2'], 'manual', undefined, 'session-unknown')
+    expect(denied.results[0]).toMatchObject({
+      status: 'skipped',
+      reason: 'identity-denied',
+      detail: expect.stringContaining('unclassified'),
+    })
+
+    const allowed = await service.archive(['session-w2'], 'manual', undefined, 'manual')
+    expect(allowed.results).toEqual([{ id: 'session-w2', status: 'ok' }])
+    expect(service.ledgerSnapshot().entries['session-w2']?.actor).toBe('manual')
   })
 })
 
@@ -218,17 +273,54 @@ describe('operation lock', () => {
     const service = await settledService(host)
     // withLock takes the flag synchronously, so the second call fails fast
     // while the first is still in flight.
-    const first = service.archive(['session-a'], 'manual')
-    await expect(service.archive(['session-b'], 'manual')).rejects.toBeInstanceOf(BusyError)
+    const first = service.archive(['session-a'], 'manual', undefined, 'manual-test')
+    await expect(service.archive(['session-b'], 'manual', undefined, 'manual-test')).rejects.toBeInstanceOf(BusyError)
     await first
     // After the first completes, the lock is free again.
-    const second = await service.archive(['session-b'], 'manual')
+    const second = await service.archive(['session-b'], 'manual', undefined, 'manual-test')
     expect(second.results).toEqual([{ id: 'session-b', status: 'ok' }])
   })
 })
 
 describe('automatic cycles', () => {
   const DAY = 86_400_000
+
+  it('user auto-archives mixed native IDs without touching protected sessions or resetting archive times', async () => {
+    // Given: stale sessions use both harness ID spellings, with protected peers.
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T04:00:00Z'))
+    const bare = '550e8400-e29b-41d4-a716-446655440000'
+    const canonical = `session-${bare}`
+    const host = createFakeHost({
+      feedItems: [
+        { sessionId: bare, updatedAt: Date.now() - 40 * DAY },
+        { sessionId: 'session-stale', updatedAt: Date.now() - 40 * DAY },
+        { sessionId: 'session-running', updatedAt: Date.now() - 40 * DAY, running: true },
+        { sessionId: 'session-current', updatedAt: Date.now() - 40 * DAY },
+      ],
+      persistedIds: [bare, 'session-stale', 'session-running', 'session-current'],
+    })
+    const service = await settledService(host, { autoArchiveEnabled: true, autoArchiveDays: 7 })
+    try {
+      // When: the user runs automatic archiving twice.
+      const first = await service.runAutoCycle('archive', 'session-current')
+      const archivedAt = service.ledgerSnapshot().entries[canonical]?.archivedAt
+      vi.setSystemTime(new Date('2026-10-04T04:00:00Z'))
+      const second = await service.runAutoCycle('archive', 'session-current')
+
+      // Then: native IDs are archived, canonical ledger keys remain stable, and protected peers survive.
+      expect(first).toMatchObject({ total: 2, ok: 2, skipped: 0, failed: 0 })
+      expect(first.entries).toEqual([])
+      expect(host.registry.archivedSessionIds.sort()).toEqual([bare, 'session-stale'].sort())
+      expect(service.ledgerSnapshot().entries[canonical]).toEqual({ archivedAt, source: 'auto' })
+      expect(archivedAt).toBe(new Date('2026-10-03T04:00:00Z').getTime())
+      expect(service.ledgerSnapshot().entries[bare]).toBeUndefined()
+      expect(second).toMatchObject({ total: 0, ok: 0, failed: 0 })
+    } finally {
+      service.stop()
+      vi.useRealTimers()
+    }
+  })
 
   it('auto-archives by last activity and skips running/current sessions', async () => {
     const host = createFakeHost({
@@ -325,5 +417,48 @@ describe('preview', () => {
     const broken = await service.preview('session-broken')
     expect(broken.messageCount).toBe(0)
     await expect(service.preview('session-missing')).rejects.toThrow('session not found')
+  })
+})
+describe('host-stamped archive times (archive-at-host-time-1114)', () => {
+  it('operator sees the retention countdown run from the host stamp with no ledger write', async () => {
+    // Given a sidebar-archived session the host stamped eight days ago (no ledger entry)
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-09T04:00:00Z'))
+    try {
+      const host = createFakeHost({
+        feedItems: [{ sessionId: 'session-sidebar', updatedAt: 1 }],
+        persistedIds: ['session-sidebar'],
+        archivedSessionIds: ['session-sidebar'],
+        archivedAtById: { 'session-sidebar': new Date('2026-10-01T04:00:00Z').getTime() },
+      })
+      const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7 })
+
+      // When the operator previews the delete policy
+      const preview = await service.autoPreview()
+
+      // Then the host-stamped age (8 days > 7-day retention) puts it in the delete set…
+      expect(preview.deleteCandidates.map((entry) => entry.id)).toContain('session-sidebar')
+      // …and no observed entry was ever invented for it
+      expect(service.ledgerSnapshot().entries['session-sidebar']).toBeUndefined()
+      service.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('operator sees an unknown-time archive stay outside auto-delete when neither host nor ledger knows the time', async () => {
+    // Given an archived session with neither a host stamp nor a ledger entry
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-unknown', updatedAt: 1 }],
+      persistedIds: ['session-unknown'],
+      archivedSessionIds: ['session-unknown'],
+    })
+    const service = await settledService(host, { autoDeleteEnabled: true, autoDeleteDays: 7 })
+
+    // Then the preview plans nothing and writes nothing — fail-open, never fabricated
+    const preview = await service.autoPreview()
+    expect(preview.deleteCandidates).toEqual([])
+    expect(service.ledgerSnapshot().entries['session-unknown']).toBeUndefined()
+    service.stop()
   })
 })

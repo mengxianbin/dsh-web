@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, expect, it } from 'vitest'
-import { capEntries, deserializeAutoState, deserializeLedger, writeJsonAtomic } from '../src/host/ledger.ts'
+import { capEntries, deserializeAutoState, deserializeLedger, normalizeOverrideReason, OVERRIDE_NO_REASON, writeJsonAtomic } from '../src/host/ledger.ts'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -24,6 +24,127 @@ describe('ledger serialization', () => {
   })
 })
 
+
+describe('ledger source whitelist', () => {
+  it('operator keeps a backfilled observed entry through a reload', () => {
+    // Given a ledger document holding an entry backfilled at observation time
+    const doc = { version: 1, entries: { 'session-obs': { archivedAt: 4242, source: 'observed' } } }
+
+    // When that document is deserialized
+    const restored = deserializeLedger(JSON.stringify(doc))
+
+    // Then the observed source survives instead of being dropped to a fresh document
+    expect(restored.entries).toEqual({ 'session-obs': { archivedAt: 4242, source: 'observed' } })
+  })
+
+  it('operator keeps pre-existing manual and auto documents reading unchanged', () => {
+    // Given a ledger written before the observed source existed
+    const legacy = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-m': { archivedAt: 100, source: 'manual' },
+        'session-a': { archivedAt: 200, source: 'auto' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(legacy)
+
+    // Then both legacy sources pass the widened whitelist untouched
+    expect(restored.entries).toEqual({
+      'session-m': { archivedAt: 100, source: 'manual' },
+      'session-a': { archivedAt: 200, source: 'auto' },
+    })
+  })
+
+  it('keeps an actor string through a reload and drops a foreign-typed one without dropping the entry', () => {
+    // Given entries written by the triclass gate, one with a valid actor and
+    // one with a corrupted (non-string) actor
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-boss': { archivedAt: 1, source: 'manual', actor: 'session-successor' },
+        'session-bad': { archivedAt: 2, source: 'manual', actor: 42 },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the actor round-trips on one entry; the other keeps its archive
+    // time but loses only the foreign field
+    expect(restored.entries['session-boss']).toEqual({ archivedAt: 1, source: 'manual', actor: 'session-successor' })
+    expect(restored.entries['session-bad']).toEqual({ archivedAt: 2, source: 'manual' })
+  })
+
+  it('operator gets an unknown source dropped instead of trusted', () => {
+    // Given a document whose entry carries a source this plugin never writes
+    const raw = JSON.stringify({ version: 1, entries: { 'session-x': { archivedAt: 7, source: 'imported' } } })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the foreign entry is discarded, exactly as before the widening
+    expect(restored.entries).toEqual({})
+  })
+
+  it('operator gets every valid entry when one foreign entry shares the document', () => {
+    // Given a document mixing an observed entry with an unsupported source
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-obs': { archivedAt: 11, source: 'observed' },
+        'session-bad': { archivedAt: 12, source: 'imported' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then only the whitelisted entry is kept
+    expect(Object.keys(restored.entries)).toEqual(['session-obs'])
+  })
+})
+
+describe('ledger override schema (contract C3)', () => {
+  it('operator keeps an override entry with reason and seal through a reload', () => {
+    // Given a document written by the seal gate: override + reason + seal
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-o': { archivedAt: 99, source: 'override', reason: '板行[x] 收口证据', seal: 'UNSEALED:sentinel-stale' },
+        'session-stale': { archivedAt: 100, source: 'manual', seal: 'stale' },
+      },
+    })
+
+    // When that document is deserialized
+    const restored = deserializeLedger(raw)
+
+    // Then the override source survives instead of being dropped (降级即丢账的同批修复)
+    expect(restored.entries).toEqual({
+      'session-o': { archivedAt: 99, source: 'override', reason: '板行[x] 收口证据', seal: 'UNSEALED:sentinel-stale' },
+      'session-stale': { archivedAt: 100, source: 'manual', seal: 'stale' },
+    })
+  })
+
+  it('operator gets malformed reason/seal fields dropped instead of trusted', () => {
+    const raw = JSON.stringify({
+      version: 1,
+      entries: {
+        'session-x': { archivedAt: 1, source: 'override', reason: 42, seal: null },
+      },
+    })
+    expect(deserializeLedger(raw).entries).toEqual({ 'session-x': { archivedAt: 1, source: 'override' } })
+  })
+
+  it('every forced reason is normalized at the write layer', () => {
+    expect(normalizeOverrideReason(undefined)).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('')).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('   ')).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason(42)).toBe(OVERRIDE_NO_REASON)
+    expect(normalizeOverrideReason('  真实理由  ')).toBe('真实理由')
+  })
+})
 describe('capEntries', () => {
   it('caps the failure list', () => {
     const entries = Array.from({ length: 80 }, (_, index) => ({ id: `session-${index}`, status: 'failed' as const, reason: 'error' as const }))

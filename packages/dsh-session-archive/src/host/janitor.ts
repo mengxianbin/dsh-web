@@ -10,7 +10,7 @@
  * @module @linxin666/dsh-session-archive/host/janitor
  */
 
-import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { existsSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
@@ -27,19 +27,29 @@ import type {
   InventoryView,
   OpResult,
   RunStats,
+  SealCheckResult,
   SessionPreviewView,
   WorkspaceView,
 } from '../core/types.ts'
-import { buildInventory, ledgerEntryFor, readProjcacheIndex, type InventorySources, type ProjcacheFileEntry } from './inventory.ts'
+import { buildInventory, ledgerEntryFor, readProjcacheIndex, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
 import {
   capEntries,
   deserializeAutoState,
   deserializeLedger,
+  normalizeOverrideReason,
   writeJsonAtomic,
   type AutoStateDocument,
   type LedgerDocument,
+  type LedgerEntry,
+  type LedgerSource,
 } from './ledger.ts'
-import { canonicalSessionId, deleteRdbSession, isSessionRdb, rdbDbPaths, removeSessionDir } from './session-files.ts'
+import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
+import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
+import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
+import { DirIndexCache } from './dir-index-cache.ts'
+import { AsyncTtlMemo } from './ttl-memo.ts'
+import { InventoryResponseCache, type InventoryResponseServe } from './inventory-response-cache.ts'
+import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
 
@@ -67,10 +77,76 @@ interface LiveStoreFace {
 
 export interface ArchiveServiceOptions {
   dshHome?: string
+  /**
+   * The turn-end seal compute seam (seal-light-host-state-1109 护栏 ②): specs
+   * inject a deterministic fake; production defaults to the off-loop worker.
+   */
+  sealCompute?: SealStateOptions['compute']
+}
+
+/**
+ * The archive seal gate (contract C2), passed only by `POST /archive` — the
+ * automatic cycles and every other caller stay ungated (C6: `auto/run` is out
+ * of scope). Absent gate = historical behaviour, no seal reads at all.
+ */
+export interface ArchiveGate {
+  /**
+   * Forced pass-through for the whole batch. The route validates that a
+   * `force:true` request carries a non-empty reason before this exists, so
+   * the reason here is always real words (裁定③: force 一视同仁 + 真实理由).
+   */
+  force?: { readonly reason: string }
+}
+
+/** One row of the `POST /archive-override` response: the entry as written (contract C4). */
+export interface ArchiveOverrideRow {
+  readonly id: string
+  readonly status: 'ok'
+  readonly archivedAt: number
+  readonly source: LedgerSource
+  readonly reason?: string
+  readonly seal?: string
 }
 
 const PREVIEW_MESSAGE_CAP = 6
 const PREVIEW_TEXT_CAP = 400
+
+/**
+ * How long one sessions-root directory scan may be reused. The panel loads the
+ * inventory, then issues one batch request per chunk (each rebuilding the
+ * inventory), then refreshes; every one of those passes re-walked the same
+ * unchanged tree. The window covers that burst without letting a scan go stale
+ * enough to matter for the sizes and directory map it supplies, and the
+ * service invalidates the cache itself after a physical delete.
+ */
+const DIR_INDEX_TTL_MS = 2_000
+
+/**
+ * How long one parse of the projection-cache index may be reused. The index is
+ * re-read and re-parsed in full by every inventory pass, and one action issues
+ * several passes, so the same burst window as the directory scan applies; once
+ * the walk is reused the parse is what is left of a warm pass. The service
+ * invalidates the memo itself after the delete pipeline rewrites the index.
+ */
+const PROJCACHE_INDEX_TTL_MS = 2_000
+
+/**
+ * How long one whole inventory response may be served as fresh before a
+ * background refresh runs (stale reads keep answering verbatim — see
+ * `inventory-response-cache.ts`).
+ *
+ * Sized by the taskbot cadence, not the panel's: `archive-janitor` polls
+ * every 10 minutes behind a 10-second HTTP timeout, and one rebuild costs
+ * 11–21 s warm (up to 35 s, 500 at the 30 s route timeout — forensics
+ * `archive-lag-forensics-1110.md` §八), so a window shorter than the poll
+ * interval makes every other janitor round pay a rebuild it cannot survive.
+ * 15 minutes covers two full janitor intervals with margin; mutations still
+ * invalidate explicitly, so this plugin's own archive/restore/delete results
+ * are refreshed behind the very next read. State changed by anything other
+ * than this plugin (feed activity, another client) surfaces on GET within
+ * the window plus one rebuild; mutating routes never read this cache.
+ */
+const INVENTORY_RESPONSE_TTL_MS = 15 * 60_000
 
 export class ArchiveService {
   private readonly ctx: Context
@@ -83,6 +159,42 @@ export class ArchiveService {
   private config: ResolvedAutoConfig = resolveAutoConfig(undefined)
   /** Per-session projection-cache file facts, memoized across inventory passes. */
   private readonly projcacheFiles = new Map<string, ProjcacheFileEntry | null>()
+  /**
+   * Sessions-root directory index reused across nearby inventory passes. The
+   * scan is the dominant cost of a pass, and one user action triggers several
+   * (a chunk per batch request plus the refresh that follows). Invalidation
+   * after a physical delete keeps the reuse from reporting removed storage.
+   */
+  private readonly dirIndex = new DirIndexCache({
+    ttlMs: DIR_INDEX_TTL_MS,
+    scan: () => indexSessionDirs(join(this.dshHome, 'sessions')),
+  })
+  /**
+   * Parsed projection-cache index reused across nearby inventory passes. The
+   * harness file only changes when another writer touches it, while every pass
+   * re-reads and re-parses the whole document; the delete pipeline invalidates
+   * the memo after it rewrites the index, so a removed session's facts cannot
+   * resurface from memory. Async since 0.4.12: the read+parse yields the event
+   * loop instead of holding it, and concurrent passes coalesce into one parse.
+   */
+  private readonly projcacheIndex = new AsyncTtlMemo<ProjcacheIndex>({
+    ttlMs: PROJCACHE_INDEX_TTL_MS,
+    load: () => readProjcacheIndex(this.dshHome),
+  })
+  /**
+   * The cached whole inventory response the route serves. Mutating operations
+   * invalidate it when they release the operation lock (every one of them
+   * changes archive state, or may have changed it partially before failing),
+   * so the next GET rebuilds; reads that start during an operation serve the
+   * pre-operation snapshot until it ends.
+   */
+  private readonly responseCache = new InventoryResponseCache({
+    ttlMs: INVENTORY_RESPONSE_TTL_MS,
+    build: async () => {
+      const inventory = await this.inventory()
+      return { payload: JSON.stringify(inventory), generatedAt: Date.now() }
+    },
+  })
 
   private loaded = false
   private disposed = false
@@ -92,10 +204,14 @@ export class ArchiveService {
   private readonly busy = new Set<string>()
   private cycleRunning = false
   private schedulerTimer: ReturnType<typeof setTimeout> | undefined
+  /** The turn-end seal sync, alive exactly while this service is mounted. */
+  private sealState: SealStateSync | undefined
+  private readonly sealCompute: SealStateOptions['compute']
 
   constructor(ctx: Context, options: ArchiveServiceOptions = {}) {
     this.ctx = ctx
     this.dshHome = options.dshHome ?? resolveDshHome()
+    this.sealCompute = options.sealCompute
     this.ledgerPath = join(this.dshHome, 'dsh-session-archive', 'archive-ledger.json')
     this.statePath = join(this.dshHome, 'dsh-session-archive', 'state.json')
   }
@@ -125,10 +241,22 @@ export class ArchiveService {
     }
     this.loaded = true
     this.armScheduler(true)
+    // Turn-end seal sync (seal-light-host-state-1109 裁点1A): computes once
+    // per turn end off the event loop, records the verdict, and lets the
+    // `seal` projection carry it to the Host — soft-registered through
+    // ctx.inject, so a host without the projection registry simply never
+    // mounts the key.
+    this.sealState = createSealStateSync(this.ctx, {
+      resolveDir: async (id) => (await this.dirIndex.get()).byId.get(id),
+      ...(this.sealCompute === undefined ? {} : { compute: this.sealCompute }),
+    })
+    this.sealState.start()
   }
 
   stop(): void {
     this.disposed = true
+    this.sealState?.stop()
+    this.sealState = undefined
     if (this.schedulerTimer !== undefined) clearTimeout(this.schedulerTimer)
     this.schedulerTimer = undefined
   }
@@ -169,15 +297,19 @@ export class ArchiveService {
   // Sources and protection
   // ------------------------------------------------------------------
 
-  private sources(): InventorySources {
+  private async sources(): Promise<InventorySources> {
     const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
-    const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[] }>('workspaceRegistry')
+    const registry = this.serviceFace<{ list(): unknown[]; archivedSessionIds: readonly string[]; archivedAtById?: Record<string, number> }>('workspaceRegistry')
     return {
       feed: feed as never,
       registry: registry as never,
       dshHome: this.dshHome,
       ledger: this.ledger,
       projcacheFiles: this.projcacheFiles,
+      dirIndex: await this.dirIndex.get(),
+      // Awaited here (not in buildInventory): the memo's derivation is async
+      // since the projection-cache index stopped being read synchronously.
+      projcacheIndex: await this.projcacheIndex.get(),
     }
   }
 
@@ -248,7 +380,7 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async inventory(): Promise<InventoryView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const workspaces: WorkspaceView[] = built.workspaces
     return {
       generatedAt: Date.now(),
@@ -259,6 +391,17 @@ export class ArchiveService {
     }
   }
 
+  /**
+   * The inventory document as the route serves it: one rebuild serialized
+   * once, then the same bytes served verbatim inside the TTL window
+   * ({@link InventoryResponseCache}). Mutating operations invalidate the
+   * window; `hit`/`ageMs` travel to the wire as `x-dsh-inventory-cache` and
+   * `age` so a cache hit is observable without parsing the body.
+   */
+  inventoryCached(): Promise<InventoryResponseServe> {
+    return this.responseCache.serve()
+  }
+
   autoView(): AutoStateView {
     return {
       ...(this.autoState.lastArchiveRun !== undefined ? { lastArchiveRun: this.autoState.lastArchiveRun } : {}),
@@ -266,6 +409,21 @@ export class ArchiveService {
       ...(this.autoState.nextCheckAt !== undefined ? { nextCheckAt: this.autoState.nextCheckAt } : {}),
       cycleRunning: this.cycleRunning,
     }
+  }
+
+  /**
+   * The six-value seal grouping for a batch of ids — the single implementation
+   * behind both archive channels (contract C1: 分组实现全插件仅此一份): the
+   * native dialog consumes it through `POST /seal-check`, the REST hard gate
+   * calls `analyzeSeal` directly through {@link archive}. Location probes
+   * only the named ids against the sessions root (targeted read — no full
+   * `indexSessionDirs` walk, no `dirSize`, see {@link resolveSessionDirs});
+   * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
+   * a silent pass).
+   */
+  sealCheck(ids: readonly string[]): SealCheckResult[] {
+    const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
+    return ids.map((id) => analyzeSeal(id, dirs.get(id)))
   }
 
   // ------------------------------------------------------------------
@@ -279,21 +437,58 @@ export class ArchiveService {
     const run = (async () => fn())()
     const release = (): void => {
       this.lockHeld = false
+      // Every locked operation changes archive state (or changed it partially
+      // before failing), so the cached whole response is dropped here, once,
+      // and the next inventory GET rebuilds. Reads that started during the
+      // operation keep serving the pre-operation snapshot until it ends.
+      this.responseCache.invalidate()
     }
     run.then(release, release)
     return run
   }
 
-  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string): Promise<BatchResponse> {
+  /**
+   * Archive a batch of sessions. Every call passes the triclass identity
+   * gate first (user ruling, 2026-10-29): the actor resolves against the
+   * attention ledger and each target decides on its own — a denied id gets
+   * `skipped / identity-denied` with both classes in `detail`, the rest of
+   * the batch proceeds (no taint). The actor is persisted into every ledger
+   * entry it archives, so attribution reads from the ledger instead of
+   * transcript archaeology. When a seal gate is passed, it decides per id
+   * after the identity gate (contract C2: green/stale archive, true red and
+   * UNKNOWN refuse with `seal-required`, no batch contagion either).
+   * @param ids - canonical session ids.
+   * @param source - ledger source tag (`manual` from the REST route).
+   * @param currentSessionId - caller's currently open session (auto path protection).
+   * @param actor - who ordered this archive (deciding session id or channel
+   * name); absent resolves to no identity, which the gate always refuses —
+   * the route 400s before this can happen.
+   * @param gate - archive seal gate (contract C2); absent = no seal reads.
+   */
+  async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string, gate?: ArchiveGate): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
+      // Identity gate, resolved once per batch from the dispatch plugin's
+      // attention ledger ($DSH_HOME/session-attention.json).
+      const identity = await readIdentityTable(this.dshHome)
+      const actorClass = resolveActorClass(actor, identity)
       for (const id of ids) {
         const row = byId.get(id)
         if (row === undefined) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
+          continue
+        }
+        const targetClass: IdentityClass = identity.get(id) ?? 'human'
+        if (!mayArchive(actorClass, targetClass)) {
+          results.push({
+            id,
+            status: 'skipped',
+            reason: 'identity-denied',
+            detail: `actor ${actorClass ?? 'unclassified'} cannot archive ${targetClass} session`,
+          })
           continue
         }
         if (row.archived) {
@@ -308,12 +503,42 @@ export class ArchiveService {
             continue
           }
         }
+        // Seal gate (contract C2): decided per id after the existence checks,
+        // so one refused session never drags its batch down (批内不连坐).
+        let entrySource: LedgerSource = source
+        let entryReason: string | undefined
+        let entrySeal: string | undefined
+        if (gate !== undefined) {
+          const seal = analyzeSeal(id, built.dirIndex.byId.get(id))
+          if (gate.force !== undefined) {
+            // Forced pass: the whole batch archives under the caller's stated
+            // reason, each entry carrying the seal judgement it overrode.
+            entrySource = 'override'
+            entryReason = gate.force.reason
+            entrySeal = sealMarker(seal)
+          } else if (isGreenSeal(seal.verdict)) {
+            // Green tier: archives exactly as before — no seal field, source manual.
+          } else if (isStaleSeal(seal)) {
+            // Stale tier (裁定①): pass through with the pinned marker.
+            entrySeal = 'stale'
+          } else {
+            // True red (UNSEALED) and UNKNOWN: refuse this id with its grouping.
+            results.push({ id, status: 'skipped', reason: 'seal-required', seal: { verdict: seal.verdict, detail: seal.detail } })
+            continue
+          }
+        }
         this.busy.add(id)
         try {
           // The registry records the harness's native id spelling; rows and
           // ledger keys stay canonical.
           await archiveSession(this.ctx, built.nativeIds[id] ?? id)
-          this.ledger.entries[id] = { archivedAt: now, source }
+          this.ledger.entries[id] = {
+            archivedAt: now,
+            source: entrySource,
+            ...(entryReason !== undefined ? { reason: entryReason } : {}),
+            ...(entrySeal !== undefined ? { seal: entrySeal } : {}),
+            ...(actor !== undefined ? { actor } : {}),
+          }
           results.push({ id, status: 'ok' })
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
@@ -329,7 +554,7 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const byId = new Map(built.rows.map((row) => [row.id, row]))
       const toUnarchive: string[] = []
       for (const id of ids) {
@@ -345,7 +570,9 @@ export class ArchiveService {
         toUnarchive.push(id)
       }
       try {
-        await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive)
+        // The registry records the harness's native id spelling; rows and
+        // ledger keys stay canonical.
+        await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive.map((id) => built.nativeIds[id] ?? id))
         for (const id of toUnarchive) {
           delete this.ledger.entries[id]
           const native = built.nativeIds[id]
@@ -363,6 +590,68 @@ export class ArchiveService {
   }
 
   // ------------------------------------------------------------------
+  // Native-channel write-back (archive-override)
+  // ------------------------------------------------------------------
+
+  /**
+   * Native-channel ledger write-back (contract C4). `mode: "force"` ends the
+   * entry in `source: "override"` with its reason (blank/missing normalizes to
+   * `override:no-reason` at the write layer) and the seal judgement; `mode:
+   * "note"` adds the pinned `seal: "stale"` marker of the stale pass-through
+   * tier without touching an existing entry's source. Both modes are idempotent
+   * write-ups: an existing `archivedAt` is never reset (a write-back must not
+   * refresh the 30-day retention countdown), and repeated identical calls
+   * write nothing. Rows that already carry an archive time — the host's stamp
+   * or a ledger entry — keep it, so write-back and the host stamp leave
+   * exactly one entry (contract C5).
+   *
+   * Deliberately lock-free: one ledger document, atomic whole-file writes,
+   * single-process read-modify-write.
+   */
+  async archiveOverride(
+    ids: readonly string[],
+    mode: 'force' | 'note',
+    options: { reason?: string; seal?: string } = {},
+  ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
+    const now = Date.now()
+    const index = await this.dirIndex.get()
+    const results: ArchiveOverrideRow[] = []
+    let changed = false
+    for (const id of ids) {
+      const existing = this.ledger.entries[id]
+      let next: LedgerEntry
+      if (mode === 'force') {
+        const providedSeal = typeof options.seal === 'string' && options.seal.trim() !== '' ? options.seal.trim() : undefined
+        next = {
+          archivedAt: existing?.archivedAt ?? now,
+          source: 'override',
+          reason: normalizeOverrideReason(options.reason),
+          seal: providedSeal ?? sealMarker(analyzeSeal(id, index.byId.get(id))),
+        }
+      } else {
+        next = existing !== undefined
+          ? { ...existing, seal: 'stale' }
+          : { archivedAt: now, source: 'observed', seal: 'stale' }
+      }
+      if (JSON.stringify(existing) !== JSON.stringify(next)) {
+        this.ledger.entries[id] = next
+        changed = true
+      }
+      const entry = this.ledger.entries[id] as LedgerEntry
+      results.push({
+        id,
+        status: 'ok',
+        archivedAt: entry.archivedAt,
+        source: entry.source,
+        ...(entry.reason !== undefined ? { reason: entry.reason } : {}),
+        ...(entry.seal !== undefined ? { seal: entry.seal } : {}),
+      })
+    }
+    if (changed) await this.flushLedger()
+    return { results }
+  }
+
+  // ------------------------------------------------------------------
   // Physical delete
   // ------------------------------------------------------------------
 
@@ -374,7 +663,7 @@ export class ArchiveService {
    */
   async deleteSessions(ids: readonly string[], options: { currentSessionId?: string; expectedTotal?: number; source?: 'manual' | 'auto' } = {}): Promise<BatchResponse> {
     return this.withLock(async () => {
-      const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const protectedMap = this.protectedReason(options.currentSessionId, built.rows)
       const plan = planDelete(built.rows, ids, protectedMap)
       // A mismatch only matters when the host would delete MORE than the user
@@ -415,9 +704,9 @@ export class ArchiveService {
     const targets = plan.targets
     const sizeById = new Map(built.rows.map((row) => [row.id, row.sizeBytes]))
 
-    // 1. Archive markers (single durable write).
+    // 1. Archive markers (one public verb call per target).
     try {
-      await unarchiveSessions(this.ctx.workspaceRegistry, targets)
+      await unarchiveSessions(this.ctx.workspaceRegistry, targets.map((id) => built.nativeIds[id] ?? id))
     } catch (error) {
       const detail = error instanceof Error ? error.message.slice(0, 200) : String(error)
       return { results: targets.map((id) => ({ id, status: 'failed' as const, reason: 'missing-seam' as const, detail })), freedBytes: 0 }
@@ -458,6 +747,10 @@ export class ArchiveService {
       }
     }
 
+    // The directories this batch removed are gone from here on; a later
+    // inventory pass must re-walk rather than reuse the batch's own scan.
+    if (deleted.size > 0) this.dirIndex.invalidate()
+
     // 4. Projection cache (index entry + per-session file), both spellings.
     await this.scrubProjcache(deleted, built.nativeIds)
 
@@ -483,9 +776,18 @@ export class ArchiveService {
   /** Best-effort projection-cache scrub; a stale cache entry is cosmetic. */
   private async scrubProjcache(ids: ReadonlySet<string>, nativeIds: Record<string, string> = {}): Promise<void> {
     const indexPath = join(this.dshHome, 'storages', 'session_projcache.json')
-    try {
-      if (existsSync(indexPath)) {
-        const parsed = JSON.parse(this.readSync(indexPath)) as { tables?: { sessions?: Record<string, unknown> } }
+    // The index this pass rewrites is the memo's input: drop the retained parse
+    // first, so a pass that follows a physical delete cannot answer with the
+    // removed sessions' facts even while the window is still open.
+    if (ids.size > 0) this.projcacheIndex.invalidate()
+    // The index read is async since 0.4.12: the document is multi-megabyte,
+    // and this scrub runs inside the delete pipeline on the shared event
+    // loop — a synchronous read+parse here stalled every request while a
+    // batch deleted. Missing (undefined) and corrupt both leave it alone.
+    const raw = await this.readFile(indexPath)
+    if (raw !== undefined) {
+      try {
+        const parsed = JSON.parse(raw) as { tables?: { sessions?: Record<string, unknown> } }
         const sessions = parsed.tables?.sessions
         if (sessions !== undefined) {
           for (const id of ids) {
@@ -497,9 +799,9 @@ export class ArchiveService {
           // success; a fire-and-forget write raced the caller's readers.
           await writeJsonAtomic(indexPath, parsed)
         }
+      } catch {
+        // A corrupt index is left alone; the harness owns it.
       }
-    } catch {
-      // A corrupt index is left alone; the harness owns it.
     }
     const perSessionDir = join(this.dshHome, 'storages', 'session_projcache', 'sessions')
     try {
@@ -515,22 +817,20 @@ export class ArchiveService {
     }
   }
 
-  private readSync(path: string): string {
-    // Small synchronous read for the scrub; failure paths are guarded.
-    return readFileSync(path, 'utf8')
-  }
-
   // ------------------------------------------------------------------
   // Automatic policies
   // ------------------------------------------------------------------
 
   async autoPreview(): Promise<AutoPreviewView> {
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const now = Date.now()
     const protectedSet = new Set(this.protectedReason(undefined, built.rows).keys())
     const archiveCandidates = this.config.autoArchiveEnabled
       ? autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now, protectedIds: protectedSet })
       : []
+    // A preview never writes: rows already carry their archive time (host
+    // stamp first, ledger fallback — archive-at-host-time-1114), so these
+    // candidates are the ones the next real cycle will compute.
     const deleteSeeds = this.config.autoDeleteEnabled
       ? autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
       : []
@@ -563,19 +863,28 @@ export class ArchiveService {
       const startedAt = Date.now()
       try {
         if (kind === 'archive') {
-          const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+          const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
           const protectedSet = new Set(this.protectedReason(currentSessionId, built.rows).keys())
           const candidates = autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now: startedAt, protectedIds: protectedSet })
-          const response = await this.archiveInternal(candidates.map((entry) => entry.id), 'auto', currentSessionId)
+          const response = await this.archiveInternal(candidates.map((entry) => entry.id), 'auto', built.nativeIds)
           const stats = this.statsFrom(response.results, startedAt)
           this.autoState.lastArchiveRun = stats
           await this.flushState()
           return stats
         }
-        const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+        const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
         const protectedMap = this.protectedReason(currentSessionId, built.rows)
         const protectedSet = new Set(protectedMap.keys())
+        // Rows carry their archive time from the host stamp (ledger fallback),
+        // so planning starts straight from them; the existing
+        // `archivedAt >= runStartedAt` rule still keeps anything stamped at or
+        // after this cycle's start out of this cycle's delete set.
         const seeds = autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now: startedAt, runStartedAt: startedAt, protectedIds: protectedSet })
+        // `lastDeleteRun` is a DELETION record: an archive time is not a
+        // deleted session, and counting it as an `ok` entry would report
+        // "N sessions cleaned up" for a run that removed nothing. That number is
+        // also the field users read to tell whether auto-delete works at all, so
+        // inflating it would fake the very signal issue #1908 was diagnosed with.
         if (seeds.length === 0) {
           const stats: RunStats = { at: startedAt, total: 0, ok: 0, skipped: 0, failed: 0, entries: [] }
           this.autoState.lastDeleteRun = stats
@@ -595,13 +904,13 @@ export class ArchiveService {
   }
 
   /** Archive without re-acquiring the lock (used inside cycles). */
-  private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string): Promise<BatchResponse> {
+  private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', nativeIds: Readonly<Record<string, string>>): Promise<BatchResponse> {
     const results: OpResult[] = []
     const now = Date.now()
     for (const id of ids) {
       this.busy.add(id)
       try {
-        await archiveSession(this.ctx, id)
+        await archiveSession(this.ctx, nativeIds[id] ?? id)
         this.ledger.entries[id] = { archivedAt: now, source }
         results.push({ id, status: 'ok' })
       } catch (error) {
@@ -677,7 +986,7 @@ export class ArchiveService {
 
   async preview(id: string): Promise<SessionPreviewView> {
     const controller = this.serviceFace<{ inspect?(sessionId: string, signal?: AbortSignal): Promise<{ meta?: { createdAt?: number; cwd?: string }; events?: readonly unknown[] }> }>('sessionController')
-    const built = await buildInventory(this.sources(), AbortSignal.timeout(30_000))
+    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
     const row: ArchiveSessionRow | undefined = built.rows.find((entry) => entry.id === id)
     if (row === undefined) {
       throw new Error('session not found')
