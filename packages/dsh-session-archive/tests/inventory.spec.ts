@@ -149,6 +149,36 @@ describe('buildInventory', () => {
     expect(ghost?.issues).toContain('no-archive-time')
   })
 
+  it('hands the event loop back mid-pass so a concurrent reader is never starved', async () => {
+    // Given a pass large enough to cross several yield points, with every
+    // source prebuilt so the pass itself does no I/O — its only macrotask
+    // turns are the yield slices
+    const feedItems = Array.from({ length: 400 }, (_, i) => ({ sessionId: `session-y${i}`, updatedAt: i }))
+    const host = createFakeHost({ feedItems })
+    const ids = feedItems.map((item) => item.sessionId)
+    const projcacheFiles = new Map(ids.map((id) => [id, null] as const))
+    const sources = {
+      ...host.sources(),
+      dirIndex: { byId: new Map(), sizes: new Map(), unreadable: [] },
+      projcacheIndex: { sessions: {} },
+      projcacheFiles,
+    }
+
+    // When the build runs against a marker queued before it starts
+    const marker = new Promise<string>((resolve) => { setImmediate(() => resolve('marker')) })
+    const building = buildInventory(sources, AbortSignal.timeout(10_000)).then((built) => {
+      expect(built.rows).toHaveLength(400)
+      return 'build' as const
+    })
+    const raced = await Promise.race([building, marker])
+
+    // Then the loop turned while the pass was still running: the yield
+    // slices (方向⑤, every INVENTORY_YIELD_EVERY rows) keep a full pass
+    // from monopolizing the shared event loop
+    expect(raced).toBe('marker')
+    await building
+  })
+
   it('enriches rows from per-session projcache files when the aggregate index misses them', async () => {
     const host = createFakeHost({
       archivedSessionIds: ['session-oldarchived', 'session-barefoot'],

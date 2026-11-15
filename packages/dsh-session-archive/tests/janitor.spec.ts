@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveService, BusyError, PlanMismatchError } from '../src/host/janitor.ts'
 import { writeJsonAtomic } from '../src/host/ledger.ts'
-import { fakeContext, writeProjcache, type FakeHost } from './fixtures.ts'
+import { fakeContext, writeProjcache, writeProjcacheSessionFile, type FakeHost } from './fixtures.ts'
 import { createFakeHost } from './fixtures.ts'
 
 function makeService(host: FakeHost, config: Record<string, unknown> = {}): ArchiveService {
@@ -70,6 +70,35 @@ describe('archive / unarchive ledger', () => {
     const service = await settledService(host)
     const response = await service.unarchive(['session-a'])
     expect(response.results).toEqual([{ id: 'session-a', status: 'skipped', reason: 'not-archived' }])
+  })
+
+  it('hands the host the feed spelling when the directory disagrees, and the directory spelling only when no feed row exists', async () => {
+    // Given a session whose transcript directory carries the legacy bare
+    // layout (the fixture strips the prefix production keeps) while the
+    // feed — and with it the host — knows the prefixed spelling
+    const fed = createFakeHost({
+      feedItems: [{ sessionId: 'session-green', updatedAt: 1 }],
+      persistedIds: ['session-green'],
+      dirs: ['session-green'],
+    })
+    const fedService = await settledService(fed)
+
+    // When it is archived
+    const response = await fedService.archive(['session-green'], 'manual', undefined, 'manual-test')
+
+    // Then the host received the feed's spelling — a full pass harvested
+    // native ids from the feed first, and the directory never overrules it
+    expect(response.results).toEqual([{ id: 'session-green', status: 'ok' }])
+    expect(fed.registry.archivedSessionIds).toEqual(['session-green'])
+
+    // And a session no feed row lists still resolves to its directory
+    // spelling (the stored header id `sessionKnown` keys on) — the backstop
+    // for a dir-only session, which a full pass could not spell either
+    const dirOnly = createFakeHost({ persistedIds: ['bare-uuid'], dirs: ['bare-uuid'] })
+    const dirService = await settledService(dirOnly)
+    const backstop = await dirService.archive(['session-bare-uuid'], 'manual', undefined, 'manual-test')
+    expect(backstop.results).toEqual([{ id: 'session-bare-uuid', status: 'ok' }])
+    expect(dirOnly.registry.archivedSessionIds).toEqual(['bare-uuid'])
   })
 })
 
@@ -460,5 +489,40 @@ describe('host-stamped archive times (archive-at-host-time-1114)', () => {
     expect(preview.deleteCandidates).toEqual([])
     expect(service.ledgerSnapshot().entries['session-unknown']).toBeUndefined()
     service.stop()
+  })
+})
+
+describe('title memo invalidation (archive-title-memo-1116 扩面判据)', () => {
+  it('operator sees a late-landing title after the invalidation notification, never before', async () => {
+    // Given a listed session whose per-session projcache file carries no title yet
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-late', updatedAt: 10 }],
+      dirs: ['session-late'],
+    })
+    writeProjcacheSessionFile(host.home, 'session-late', { createdAt: 1 })
+    const service = await settledService(host)
+    const first = await service.inventory()
+    expect(first.rows.find(row => row.id === 'session-late')?.title).toBeUndefined()
+    expect(first.rows.find(row => row.id === 'session-late')?.issues).toContain('no-title')
+
+    // When the title lands on disk
+    writeProjcacheSessionFile(host.home, 'session-late', { title: '迟到的标题', createdAt: 1 })
+
+    // Then a pass that was never told to invalidate still answers from the
+    // file memo — this pins the bug itself, so the final assertion cannot
+    // pass on a memo that never cached anything.
+    const stillStale = await service.inventory()
+    expect(stillStale.rows.find(row => row.id === 'session-late')?.title).toBeUndefined()
+
+    // When the invalidation notification fires — a locked operation releasing
+    // rides the same channel (方向③ 复用 SWR 失效通知); archiving an unknown
+    // id is a pure no-op that still trips it
+    const noop = await service.archive(['session-ghost'], 'manual')
+    expect(noop.results).toEqual([{ id: 'session-ghost', status: 'skipped', reason: 'not-found' }])
+
+    // Then the next pass re-reads the file and shows the landed title
+    const second = await service.inventory()
+    expect(second.rows.find(row => row.id === 'session-late')?.title).toBe('迟到的标题')
+    expect(second.rows.find(row => row.id === 'session-late')?.issues).not.toContain('no-title')
   })
 })

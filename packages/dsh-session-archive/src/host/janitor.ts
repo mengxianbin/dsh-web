@@ -11,7 +11,7 @@
  */
 
 import { existsSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   autoArchiveCandidates,
@@ -29,9 +29,8 @@ import type {
   RunStats,
   SealCheckResult,
   SessionPreviewView,
-  WorkspaceView,
 } from '../core/types.ts'
-import { buildInventory, ledgerEntryFor, readProjcacheIndex, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
+import { buildInventory, ledgerEntryFor, readProjcacheIndex, type BuiltInventory, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
 import {
   capEntries,
   deserializeAutoState,
@@ -148,6 +147,43 @@ const PROJCACHE_INDEX_TTL_MS = 2_000
  */
 const INVENTORY_RESPONSE_TTL_MS = 15 * 60_000
 
+/**
+ * How long a retained structured inventory may back restore/delete/auto
+ * planning and preview before the consumer must pay a fresh pass
+ * (archive-inline-inventory-1111 方向② 新鲜度上限). Archive/restore never
+ * read this memo for their decisions — they take targeted per-id state — so
+ * the cap only bounds staleness for the whole-row consumers.
+ */
+const FRESH_BUILT_TTL_MS = 15_000
+
+/**
+ * Per-target state for archive/restore decisions (方向① targeted read): what
+ * one id needs from the inventory — existence, archived flag, the
+ * harness-native spelling, and the sessions-root directory the seal gate
+ * reads. Nothing here requires a whole-inventory rebuild.
+ */
+interface TargetState {
+  /** Canonical session id. */
+  id: string
+  /** Whether any authoritative source lists the session (existence). */
+  found: boolean
+  /** Whether the archive set already contains it. */
+  archived: boolean
+  /** Feed-reported running flag; only populated when a whole-row source answered. */
+  running?: boolean
+  /** Harness-native id spelling when it differs from the canonical form. */
+  nativeId?: string
+  /** Absolute sessions-root directory, when one exists (seal-gate input). */
+  dir?: string
+  /**
+   * Legacy bare-layout directory basename (canonical id = `session-<x>`,
+   * directory = `<x>`). It equals the stored header id — what the harness's
+   * `sessionKnown` keys on — but the feed's spelling wins whenever the feed
+   * answers, so this is only used as the backstop when no feed row exists.
+   */
+  dirSpelling?: string
+}
+
 export class ArchiveService {
   private readonly ctx: Context
   private readonly dshHome: string
@@ -190,11 +226,23 @@ export class ArchiveService {
    */
   private readonly responseCache = new InventoryResponseCache({
     ttlMs: INVENTORY_RESPONSE_TTL_MS,
-    build: async () => {
-      const inventory = await this.inventory()
-      return { payload: JSON.stringify(inventory), generatedAt: Date.now() }
+    build: async (signal) => {
+      const built = await this.buildFull(signal)
+      return { payload: JSON.stringify(this.viewOf(built)), generatedAt: Date.now() }
     },
   })
+  /**
+   * The most recent structured full inventory, retained inside
+   * {@link FRESH_BUILT_TTL_MS} so nearby whole-row consumers (preview, the
+   * response-cache rebuild it shares its source with) skip a duplicate pass,
+   * and patched in place by archive/restore instead of dropped (方向③ 定向
+   * 更新, hooked at the same lock-release point as the SWR invalidation).
+   * Guarded by {@link stateGen}: a pass retains its result only if no
+   * mutation landed while it ran.
+   */
+  private freshBuilt: { built: BuiltInventory; at: number } | undefined
+  /** Mutation generation, bumped on every operation-lock release (方向③). */
+  private stateGen = 0
 
   private loaded = false
   private disposed = false
@@ -380,15 +428,222 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async inventory(): Promise<InventoryView> {
-    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
-    const workspaces: WorkspaceView[] = built.workspaces
+    return this.viewOf(await this.buildFull())
+  }
+
+  /** The wire view of one built inventory (serialized by the response cache). */
+  private viewOf(built: BuiltInventory): InventoryView {
     return {
       generatedAt: Date.now(),
       rows: built.rows,
-      workspaces,
+      workspaces: built.workspaces,
       archivedSessionIds: built.archivedSessionIds,
       auto: this.autoView(),
     }
+  }
+
+  /**
+   * One whole-inventory pass, retained as the structured fresh source
+   * (方向②). This is now the ONLY full-rebuild call site in the service, and
+   * it is never invoked inside {@link withLock}: mutating routes either take
+   * targeted per-id state (方向①) or call this before acquiring the lock,
+   * time-capped by the same 30 s abort the pass always had.
+   */
+  private async buildFull(signal?: AbortSignal): Promise<BuiltInventory> {
+    const generation = this.stateGen
+    const abort = signal === undefined
+      ? AbortSignal.timeout(30_000)
+      : AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+    const built = await buildInventory(await this.sources(), abort)
+    // Retain only when no mutation landed while this pass ran: a pre-mutation
+    // snapshot must not answer post-mutation consumers.
+    if (generation === this.stateGen) this.freshBuilt = { built, at: Date.now() }
+    return built
+  }
+
+  /** The retained structured inventory while inside its freshness cap (方向②). */
+  private peekFreshBuilt(maxAgeMs: number = FRESH_BUILT_TTL_MS): BuiltInventory | undefined {
+    const retained = this.freshBuilt
+    if (retained === undefined) return undefined
+    const age = Date.now() - retained.at
+    if (age < 0 || age > maxAgeMs) return undefined
+    return retained.built
+  }
+
+  /**
+   * Flip the archive state of exactly the ids one successful batch touched,
+   * in the retained inventory (方向③ 定向失效受影响子集). The payload cache
+   * still whole-invalidates through the SWR layer untouched; this only keeps
+   * the structured memo honest so the next nearby consumer skips a rebuild.
+   * Each touched row is rewritten the way a fresh pass would assemble it
+   * (rows are immutable value objects): archive time prefers the host's
+   * durable stamp over the ledger entry the batch just wrote, attribution
+   * (source/reason/seal) rides that entry, and an unarchive drops every one
+   * of those fields — the ledger entries are already deleted by the time
+   * this runs — with `no-archive-time` following the same archived-only rule.
+   */
+  private patchFreshBuiltArchived(ids: readonly string[], archived: boolean, at: number): void {
+    const retained = this.freshBuilt
+    if (retained === undefined || ids.length === 0) return
+    const wanted = new Set(ids.map((id) => canonicalSessionId(id)))
+    // Host archive stamps, canonicalized the same way buildInventory does;
+    // an absent face degrades to ledger-only times, never to a fabricated one.
+    let hostTimes: Map<string, number> | undefined
+    const registry = this.serviceFace<{ archivedAtById?: Record<string, number> }>('workspaceRegistry')
+    if (archived && registry?.archivedAtById !== undefined) {
+      try {
+        hostTimes = new Map(Object.entries(registry.archivedAtById).map(([id, stamped]) => [canonicalSessionId(id), stamped]))
+      } catch {
+        hostTimes = undefined
+      }
+    }
+    const rows = retained.built.rows
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]
+      if (!wanted.has(row.id)) continue
+      // Destructure the four archive-attribution fields away so a stale
+      // override reason/seal can never survive an entry that lacks them.
+      const { archivedAt: _archivedAt, archivedAtSource: _source, reason: _reason, seal: _seal, ...rest } = row
+      const issues = row.issues.includes('no-archive-time')
+        ? row.issues.filter((issue) => issue !== 'no-archive-time')
+        : row.issues
+      if (archived) {
+        const nativeId = retained.built.nativeIds[row.id]
+        const entry = this.ledger.entries[row.id] ?? (nativeId !== undefined ? this.ledger.entries[nativeId] : undefined)
+        const archivedAt = hostTimes?.get(row.id) ?? entry?.archivedAt ?? at
+        rows[index] = {
+          ...rest,
+          archived: true,
+          archivedAt,
+          ...(entry !== undefined ? { archivedAtSource: entry.source } : {}),
+          ...(entry?.reason !== undefined ? { reason: entry.reason } : {}),
+          ...(entry?.seal !== undefined ? { seal: entry.seal } : {}),
+          issues,
+        }
+      } else {
+        rows[index] = { ...rest, archived: false, issues }
+      }
+    }
+    const list = retained.built.archivedSessionIds
+    for (const id of ids) {
+      const canonical = canonicalSessionId(id)
+      const index = list.findIndex((entry) => canonicalSessionId(entry) === canonical)
+      if (archived && index === -1) list.push(id)
+      if (!archived && index !== -1) list.splice(index, 1)
+    }
+  }
+
+  /**
+   * Per-target archive state from targeted reads — the direction①
+   * replacement for a whole-inventory rebuild on the archive/restore request
+   * path. Existence matches `buildInventory` exactly: archive set ∪ session
+   * directories ∪ feed rows, where the feed is consulted only for ids
+   * neither the registry nor a directory already answered (a bare-layout
+   * directory also waits on the feed to confirm its spelling). The
+   * harness-native spelling resolves the way a full pass harvested it: the
+   * archive set, then the feed — `sessionKnown` keys on the stored header
+   * id, which production shows equals the directory basename in both
+   * layouts (sampled 2026-11-15), so the directory basename is only the
+   * backstop for a session no feed row lists.
+   */
+  private async targetStates(ids: readonly string[]): Promise<Map<string, TargetState>> {
+    const states = new Map<string, TargetState>()
+    for (const raw of new Set(ids)) {
+      const id = canonicalSessionId(raw)
+      states.set(id, { id, found: false, archived: false })
+    }
+    // 1. The archive set (in-memory): archived state + its native spelling.
+    const registry = this.serviceFace<{ archivedSessionIds: readonly string[] }>('workspaceRegistry')
+    try {
+      for (const raw of registry?.archivedSessionIds ?? []) {
+        const state = states.get(canonicalSessionId(raw))
+        if (state === undefined) continue
+        state.archived = true
+        state.found = true
+        if (raw !== state.id) state.nativeId = raw
+      }
+    } catch {
+      // A failing registry read degrades to directory/feed discovery below.
+    }
+    // 2. Targeted directory stat: existence + seal-gate dir. A basename that
+    //    differs from the canonical id is the legacy bare layout; hold it
+    //    back from `nativeId` until the feed has had its say (a full pass
+    //    took native ids from the feed first, and the fixture pairs a
+    //    stripped directory with a prefixed feed id).
+    const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), [...states.keys()])
+    for (const [id, dir] of dirs) {
+      const state = states.get(id)
+      if (state === undefined) continue
+      state.found = true
+      state.dir = dir
+      const base = basename(dir)
+      if (base !== id && canonicalSessionId(base) === id) state.dirSpelling = base
+    }
+    // 3. Feed discovery for ids still without existence, plus bare-layout
+    //    directories whose spelling the feed can confirm. Thin first (fast),
+    //    subagent scope only if something is still missing.
+    const want = new Set(
+      [...states.values()]
+        .filter((state) => !state.found || (state.dirSpelling !== undefined && state.nativeId === undefined))
+        .map((state) => state.id),
+    )
+    if (want.size > 0) {
+      const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: readonly { sessionId?: string }[] }> }>('sessionController')
+      if (feed !== undefined) {
+        const absorb = (items: readonly { sessionId?: string }[] | undefined): void => {
+          for (const item of items ?? []) {
+            if (typeof item.sessionId !== 'string' || item.sessionId === '') continue
+            const state = states.get(canonicalSessionId(item.sessionId))
+            if (state === undefined || !want.has(state.id)) continue
+            state.found = true
+            if (state.nativeId === undefined && item.sessionId !== state.id) state.nativeId = item.sessionId
+            want.delete(state.id)
+          }
+        }
+        try {
+          absorb((await feed.list({}, AbortSignal.timeout(30_000))).items)
+          if (want.size > 0) absorb((await feed.list({ includeSubagents: true }, AbortSignal.timeout(30_000))).items)
+        } catch {
+          // A failing feed leaves the remaining ids not-found — the same
+          // degraded outcome a whole pass produces when its feed call dies.
+        }
+      }
+    }
+    // 4. Backstop: an id the feed never answered (still in `want`) that has
+    //    a bare-layout directory resolves to its stored header id — what
+    //    `sessionKnown` keys on, and the case a full pass could not answer
+    //    either. An id the feed DID answer keeps the feed's decision: its
+    //    nativeId stays undefined exactly when the feed spelling is already
+    //    canonical. Archived ids are excluded: their archive-set spelling
+    //    already answered, or the registry holds the canonical form the
+    //    restore verb matches against.
+    for (const state of states.values()) {
+      if (want.has(state.id) && !state.archived && state.dirSpelling !== undefined) {
+        state.nativeId = state.dirSpelling
+      }
+    }
+    return states
+  }
+
+  /** Whole-row source for the automatic path: rows → per-target state (方向②). */
+  private statesFromBuilt(built: BuiltInventory, ids: readonly string[]): Map<string, TargetState> {
+    const byId = new Map(built.rows.map((row) => [row.id, row]))
+    const states = new Map<string, TargetState>()
+    for (const raw of new Set(ids)) {
+      const id = canonicalSessionId(raw)
+      const row = byId.get(id)
+      const native = built.nativeIds[id]
+      const dir = built.dirIndex.byId.get(id)
+      states.set(id, {
+        id,
+        found: row !== undefined,
+        archived: row?.archived === true,
+        ...(row !== undefined ? { running: row.running } : {}),
+        ...(native !== undefined ? { nativeId: native } : {}),
+        ...(dir !== undefined ? { dir } : {}),
+      })
+    }
+    return states
   }
 
   /**
@@ -442,6 +697,18 @@ export class ArchiveService {
       // and the next inventory GET rebuilds. Reads that started during the
       // operation keep serving the pre-operation snapshot until it ends.
       this.responseCache.invalidate()
+      // The structured memo rides the same notification (方向③ 复用 SWR 失效
+      // 通知): bump the generation so any pass still in flight refuses to
+      // retain its pre-mutation rows.
+      this.stateGen += 1
+      // The per-session projection-cache file memo rides it too (扩面并入
+      // 2026-11-16, archive-title-memo-1116): unlike its TTL'd siblings it
+      // has no expiry of its own, so a session whose title lands after one
+      // pass already cached its title-less entry would keep showing
+      // `no-title` until process restart. Every locked operation drops the
+      // whole file memo — mutations are rare, the next pass pays one cold
+      // re-read, and the stale-title window closes with this notification.
+      this.projcacheFiles.clear()
     }
     run.then(release, release)
     return run
@@ -466,18 +733,28 @@ export class ArchiveService {
    * @param gate - archive seal gate (contract C2); absent = no seal reads.
    */
   async archive(ids: readonly string[], source: 'manual' | 'auto', currentSessionId?: string, actor?: string, gate?: ArchiveGate): Promise<BatchResponse> {
+    // Manual archives decide from targeted per-id state (方向①) — no whole
+    // inventory rebuild anywhere on this request path. The automatic path is
+    // candidate-grade (its caller hands ids chosen from whole rows), so it
+    // builds its own fresh inventory OUTSIDE the lock (方向②, fail-fast when
+    // the lock is already held) and re-verifies each target inside it.
+    if (source === 'auto' && this.lockHeld) throw new BusyError()
+    const built = source === 'auto' ? await this.buildFull() : undefined
     return this.withLock(async () => {
       const results: OpResult[] = []
       const now = Date.now()
-      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
-      const byId = new Map(built.rows.map((row) => [row.id, row]))
+      const states = built === undefined ? await this.targetStates(ids) : this.statesFromBuilt(built, ids)
       // Identity gate, resolved once per batch from the dispatch plugin's
       // attention ledger ($DSH_HOME/session-attention.json).
       const identity = await readIdentityTable(this.dshHome)
       const actorClass = resolveActorClass(actor, identity)
+      // Protection for the automatic path only: live-store/current/in-flight
+      // come from in-memory state, the target's running flag rides its row.
+      const protectedBase = source === 'auto' ? this.protectedReason(currentSessionId) : undefined
+      const okIds: string[] = []
       for (const id of ids) {
-        const row = byId.get(id)
-        if (row === undefined) {
+        const state = states.get(id)
+        if (state === undefined || !state.found) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
           continue
         }
@@ -491,13 +768,12 @@ export class ArchiveService {
           })
           continue
         }
-        if (row.archived) {
+        if (state.archived) {
           results.push({ id, status: 'skipped', reason: 'already-archived' })
           continue
         }
-        if (source === 'auto') {
-          const protectedMap = this.protectedReason(currentSessionId, built.rows)
-          const reason = protectedMap.get(id)
+        if (protectedBase !== undefined) {
+          const reason = protectedBase.get(id) ?? (state.running === true ? 'running' : undefined)
           if (reason !== undefined) {
             results.push({ id, status: 'skipped', reason: reason as OpResult['reason'] })
             continue
@@ -509,7 +785,7 @@ export class ArchiveService {
         let entryReason: string | undefined
         let entrySeal: string | undefined
         if (gate !== undefined) {
-          const seal = analyzeSeal(id, built.dirIndex.byId.get(id))
+          const seal = analyzeSeal(id, state.dir)
           if (gate.force !== undefined) {
             // Forced pass: the whole batch archives under the caller's stated
             // reason, each entry carrying the seal judgement it overrode.
@@ -531,7 +807,7 @@ export class ArchiveService {
         try {
           // The registry records the harness's native id spelling; rows and
           // ledger keys stay canonical.
-          await archiveSession(this.ctx, built.nativeIds[id] ?? id)
+          await archiveSession(this.ctx, state.nativeId ?? id)
           this.ledger.entries[id] = {
             archivedAt: now,
             source: entrySource,
@@ -540,6 +816,7 @@ export class ArchiveService {
             ...(actor !== undefined ? { actor } : {}),
           }
           results.push({ id, status: 'ok' })
+          okIds.push(id)
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
         } finally {
@@ -547,6 +824,7 @@ export class ArchiveService {
         }
       }
       await this.flushLedger()
+      this.patchFreshBuiltArchived(okIds, true, now)
       return { results, freedBytes: 0 }
     })
   }
@@ -554,16 +832,17 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
-      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
-      const byId = new Map(built.rows.map((row) => [row.id, row]))
+      // Targeted per-id state (方向①): existence and archived-ness come from
+      // the in-memory archive set and a directory stat — no full rebuild.
+      const states = await this.targetStates(ids)
       const toUnarchive: string[] = []
       for (const id of ids) {
-        const row = byId.get(id)
-        if (row === undefined) {
+        const state = states.get(id)
+        if (state === undefined || !state.found) {
           results.push({ id, status: 'skipped', reason: 'not-found' })
           continue
         }
-        if (!row.archived) {
+        if (!state.archived) {
           results.push({ id, status: 'skipped', reason: 'not-archived' })
           continue
         }
@@ -572,10 +851,10 @@ export class ArchiveService {
       try {
         // The registry records the harness's native id spelling; rows and
         // ledger keys stay canonical.
-        await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive.map((id) => built.nativeIds[id] ?? id))
+        await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive.map((id) => states.get(id)?.nativeId ?? id))
         for (const id of toUnarchive) {
           delete this.ledger.entries[id]
-          const native = built.nativeIds[id]
+          const native = states.get(id)?.nativeId
           if (native !== undefined && native !== id) delete this.ledger.entries[native]
           results.push({ id, status: 'ok' })
         }
@@ -585,6 +864,7 @@ export class ArchiveService {
         }
       }
       await this.flushLedger()
+      this.patchFreshBuiltArchived(toUnarchive.filter((id) => results.find((r) => r.id === id)?.status === 'ok'), false, Date.now())
       return { results, freedBytes: 0 }
     })
   }
@@ -662,8 +942,16 @@ export class ArchiveService {
    * mismatch so the UI can re-confirm.
    */
   async deleteSessions(ids: readonly string[], options: { currentSessionId?: string; expectedTotal?: number; source?: 'manual' | 'auto' } = {}): Promise<BatchResponse> {
+    // Whole-row plan (cascade children, sizes, protection) needs a full
+    // pass; it now runs OUTSIDE the lock (方向②) so a slow rebuild never
+    // blocks concurrent archive/restore behind BusyError — the lock covers
+    // plan verification and execution only. Always a fresh pass, never the
+    // retained memo: cascade-child discovery must see rows this very moment
+    // (recorded deviation from direction②'s reuse clause — a ≤15 s-old memo
+    // could miss a child born inside the window and leak it past the delete).
+    if (this.lockHeld) throw new BusyError()
+    const built = await this.buildFull()
     return this.withLock(async () => {
-      const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
       const protectedMap = this.protectedReason(options.currentSessionId, built.rows)
       const plan = planDelete(built.rows, ids, protectedMap)
       // A mismatch only matters when the host would delete MORE than the user
@@ -681,7 +969,10 @@ export class ArchiveService {
       }
       for (const id of plan.targets) this.busy.add(id)
       try {
-        return await this.executeDelete(plan, built, options.source ?? 'manual')
+        const response = await this.executeDelete(plan, built, options.source ?? 'manual')
+        // Rows left storage: the retained memo cannot answer for them again.
+        this.freshBuilt = undefined
+        return response
       } finally {
         for (const id of plan.targets) this.busy.delete(id)
       }
@@ -822,7 +1113,7 @@ export class ArchiveService {
   // ------------------------------------------------------------------
 
   async autoPreview(): Promise<AutoPreviewView> {
-    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
+    const built = await this.buildFull()
     const now = Date.now()
     const protectedSet = new Set(this.protectedReason(undefined, built.rows).keys())
     const archiveCandidates = this.config.autoArchiveEnabled
@@ -858,21 +1149,33 @@ export class ArchiveService {
    * session archived by this very cycle is never deleted in it.
    */
   async runAutoCycle(kind: 'archive' | 'delete', currentSessionId?: string): Promise<RunStats> {
+    // Candidate selection is inherently a whole-row scan; the pass runs
+    // OUTSIDE the lock (方向②, fail-fast when already held) so a cycle never
+    // holds the operation lock through an 11–21 s rebuild, and the ids it
+    // chose are re-verified against live archive state inside the lock.
+    if (this.lockHeld) throw new BusyError()
+    const built = await this.buildFull()
     return this.withLock(async () => {
       this.cycleRunning = true
       const startedAt = Date.now()
       try {
         if (kind === 'archive') {
-          const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
           const protectedSet = new Set(this.protectedReason(currentSessionId, built.rows).keys())
           const candidates = autoArchiveCandidates(built.rows, { days: this.config.autoArchiveDays, now: startedAt, protectedIds: protectedSet })
-          const response = await this.archiveInternal(candidates.map((entry) => entry.id), 'auto', built.nativeIds)
+          // Targeted re-verify (方向②): a manual archive that landed while
+          // this cycle's pass ran must not be re-stamped with a fresh ledger
+          // entry (the harness verb is idempotent; the ledger clock is not).
+          const liveArchived = new Set(
+            (this.serviceFace<{ archivedSessionIds: readonly string[] }>('workspaceRegistry')?.archivedSessionIds ?? [])
+              .map((id) => canonicalSessionId(id)),
+          )
+          const fresh = candidates.filter((entry) => !liveArchived.has(canonicalSessionId(entry.id)))
+          const response = await this.archiveInternal(fresh.map((entry) => entry.id), 'auto', built.nativeIds)
           const stats = this.statsFrom(response.results, startedAt)
           this.autoState.lastArchiveRun = stats
           await this.flushState()
           return stats
         }
-        const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
         const protectedMap = this.protectedReason(currentSessionId, built.rows)
         const protectedSet = new Set(protectedMap.keys())
         // Rows carry their archive time from the host stamp (ledger fallback),
@@ -893,6 +1196,7 @@ export class ArchiveService {
         }
         const plan = planDelete(built.rows, seeds.map((seed) => seed.id), protectedMap)
         const response = await this.executeDelete(plan, built, 'auto')
+        this.freshBuilt = undefined
         const stats = this.statsFrom(response.results, startedAt)
         this.autoState.lastDeleteRun = stats
         await this.flushState()
@@ -907,12 +1211,14 @@ export class ArchiveService {
   private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', nativeIds: Readonly<Record<string, string>>): Promise<BatchResponse> {
     const results: OpResult[] = []
     const now = Date.now()
+    const okIds: string[] = []
     for (const id of ids) {
       this.busy.add(id)
       try {
         await archiveSession(this.ctx, nativeIds[id] ?? id)
         this.ledger.entries[id] = { archivedAt: now, source }
         results.push({ id, status: 'ok' })
+        okIds.push(id)
       } catch (error) {
         results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
       } finally {
@@ -920,6 +1226,7 @@ export class ArchiveService {
       }
     }
     await this.flushLedger()
+    this.patchFreshBuiltArchived(okIds, true, now)
     return { results, freedBytes: 0 }
   }
 
@@ -986,8 +1293,16 @@ export class ArchiveService {
 
   async preview(id: string): Promise<SessionPreviewView> {
     const controller = this.serviceFace<{ inspect?(sessionId: string, signal?: AbortSignal): Promise<{ meta?: { createdAt?: number; cwd?: string }; events?: readonly unknown[] }> }>('sessionController')
-    const built = await buildInventory(await this.sources(), AbortSignal.timeout(30_000))
-    const row: ArchiveSessionRow | undefined = built.rows.find((entry) => entry.id === id)
+    // Structured fresh source first (方向②③): a memo hit skips the whole
+    // pass; a memo miss for THIS id falls back to a fresh pass before
+    // declaring not-found, so a session born inside the window never 404s.
+    const retained = this.peekFreshBuilt()
+    let built = retained ?? await this.buildFull()
+    let row: ArchiveSessionRow | undefined = built.rows.find((entry) => entry.id === id)
+    if (row === undefined && retained !== undefined) {
+      built = await this.buildFull()
+      row = built.rows.find((entry) => entry.id === id)
+    }
     if (row === undefined) {
       throw new Error('session not found')
     }

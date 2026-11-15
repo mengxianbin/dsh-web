@@ -24,11 +24,16 @@
  * invalidates after every mutating operation, and invalidation wins over an
  * in-flight rebuild — a rebuild started before the invalidation is never
  * retained, so a refreshed snapshot cannot carry pre-mutation rows once the
- * refresh lands. The trade-off is bounded and explicit: between a mutation
- * and the refresh landing (one rebuild duration) GET readers may see the
- * pre-mutation snapshot; every mutating route keeps building its own fresh
- * inventory under the operation lock, so archive/restore/delete decisions are
- * never made from this cache.
+ * refresh lands. Since archive-inline-inventory-1111 方向④ invalidation goes
+ * one step further and **aborts** the in-flight build: an orphaned full scan
+ * dies at the moment its result stops being wanted instead of burning the
+ * shared event loop to a discarded conclusion (a reader already joined on
+ * that build simply retries under the new generation and still receives a
+ * payload). The trade-off stays bounded and explicit: between a mutation and
+ * the refresh landing GET readers may see the pre-mutation snapshot; mutating
+ * routes never read decisions from this cache (archive/restore take targeted
+ * per-id state, delete/auto build their own fresh inventory outside the
+ * operation lock).
  *
  * Nothing here polls or accumulates: one entry, one in-flight rebuild, and a
  * refresh is always one call away.
@@ -68,18 +73,30 @@ export interface InventoryResponseServe {
 export interface InventoryResponseCacheOptions {
   /** How long a built response may be served as fresh, in milliseconds. */
   ttlMs: number
-  /** Performs the real rebuild (inventory pass + serialization). */
-  build: () => Promise<InventoryResponseSnapshot>
+  /**
+   * Performs the real rebuild (inventory pass + serialization). The signal
+   * aborts when {@link InventoryResponseCache.invalidate} drops the in-flight
+   * build, so an orphaned full scan is cancelled instead of finishing into a
+   * retained nothing (archive-inline-inventory-1111 方向④).
+   */
+  build: (signal: AbortSignal) => Promise<InventoryResponseSnapshot>
   /** Clock reading; defaults to wall time. Injected for deterministic tests. */
   now?: () => number
 }
 
+/** One in-flight rebuild: its promise, the generation it started under, and its abort handle. */
+interface InflightBuild {
+  promise: Promise<InventoryResponseSnapshot>
+  generation: number
+  controller: AbortController
+}
+
 export class InventoryResponseCache {
   private readonly ttlMs: number
-  private readonly build: () => Promise<InventoryResponseSnapshot>
+  private readonly build: (signal: AbortSignal) => Promise<InventoryResponseSnapshot>
   private readonly now: () => number
   private entry: RetainedSnapshot | undefined
-  private inflight: { promise: Promise<InventoryResponseSnapshot>; generation: number } | undefined
+  private inflight: InflightBuild | undefined
   private generation = 0
   private buildCount = 0
 
@@ -94,71 +111,100 @@ export class InventoryResponseCache {
    * verbatim; past it (or after an invalidation) the retained payload is
    * served anyway while one background rebuild refreshes it; a reader that
    * finds no usable snapshot pays the rebuild itself, coalescing with any
-   * rebuild already running.
+   * rebuild already running. A build aborted mid-flight by {@link invalidate}
+   * is retried under the new generation — joined readers still end with a
+   * payload, they just never receive the dead build's.
    */
   async serve(): Promise<InventoryResponseServe> {
-    const at = this.now()
-    const entry = this.entry
-    if (entry !== undefined && at >= entry.generatedAt) {
-      const ageMs = at - entry.generatedAt
-      if (entry.generation === this.generation && ageMs < this.ttlMs) {
-        return { payload: entry.payload, hit: true, stale: false, ageMs }
+    for (;;) {
+      const at = this.now()
+      const entry = this.entry
+      if (entry !== undefined && at >= entry.generatedAt) {
+        const ageMs = at - entry.generatedAt
+        if (entry.generation === this.generation && ageMs < this.ttlMs) {
+          return { payload: entry.payload, hit: true, stale: false, ageMs }
+        }
+        // Retained but past the window or dropped by an invalidation: answer
+        // verbatim now and refresh behind the reader, so this read never pays
+        // the rebuild. The refresh is single-flighted and generation-guarded.
+        this.kick()
+        return { payload: entry.payload, hit: true, stale: true, ageMs }
       }
-      // Retained but past the window or dropped by an invalidation: answer
-      // verbatim now and refresh behind the reader, so this read never pays
-      // the rebuild. The refresh is single-flighted and generation-guarded.
-      this.kick()
-      return { payload: entry.payload, hit: true, stale: true, ageMs }
-    }
-    // No snapshot, or the clock stepped back past its produced-at (never
-    // trust a future-dated body as fresh): pay the rebuild, coalescing with
-    // one already running.
-    const inflight = this.inflight
-    if (inflight !== undefined && inflight.generation === this.generation) {
-      // Coalesced reader: this one waited for a rebuild it did not start, so
-      // it is reported as a miss (it paid latency, not a retained snapshot).
-      const built = await inflight.promise
-      return { payload: built.payload, hit: false, stale: false, ageMs: 0 }
-    }
-    const generation = this.generation
-    const promise = (async () => {
-      this.buildCount += 1
-      return this.build()
-    })()
-    this.inflight = { promise, generation }
-    try {
-      const built = await promise
-      // An invalidation that landed while this rebuild ran forbids retaining
-      // its result (it may predate the mutation the invalidation followed).
-      if (this.generation === generation) {
-        this.entry = { payload: built.payload, generatedAt: built.generatedAt, generation }
+      // No snapshot, or the clock stepped back past its produced-at (never
+      // trust a future-dated body as fresh): pay the rebuild, coalescing with
+      // one already running.
+      const joined = this.inflight
+      if (joined !== undefined && joined.generation === this.generation) {
+        // Coalesced reader: this one waited for a rebuild it did not start, so
+        // it is reported as a miss (it paid latency, not a retained snapshot).
+        try {
+          const built = await joined.promise
+          return { payload: built.payload, hit: false, stale: false, ageMs: 0 }
+        } catch (error) {
+          // Joined build died to an invalidation abort: retry under the new
+          // generation rather than surfacing the cancellation as a 500.
+          if (joined.controller.signal.aborted) continue
+          throw error
+        }
       }
-      return { payload: built.payload, hit: false, stale: false, ageMs: 0 }
-    } finally {
-      if (this.inflight?.promise === promise) this.inflight = undefined
+      const generation = this.generation
+      const controller = new AbortController()
+      const promise = (async () => {
+        this.buildCount += 1
+        return this.build(controller.signal)
+      })()
+      const started: InflightBuild = { promise, generation, controller }
+      this.inflight = started
+      try {
+        const built = await promise
+        // An invalidation that landed while this rebuild ran forbids retaining
+        // its result (it may predate the mutation the invalidation followed).
+        if (this.generation === generation) {
+          this.entry = { payload: built.payload, generatedAt: built.generatedAt, generation }
+        }
+        return { payload: built.payload, hit: false, stale: false, ageMs: 0 }
+      } catch (error) {
+        // invalidate() aborted this build: it never landed and must not count
+        // as a real rebuild ("buildCount 不白计"); the retry loop picks the
+        // fresh generation up.
+        if (controller.signal.aborted) {
+          this.buildCount -= 1
+          continue
+        }
+        throw error
+      } finally {
+        if (this.inflight?.promise === promise) this.inflight = undefined
+      }
     }
   }
 
   /**
    * Start a background refresh if none is running. Errors are swallowed —
    * the retained snapshot keeps answering until a later serve retries — but
-   * the build counter still records the attempt for tests.
+   * the build counter still records the attempt for tests. A refresh aborted
+   * by an invalidation is not an attempt that ever ran to an outcome: its
+   * count is given back (方向④, "不白计").
    */
   private kick(): void {
     if (this.inflight !== undefined && this.inflight.generation === this.generation) return
     const generation = this.generation
+    const controller = new AbortController()
     const promise = (async () => {
       this.buildCount += 1
-      return this.build()
+      return this.build(controller.signal)
     })()
-    this.inflight = { promise, generation }
+    const started: InflightBuild = { promise, generation, controller }
+    this.inflight = started
     void promise.then(
       (built) => {
         if (this.generation === generation) {
           this.entry = { payload: built.payload, generatedAt: built.generatedAt, generation }
         }
       },
-      () => { /* keep the retained snapshot; the next serve retries */ },
+      () => {
+        if (controller.signal.aborted) this.buildCount -= 1
+        // else: keep the retained snapshot; the next serve retries (attempt counted).
+      },
     ).finally(() => {
       if (this.inflight?.promise === promise) this.inflight = undefined
     })
@@ -168,12 +214,15 @@ export class InventoryResponseCache {
    * Drop the current snapshot from freshness (it may be served stale while a
    * refresh runs); the next serve refreshes behind its reader. A rebuild that
    * started before this invalidation must not answer readers that arrive
-   * after it — an already-joined reader still receives the body it is
-   * awaiting, it is just never retained.
+   * after it — and since 方向④ it does not get to finish either: the
+   * in-flight build is aborted on the spot (an already-joined reader retries
+   * under the new generation and still receives a payload).
    */
   invalidate(): void {
     this.generation += 1
+    const inflight = this.inflight
     this.inflight = undefined
+    inflight?.controller.abort()
   }
 
   /** Number of real rebuilds this instance performed; diagnostics for tests. */

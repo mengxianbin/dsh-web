@@ -16,6 +16,25 @@ import type { ArchiveIssueCode, ArchiveSessionRow, WorkspaceView } from '../core
 import type { LedgerDocument, LedgerSource } from './ledger.ts'
 import { canonicalSessionId, indexSessionDirs, type SessionDirIndex } from './session-files.ts'
 
+/**
+ * How many rows one synchronous slice of the assembly may process before it
+ * yields back to the shared event loop (archive-inline-inventory-1111 方向⑤
+ * 分片让位, precedent `#seal-scan-async-1106`). The pass runs on the host's
+ * single loop while panel reads, seal checks and archive requests interleave;
+ * without these cuts the feed walk, the per-row enrichment and the row
+ * assembly each hold the loop for their whole span ("each rebuild starves
+ * the shared event loop" — the source comment this replaces). The value is
+ * exported so tests can assert the granularity directly.
+ */
+export const INVENTORY_YIELD_EVERY = 128
+
+/** One yield back to the event loop: macrotask, so pending I/O and timers run. */
+async function yieldSlice(): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setImmediate(resolve)
+  })
+}
+
 /** Minimal duck-typed face of the host SessionController feed. */
 export interface SessionFeedFace {
   list(request: unknown, signal: AbortSignal): Promise<{
@@ -239,7 +258,9 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
       // sessions too, so it keeps serving every row the pre-f5 `{}` default
       // used to hand it. Off-host move stays parked in #inventory-offhost-1110.
       const response = await sources.feed.list({ includeArchived: true, includeSubagents: true, trimHeavyProjections: false }, signal)
+      let seen = 0
       for (const item of response.items ?? []) {
+        if (++seen % INVENTORY_YIELD_EVERY === 0) await yieldSlice()
         if (typeof item.sessionId !== 'string' || item.sessionId === '') continue
         // The feed mixes id spellings (bare uuids beside `session-<uuid>`);
         // canonicalize and remember the native form for harness-facing calls.
@@ -331,7 +352,9 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
   // Per-session projection-cache files are the fallback enrichment for rows
   // the aggregate index does not cover (older and archived sessions). Files
   // are read only for rows still missing facts and never conjure a row.
+  let enriched = 0
   for (const draft of drafts.values()) {
+    if (++enriched % INVENTORY_YIELD_EVERY === 0) await yieldSlice()
     if (draft.title !== undefined && draft.createdAt !== undefined && draft.cwd !== undefined) continue
     if (signal.aborted) throw new Error('inventory aborted')
     const entry = await readProjcacheFile(sources.dshHome, draft.id, sources.projcacheFiles)
@@ -350,7 +373,9 @@ export async function buildInventory(sources: InventorySources, signal: AbortSig
   }
 
   const rows: ArchiveSessionRow[] = []
+  let assembled = 0
   for (const draft of drafts.values()) {
+    if (++assembled % INVENTORY_YIELD_EVERY === 0) await yieldSlice()
     const issues: ArchiveIssueCode[] = []
     if (draft.title === undefined) issues.push('no-title')
     const archived = archivedSet.has(draft.id)

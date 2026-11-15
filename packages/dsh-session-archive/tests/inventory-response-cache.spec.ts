@@ -263,6 +263,93 @@ describe('Given an explicit invalidation', () => {
     expect(next.hit).toBe(false)
     expect(next.payload).toBe('{"n":2}')
   })
+
+  it('operator never pays inline for a scan the invalidation cancelled, and still gets a payload', async () => {
+    // Given a cold cache whose first build hangs until its signal aborts
+    let first = true
+    let buildCount = 0
+    let produced = 0
+    let aborted = 0
+    const cache = new InventoryResponseCache({
+      ttlMs: 15_000,
+      build: (signal) => {
+        buildCount += 1
+        if (first) {
+          first = false
+          return new Promise((_, reject) => {
+            signal.addEventListener('abort', () => {
+              aborted += 1
+              reject(new Error('scan cancelled'))
+            }, { once: true })
+          })
+        }
+        return Promise.resolve({ payload: `{"n":${++produced}}`, generatedAt: 1_000 })
+      },
+      now: () => 1_000,
+    })
+
+    // When the owner invalidates while the reader waits on that build
+    const reading = cache.serve()
+    cache.invalidate()
+    const served = await reading
+
+    // Then the orphaned scan was cancelled on the spot (方向④), its attempt
+    // was given back rather than counted ("不白计"), and the joined reader
+    // retried under the new generation and received a real payload — never
+    // the dead build's
+    expect(aborted).toBe(1)
+    expect(cache.builds).toBe(1)
+    expect(served.hit).toBe(false)
+    expect(served.payload).toBe('{"n":1}')
+  })
+
+  it('operator never counts a background refresh the invalidation cancelled', async () => {
+    // Given a cache holding one payload whose refresh hangs until aborted
+    let clock = 1_000
+    let hangs = false
+    let buildCount = 0
+    let aborted = 0
+    const cache = new InventoryResponseCache({
+      ttlMs: 15_000,
+      build: (signal) => {
+        buildCount += 1
+        if (buildCount === 1) return Promise.resolve({ payload: '{"n":1}', generatedAt: 1_000 })
+        if (hangs) {
+          hangs = false
+          return new Promise((_, reject) => {
+            signal.addEventListener('abort', () => {
+              aborted += 1
+              reject(new Error('refresh cancelled'))
+            }, { once: true })
+          })
+        }
+        return Promise.resolve({ payload: '{"n":2}', generatedAt: clock })
+      },
+      now: () => clock,
+    })
+    await cache.serve()
+
+    // When the window lapses, the kicked refresh hangs, and the owner
+    // invalidates before it lands
+    clock += 15_000
+    hangs = true
+    const stale = await cache.serve()
+    expect(stale.stale).toBe(true)
+    cache.invalidate()
+    await flush()
+
+    // Then the orphaned refresh was aborted, its attempt was not counted,
+    // and the retained body still answers while a fresh refresh runs behind
+    expect(aborted).toBe(1)
+    expect(cache.builds).toBe(1)
+    const after = await cache.serve()
+    expect(after.payload).toBe('{"n":1}')
+    await flush()
+    const refreshed = await cache.serve()
+    expect(refreshed.stale).toBe(false)
+    expect(refreshed.payload).toBe('{"n":2}')
+    expect(cache.builds).toBe(2)
+  })
 })
 
 describe('Given the service that owns the response cache', () => {
