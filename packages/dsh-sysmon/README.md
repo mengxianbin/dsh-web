@@ -10,18 +10,21 @@ or an unhealthy network is visible without leaving the chat.
 
 ## What it does
 
-- Seats a compact chip into `conversation.session.header.actions`, right of
-  the agent-preset label: four tabular-numeral read-outs (CPU busy %, memory
+- Seats a compact chip into `conversation.session.header.views.trailing`, the
+  view tab row's trailing cell right of the More launcher — row one stays the
+  Session title's alone: four tabular-numeral read-outs (CPU busy %, memory
   used %, disk busy %, network) plus a trailing local wall clock
   (`MM-DD HH:MM`, 2026-10-29 ruling — fullscreen work hides the OS taskbar
   clock) and a hover tooltip with disk throughput, memory absolutes, and the
   network detail line. The clock ticks on its own 1s timer, never on the host
   payload: a stalled host freezes the metric read-outs but never the time.
+  The header reserves the seat's measured width when folding tabs, so the chip
+  never squeezes the tab share into wrapping the row.
 - Mirrors the same chip into `conversation.header.leading`, the one header
-  cell that renders with no Session and stays visible while a blank Session
-  hides the actions row. A module-level mount signal keeps the two seats
-  exclusive, so exactly one copy paints: the actions copy wins whenever both
-  would be mounted.
+  cell that renders with no Session and stays visible while a blank Session or
+  a single-View header hides the tab row. A module-level mount signal keeps
+  the two seats exclusive, so exactly one copy paints: the trailing copy wins
+  whenever both would be mounted.
 - Samples on the Host every second: CPU from an `os.cpus()` diff, memory from
   `os.totalmem()`/`os.freemem()`, and disk from one resident `typeperf` child
   that streams the three `PhysicalDisk(_Total)` counters over stdout.
@@ -103,8 +106,8 @@ compatibility stubs left for the retired readings).
   clamps it to 100 while history keeps the raw value.
 - The ring buffer is in-memory and lost on restart; there is no history UI yet.
 - The fallback copy sits in the header's leading cell, so between states the
-  chip moves from the left edge (no Session / blank Session) to beside the
-  preset label (active Session).
+  chip moves from the left edge (no Session / blank Session / single View) to
+  the tab row after More (active Session with two or more Views).
 - Per-process attribution is out of scope; run
   `scripts/common/io-attribution.ps1` from m-note when you need the culprit.
 

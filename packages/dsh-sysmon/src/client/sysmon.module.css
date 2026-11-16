@@ -1,12 +1,13 @@
 /*
  * Sysmon header chip: one compact row of CPU / memory / disk read-outs in the
- * conversation session header's actions slot. The chip inherits the header's
- * 12px scale; values are tabular-nums so digits never jitter while polling.
- * Warn coloring rides the semantic error token so light/dark both hold.
+ * view tab row's trailing seat (right of the More launcher — the Session
+ * title keeps row one to itself). The chip inherits the header's 12px scale;
+ * values are tabular-nums so digits never jitter while polling. Warn coloring
+ * rides the semantic error token so light/dark both hold.
  *
- * The chip lives inside .titleRow (container-type: inline-size), so @container
- * queries degrade it the same way the agent-preset label does: first the unit
- * labels drop, then the whole chip, before the title row overflows.
+ * The chip lives inside the tab row (ConversationRoot `.tabs`, container-type:
+ * inline-size), so @container queries degrade it the same way the View tabs
+ * do: first the unit labels drop, then the whole chip, before the row wraps.
  */
 
 .chip {
@@ -50,7 +51,7 @@
   background: var(--dsw-alias-border-l3);
 }
 
-/* First sacrifice when the title row narrows: the unit labels go, bare
+/* First sacrifice when the tab row narrows: the unit labels go, bare
    percentages stay (the tooltip keeps the full nouns). */
 @container (max-width: 620px) {
   .k {
@@ -63,7 +64,8 @@
   }
 }
 
-/* Last sacrifice: the whole chip yields before the row overflows. */
+/* Last sacrifice: the whole chip yields before the tab row has to wrap and
+   grow the header. */
 @container (max-width: 440px) {
   .chip {
     display: none;

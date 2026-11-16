@@ -1,13 +1,14 @@
 /**
  * Cross-seat presence signal for the sysmon chip's two registrations.
  *
- * The chip occupies two mutually exclusive seats: the session-header actions
- * row (mounted only while an open, non-blank Session renders that row) and the
- * conversation header's leading cell (the always-rendered fallback that covers
- * the no-session and blank-session states the actions row cannot reach). Both
- * seats come from this one module instance, so a module-level mount count lets
- * exactly one copy be painted: the primary reports its mount from a layout
- * effect, the fallback subscribes and yields while any primary copy exists.
+ * The chip occupies two mutually exclusive seats: the view tab row's trailing
+ * seat (mounted only while an open, non-blank Session with two or more Views
+ * renders that row) and the conversation header's leading cell (the
+ * always-rendered fallback that covers the no-session, blank-session, and
+ * single-View states the tab row cannot reach). Both seats come from this one
+ * module instance, so a module-level mount count lets exactly one copy be
+ * painted: the primary reports its mount from a layout effect, the fallback
+ * subscribes and yields while any primary copy exists.
  *
  * Layout-phase reporting matters: a primary mounting in the same commit as a
  * fallback render must win before paint, or two copies flash for a frame.

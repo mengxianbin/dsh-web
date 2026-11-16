@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 /**
- * Sysmon seat coordination: the primary header-actions copy and the fallback
+ * Sysmon seat coordination: the primary tab-row-trailing copy and the fallback
  * header-leading copy must never paint together, and the fallback must cover
  * exactly the states where the primary seat is not mounted.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import { apply } from '../src/client/index.ts'
 import { SysmonChip, SysmonFallbackChip } from '../src/client/SysmonChip.tsx'
 import { beginPrimary, primaryMounted, subscribePrimary } from '../src/client/presence.ts'
 import { zh } from '../src/client/locales.ts'
@@ -149,5 +151,27 @@ describe('seat coordination', () => {
     primary.unmount()
     await waitFor(() => expect(chips()).toHaveLength(1))
     expect(fallback.container.querySelector('[data-dsh-plugin="sysmon"]')).toBeTruthy()
+  })
+})
+
+describe('apply', () => {
+  it('seats the primary copy in the tab-row trailing slot and keeps the leading fallback', () => {
+    // Registration targets are the contract of this move: the primary must
+    // follow the harness's new second-row seat (title row stays clear), the
+    // leading cell keeps covering every state the tab row does not render.
+    const injected: string[] = []
+    const ctx = {
+      effect: (fn: () => unknown) => { fn(); return () => {} },
+      locale: { register: () => () => {} },
+      slots: {
+        inject: (key: string) => { injected.push(key); return () => {} },
+        register: () => () => {},
+      },
+    }
+    apply(ctx as unknown as ClientContext)
+    expect(injected).toEqual([
+      'conversation.session.header.views.trailing',
+      'conversation.header.leading',
+    ])
   })
 })

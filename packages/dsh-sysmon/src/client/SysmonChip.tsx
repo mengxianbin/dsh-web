@@ -1,9 +1,10 @@
 /**
  * The sysmon chip, rendered into two mutually exclusive header seats: the
- * session-header actions row (primary, immediately right of the agent-preset
- * label) and the always-rendered conversation-header leading cell (fallback,
- * covering the no-session and blank-session states the actions row never
- * mounts for). The shared body polls the host route `api/sysmon/samples` once
+ * view tab row's trailing seat (primary, right of the More launcher — off the
+ * title row so the Session title keeps its full width) and the
+ * always-rendered conversation-header leading cell (fallback, covering the
+ * no-session, blank-session, and single-View states the tab row never mounts
+ * for). The shared body polls the host route `api/sysmon/samples` once
  * per second while the tab is visible, reddens any CPU/memory/disk metric the
  * host marks as warned (sustained-streak at threshold — the net reading never
  * reddens: its failure count left the display on 2026-10-28), and shows disk
@@ -27,7 +28,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
-// Type-only: pulls the ui-conversation SlotMap merge (the header actions hole).
+// Type-only: pulls the ui-conversation SlotMap merge (the header holes).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { clampBusy, formatMBps } from '../core/sample.ts'
 import { formatNetValue } from '../core/net.ts'
@@ -45,7 +46,7 @@ const FETCH_TIMEOUT_MS = 3_000
 /** The no-reading placeholder every metric falls back to. */
 const dash = '—'
 
-/** Full props of the header-actions occupant. */
+/** Full props of the tab-row trailing-seat occupant. */
 export type SysmonChipProps = PropsLocale<'sysmon'>
 
 /** Format a local `HH:MM:SS` clock string for the refresh stamp. */
@@ -287,7 +288,7 @@ function SysmonBody({ t }: SysmonChipProps) {
 }
 
 /**
- * Primary seat occupant: the session-header actions row. Reports its mount
+ * Primary seat occupant: the view tab row's trailing seat. Reports its mount
  * from a layout effect so the fallback seat yields before paint, never after.
  * @param props - the shell's locale translator.
  * @returns the chip body.
@@ -300,8 +301,8 @@ export function SysmonChip(props: SysmonChipProps) {
 /**
  * Fallback seat occupant: the conversation-header leading cell, the only
  * header position that exists without a Session and stays rendered while a
- * blank Session hides the actions row. Renders nothing while a primary copy
- * is mounted, so exactly one chip paints at a time.
+ * blank Session or a single-View header hides the tab row. Renders nothing
+ * while a primary copy is mounted, so exactly one chip paints at a time.
  * @param props - the shell's locale translator.
  * @returns the chip body, or null while the primary seat is occupied.
  */
