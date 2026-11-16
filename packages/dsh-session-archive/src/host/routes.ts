@@ -200,6 +200,10 @@ function batchRoute(
  * the one shared implementation so the native dialog (channel A) and this
  * plugin's own gate (channel B) can never disagree. Same loopback fence as
  * every route; `GET ?ids=a,b` is accepted alongside `POST {ids:[…]}`.
+ * `recheck` (archive-seal-falsered-1116 段2, POST `recheck:true` / GET
+ * `?recheck=1`) marks a click-time ask: a memoized `no-endorsement` red is
+ * re-derived (git re-probed) instead of served frozen to the transcript stamp;
+ * every other verdict keeps its memo window.
  */
 export function makeSealCheckRoute(service: ArchiveService): WebRoute {
   return {
@@ -208,11 +212,15 @@ export function makeSealCheckRoute(service: ArchiveService): WebRoute {
     handler: async (req, res) => {
       if (!fenced(req, res)) return
       let ids: string[]
+      let recheck = false
       if (req.method === 'POST') {
-        ids = idList(bodyRecord(await readBody(req)).ids)
+        const body = bodyRecord(await readBody(req))
+        ids = idList(body.ids)
+        recheck = body.recheck === true
       } else if (req.method === 'GET') {
         const url = new URL(req.url ?? '/', 'http://localhost')
         ids = idList((url.searchParams.get('ids') ?? '').split(','))
+        recheck = url.searchParams.get('recheck') === '1' || url.searchParams.get('recheck') === 'true'
       } else {
         writeJson(res, 405, { ok: false, error: 'method not allowed' })
         return
@@ -222,7 +230,7 @@ export function makeSealCheckRoute(service: ArchiveService): WebRoute {
         return
       }
       try {
-        const results = await service.sealCheck(ids)
+        const results = await service.sealCheck(ids, { recheck })
         writeJson(res, 200, { results }, { 'cache-control': 'no-store' })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: errorDetail(error) })

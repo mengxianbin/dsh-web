@@ -42,7 +42,7 @@ import {
   type LedgerEntry,
   type LedgerSource,
 } from './ledger.ts'
-import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker } from './seal.ts'
+import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, type AnalyzeSealOptions } from './seal.ts'
 import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
@@ -676,9 +676,9 @@ export class ArchiveService {
    * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
    * a silent pass).
    */
-  sealCheck(ids: readonly string[]): SealCheckResult[] {
+  sealCheck(ids: readonly string[], options?: AnalyzeSealOptions): SealCheckResult[] {
     const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
-    return ids.map((id) => analyzeSeal(id, dirs.get(id)))
+    return ids.map((id) => analyzeSeal(id, dirs.get(id), options))
   }
 
   // ------------------------------------------------------------------
@@ -785,7 +785,10 @@ export class ArchiveService {
         let entryReason: string | undefined
         let entrySeal: string | undefined
         if (gate !== undefined) {
-          const seal = analyzeSeal(id, state.dir)
+          // recheck (archive-seal-falsered-1116 段2): this REST gate decides at
+          // click time, so a memoized no-endorsement red is re-probed instead
+          // of served frozen to the transcript stamp.
+          const seal = analyzeSeal(id, state.dir, { recheck: true })
           if (gate.force !== undefined) {
             // Forced pass: the whole batch archives under the caller's stated
             // reason, each entry carrying the seal judgement it overrode.
@@ -906,7 +909,7 @@ export class ArchiveService {
           archivedAt: existing?.archivedAt ?? now,
           source: 'override',
           reason: normalizeOverrideReason(options.reason),
-          seal: providedSeal ?? sealMarker(analyzeSeal(id, index.byId.get(id))),
+          seal: providedSeal ?? sealMarker(analyzeSeal(id, index.byId.get(id), { recheck: true })),
         }
       } else {
         next = existing !== undefined

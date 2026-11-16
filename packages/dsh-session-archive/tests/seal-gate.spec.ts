@@ -8,7 +8,7 @@
  * @module tests/seal-gate.spec
  */
 
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
@@ -323,5 +323,31 @@ describe('endorsement downgrade at the endpoints (seal-noendorse-green-1106)', (
       { id: 'session-bare', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'no-endorsement' } },
     ])
     expect(host.registry.archivedSessionIds).toEqual([])
+  })
+})
+
+describe('seal-check recheck wiring (archive-seal-falsered-1116 段2)', () => {
+  it('passes the click-time recheck flag through POST body and GET query alike', async () => {
+    // Given a bare-DONE session over a real service
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-bare', updatedAt: 1 }], persistedIds: ['session-bare'] })
+    writeTranscript(host, 'session-bare', [assistantMsg('收口完成。\n\nSAVE_STATUS=DONE')])
+    const service = gateService(host)
+    const spy = vi.spyOn(service, 'sealCheck')
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+
+    // When the click gate asks with recheck
+    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'], recheck: true })
+    // Then the flag reaches the shared implementation (点击门重探)
+    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: true })
+
+    // A plain ask (the lamp pull's shape) keeps the memo window
+    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'] })
+    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: false })
+
+    // GET carries the same flag (diagnostic curl form)
+    const ok = await fetch(`${url}/api/dsh-session-archive/seal-check?ids=session-bare&recheck=1`)
+    expect(ok.status).toBe(200)
+    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: true })
   })
 })

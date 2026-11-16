@@ -276,6 +276,20 @@ function memoPut(file: string, stamp: { readonly mtimeMs: number; readonly size:
   }
 }
 
+/** Caller options for one seal analysis (archive-seal-falsered-1116 段2). */
+export interface AnalyzeSealOptions {
+  /**
+   * Re-probe the endorsement even when the memo holds a `no-endorsement` red
+   * (点击门重探): that verdict is a git state, not a transcript state, so the
+   * click-time channels (seal-check with `recheck`, the REST archive gate, the
+   * override write-back) never serve it frozen to the transcript stamp — one
+   * transient probe failure used to stick until the next append (2026-11-16
+   * false red). Every other memoized verdict keeps its window; lamp pulls omit
+   * the flag.
+   */
+  readonly recheck?: boolean
+}
+
 /**
  * Run the six-value grouping for one session. `dir` comes from the sessions-root
  * directory index (`host/session-files.ts`); `undefined` (no dir) and every
@@ -293,13 +307,20 @@ function memoPut(file: string, stamp: { readonly mtimeMs: number; readonly size:
  * read; an append changes both, so the next call recomputes with zero explicit
  * invalidation (same invalidation rule as the seal-light per-session cache:
  * 转录 append 即作废重算). Read/decode failures are never memoized — they are
- * transient (lock, torn open) and must retry on the next call. The endorsement
- * recheck's git verdict rides the memo for the window (same trade the
- * seal-light design records): a git-state change without a transcript write
- * keeps the previous reading, and the failure direction is conservative — an
- * unendorsed DONE stays blocked until the next append, never a false green.
+ * transient (lock, torn open) and must retry on the next call.
+ *
+ * The endorsement recheck's git verdict and the stamp window
+ * (archive-seal-falsered-1116 段2): a memoized `no-endorsement` is a **git
+ * state**, not a transcript state, and one transient probe failure used to
+ * freeze that red until the next append (the 2026-11-16 false red). Callers
+ * that decide at click time — the seal-check endpoint with `recheck`, the
+ * REST archive gate, the override write-back — pass {@link AnalyzeSealOptions.recheck}
+ * and never serve that red from the memo: it is re-derived, git re-probed.
+ * Lamp pulls omit the flag and keep the memo window (板行四问②：重探只在判红
+ * 时触发、灯查频度不变); the conservative direction is unchanged — a red can
+ * only become fresher, never a false green.
  */
-export function analyzeSeal(id: string, dir: string | undefined): SealCheckResult {
+export function analyzeSeal(id: string, dir: string | undefined, options?: AnalyzeSealOptions): SealCheckResult {
   if (dir === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
   const file = latestTranscriptPath(dir)
   if (file === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
@@ -318,7 +339,11 @@ export function analyzeSeal(id: string, dir: string | undefined): SealCheckResul
 
   if (stamp !== undefined) {
     const hit = sealMemo.get(file)
-    if (hit !== undefined && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size) {
+    // 段2 点击门重探: a memoized no-endorsement is git-derived; a recheck
+    // caller treats that hit as a miss and re-derives (git re-probe), so the
+    // red never sticks to the transcript stamp on a decision channel.
+    const staleGitRed = options?.recheck === true && hit?.result.detail === DETAIL.noEndorsement
+    if (hit !== undefined && hit.mtimeMs === stamp.mtimeMs && hit.size === stamp.size && !staleGitRed) {
       sealMemoHits += 1
       // Refresh the LRU position; the id is re-stamped so one file can never
       // answer under another session's id.
@@ -410,8 +435,21 @@ function deriveSeal(
     // N_A never runs the recheck (zero-output exemption, scanner --recheck 同口径).
     // The recheck reads the message that carried the signal — under the
     // last-turn gate it may sit earlier in the turn than the final message.
-    if (direct.verdict === 'DONE' && !endorsementHolds(direct.message, text)) {
-      return { id, verdict: 'UNSEALED', detail: DETAIL.noEndorsement }
+    if (direct.verdict === 'DONE') {
+      let endorsement = checkEndorsement(direct.message, text)
+      // archive-seal-falsered-1116 段2b (当场重试一次再判红): a git probe that
+      // failed (timeout / spawn / non-zero exit, each logged by gitRun) is not
+      // an answer, so the whole recheck reruns once on the spot before the red
+      // is judged. Parse-level refusals (no `commits=`, a self-inconsistent
+      // declared list) ran no probe and keep their single fail-closed pass;
+      // the retry costs one extra probe round on the failure path only
+      // (板行四问①预批：仅失败路径多一轮 git 探针).
+      if (!endorsement.holds && endorsement.probeFailed) {
+        endorsement = checkEndorsement(direct.message, text)
+      }
+      if (!endorsement.holds) {
+        return { id, verdict: 'UNSEALED', detail: DETAIL.noEndorsement }
+      }
     }
     return { id, verdict: direct.verdict, detail: direct.detail }
   }
@@ -442,17 +480,64 @@ const HASH_RE = /`([0-9a-f]{7,40})`/g
 /** The DONE sentinel's own line: the script endorsement tail rides on it. */
 const DONE_TAIL_RE = /SAVE_STATUS=DONE([^\r\n]*)/g
 
-/** Git probe; any failure (missing repo, missing git, timeout) reads `undefined`. */
-function gitRun(repo: string, args: readonly string[]): string | undefined {
+/** One git probe's outcome; a failure carries a distinguishable cause (archive-seal-falsered-1116 段1). */
+export type GitRunResult =
+  | { readonly ok: true; readonly out: string }
+  | { readonly ok: false; readonly cause: GitRunCause; readonly detail: string }
+
+/** The causes the log distinguishes; `error` is the catch-all, never a bare swallow. */
+export type GitRunCause = 'timeout' | 'spawn' | 'exit' | 'error'
+
+/**
+ * Classify one `execFileSync` failure into a loggable cause, per the shapes
+ * this machine's node actually throws (2026-11-17 实测 via
+ * `.tmp/gitrun-error-shape.mjs`): a non-zero exit carries
+ * `status: <number>` plus stderr; a spawn failure carries a string `code`
+ * (ENOENT…) with `status: null` and no stderr; a timeout kills the child
+ * with SIGTERM under `code: 'ETIMEDOUT'` (also `status: null`). The stderr
+ * tail travels with every cause so a fake `no-endorsement` red and a real
+ * one are distinguishable from the log alone (archive-seal-falsered-1116 段1).
+ * @param error - the caught execFileSync error.
+ * @returns the cause plus a short detail carrying the stderr tail.
+ */
+export function classifyGitRunError(error: unknown): { cause: GitRunCause; detail: string } {
+  const err = error as { code?: unknown; status?: unknown; signal?: unknown; stderr?: unknown; message?: unknown }
+  const stderr = typeof err.stderr === 'string' ? err.stderr.trim() : ''
+  const lines = stderr === '' ? [] : stderr.split('\n').map((line) => line.trim()).filter((line) => line !== '')
+  const tail = lines.length > 0
+    ? lines.slice(-3).join(' | ')
+    : (typeof err.message === 'string' ? (err.message.split('\n')[0] ?? '') : String(error))
+  if (typeof err.status === 'number') return { cause: 'exit', detail: `exit ${String(err.status)} — ${tail}` }
+  if (err.code === 'ETIMEDOUT' || (err.code === undefined && err.signal === 'SIGTERM')) {
+    return { cause: 'timeout', detail: `killed by ${typeof err.signal === 'string' ? err.signal : 'SIGTERM'} — ${tail}` }
+  }
+  if (typeof err.code === 'string') return { cause: 'spawn', detail: `${err.code} — ${tail}` }
+  return { cause: 'error', detail: tail }
+}
+
+/**
+ * Git probe with a logged, classified failure (archive-seal-falsered-1116 段1):
+ * the old catch swallowed timeout / spawn failure / non-zero exit into a bare
+ * `undefined` with zero logging, so a fake red was indistinguishable from a
+ * real one. Every failure now warns once — `[seal-git]`, the cause, the exact
+ * command, the repo, and the stderr tail — and success still reads the plain
+ * output string (callers only ever needed "did it answer / what did it say").
+ */
+function gitRun(repo: string, args: readonly string[]): GitRunResult {
   try {
-    return execFileSync('git', ['-C', repo, ...args], {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 10_000,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    })
-  } catch {
-    return undefined
+    return {
+      ok: true,
+      out: execFileSync('git', ['-C', repo, ...args], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: 10_000,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }),
+    }
+  } catch (error) {
+    const { cause, detail } = classifyGitRunError(error)
+    console.warn(`[seal-git] ${cause}: git ${args.join(' ')} (repo=${repo}) — ${detail}`)
+    return { ok: false, cause, detail }
   }
 }
 
@@ -486,6 +571,17 @@ function repoCandidates(transcript: string): string[] {
 }
 
 /**
+ * One endorsement recheck's verdict (archive-seal-falsered-1116 段2b):
+ * `holds` is the fail-closed verdict; `probeFailed` records whether any git
+ * probe failed (timeout / spawn / non-zero exit) instead of answering — the
+ * caller reruns the whole check once on that signal before judging red.
+ */
+interface EndorsementCheck {
+  readonly holds: boolean
+  readonly probeFailed: boolean
+}
+
+/**
  * DONE endorsement recheck — the two existing pieces only (照抄 the m-note
  * scanner's `recheckDone` 口径; the six-dim fields belong to save-done5-1106):
  * 1. the sentinel's own line carries a script backing `commits=n/n`;
@@ -500,11 +596,18 @@ function repoCandidates(transcript: string): string[] {
  * message-wide scan, so pre-existing sessions behave exactly as before.
  * Fail-closed throughout: any missing piece reads false, so an unbacked
  * DONE never stays green.
+ *
+ * Probe accounting (段2b): a candidate repo that rejects `cat-file -e` and a
+ * `branch -r --contains` that errors both count as `probeFailed` — they are
+ * git refusing to answer, not a clean "nobody contains this hash" (an empty
+ * exit-0 `--contains` list is the clean negative and sets no flag). A red
+ * whose probes all failed is retried once by {@link deriveSeal} before the
+ * `no-endorsement` verdict is judged.
  */
-function endorsementHolds(message: string, transcript: string): boolean {
+function checkEndorsement(message: string, transcript: string): EndorsementCheck {
   const tails = [...message.matchAll(DONE_TAIL_RE)].map((match) => match[1])
   const tail = tails[tails.length - 1] ?? ''
-  if (!/commits=\d+\/\d+/.test(tail)) return false
+  if (!/commits=\d+\/\d+/.test(tail)) return { holds: false, probeFailed: false }
   let hashes: string[]
   if (/\bhashes=/.test(tail)) {
     // Declared mode: verify the declared lists only; each list must match its
@@ -524,27 +627,40 @@ function endorsementHolds(message: string, transcript: string): boolean {
       // dropped). Prefix truncation ≠ loose hex-substring extraction — no
       // picking hex fragments out of arbitrary positions (防伪不降级).
       const list = hit[1].split(',').filter(Boolean).map((item) => (item.replace(/^[`\s]+/, '').match(/^[0-9a-f]*/) ?? [''])[0])
-      if (list.some((item) => !/^[0-9a-f]{7,40}$/.test(item))) return false
+      if (list.some((item) => !/^[0-9a-f]{7,40}$/.test(item))) return { holds: false, probeFailed: false }
       const commits = /\bcommits=(\d+)\/(\d+)/.exec(candidate)
-      if (commits === null || commits[1] !== commits[2] || Number(commits[2]) !== list.length) return false
+      if (commits === null || commits[1] !== commits[2] || Number(commits[2]) !== list.length) return { holds: false, probeFailed: false }
       declared.push(...list)
     }
     hashes = [...new Set(declared)]
-    if (hashes.length === 0) return false
+    if (hashes.length === 0) return { holds: false, probeFailed: false }
   } else {
     // Legacy tail (no hashes=): full message scan, unchanged from before.
     hashes = [...new Set([...message.matchAll(HASH_RE)].map((match) => match[1]))]
-    if (hashes.length === 0) return false
+    if (hashes.length === 0) return { holds: false, probeFailed: false }
   }
   const repos = repoCandidates(transcript)
+  let probeFailed = false
   for (const hash of hashes) {
-    const home = repos.find((repo) => gitRun(repo, ['cat-file', '-e', `${hash}^{commit}`]) !== undefined)
-    if (home === undefined) return false
-    const refs = (gitRun(home, ['branch', '-r', '--contains', hash]) ?? '')
+    let home: string | undefined
+    for (const repo of repos) {
+      const probe = gitRun(repo, ['cat-file', '-e', `${hash}^{commit}`])
+      if (probe.ok) {
+        home = repo
+        break
+      }
+      probeFailed = true
+    }
+    if (home === undefined) return { holds: false, probeFailed }
+    const refsProbe = gitRun(home, ['branch', '-r', '--contains', hash])
+    if (!refsProbe.ok) return { holds: false, probeFailed: true }
+    const refs = refsProbe.out
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line !== '' && !line.includes('->'))
-    if (refs.length === 0) return false
+    // Clean negative: the probe answered (exit 0) and no remote ref carries
+    // the hash — deterministic, nothing to retry.
+    if (refs.length === 0) return { holds: false, probeFailed }
   }
-  return true
+  return { holds: true, probeFailed }
 }
