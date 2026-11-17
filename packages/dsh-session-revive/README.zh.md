@@ -53,6 +53,34 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
 - 提供 `GET /api/session-revive/status`（仅回环）：方式、计数、挂起/停用/
   断路状态、分罐额度与生效条件清单，用于重启后验证与留证复核。
 
+## 复活 v2 门（2026-11-16 设计）
+
+自 2026-11-16 设计（`session-revival-v2-alert-inbox-1116`）起，每条复活判定——
+live 与 shadow 一律——都必须先过 v2 门才可能发出 nudge。上面那条裁定账照旧
+裁额度、断路器、波与水位；v2 门只负责扣发：
+
+- **fail-closed 首核**：激活时先证明某个已归档会话的转录仍能解码（多帧 zstd
+  逐帧走、坏帧为零、事件至少一条）。证明不通期间一切复活停在 `v2-halt` 日志
+  行上——接力 save 全靠那份转录，不许凭感觉放行。
+- **L2 探针门**：开试之前用全局 fetch 槽（真实请求同一条出口）探测当前路由的
+  provider baseURL，只在有会话被 park 时事件驱动、60–120 秒随机节奏。任何
+  HTTP 响应（4xx/5xx 也算）即路径存活；只有连接层失败才 park，并由 L1 TCP
+  检查归因 `local-egress-down` 对 `provider-path-down`——只归因、L1 永不放行，
+  也不做 L3 花钱试探。红超 §八 阈值 N（建议 2h，待拍板）在状态导出里置
+  `probeRedAlarmed`。
+- **三分诊状态机**：每次失败按实际形态分诊（花费 × 进展，两级布尔）：0-token
+  → 冷却 10 分钟 + strike，3 次停在 `zero-cost-3strike`（探针假绿/分类异常）；
+  花钱零进展 → 结构化原因归档 → 接力 depth=1 → 代劳 save（再犯保留现场
+  `relay-recidive`）；花钱有进展 → 冷却 10 分钟 + 恰好一次补试（再失败
+  `progress-retry-failed`）；任何完成轮清零全部计数。获批补试若死于 0-token
+  回到零成本通道——形态说了算，不看第几次。
+- **归档-接力-代劳 save 链**：转录核验 → 落点解析 → 结构化原因归档 → 接力
+  派发（种子带 `relayDepth=1` 与代劳 save 第一步）→ 台账原因回写；预检不通
+  在归档之前就停链。
+- **状态导出**：`<dsh-home>/session-revive-v2-state.json`，change-only 写入，
+  携带双边 §七 字段集（`probe`、`zeroCostStrikes`、`relayDepth`、`stopped`
+  等），供告警信箱单读者消费。
+
 ## 安装
 
 本地链装（本包不发布到 npm）：

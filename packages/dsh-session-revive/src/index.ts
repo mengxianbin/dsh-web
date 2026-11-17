@@ -39,6 +39,11 @@ import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
 import { makeStatusRoute } from './host/routes.ts'
+import { attributeProbeFailure, probeRoute, PROBE_MAX_INTERVAL_MS, PROBE_MIN_INTERVAL_MS, type ProbeResult } from './v2-probe.ts'
+import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
+import { ReviveV2StateWriter } from './v2-state.ts'
+import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
+import { runTranscriptFirstGate } from './v2-transcript.ts'
 
 export const name = 'dsh-session-revive'
 export const inject = ['webServer', 'sessionController']
@@ -82,6 +87,101 @@ interface SweepPersistence {
   }>
 }
 
+// ── Revival v2: settings-derived route resolution and refusal detection ───
+
+/** Best-effort settings service read: a hiccup resolves undefined, never throws. */
+function readSettingsNamespace(
+  ctx: Context,
+  ns: 'llm-pi-ai' | 'llm-deepseek',
+): Record<string, unknown> | undefined {
+  try {
+    const settings = ctx.get('settings') as
+      | {
+          get?(name: unknown): unknown
+          describe?(options?: unknown): Array<{ ns: string; value: unknown }> | undefined
+        }
+      | undefined
+    if (settings === undefined) return undefined
+    if (typeof settings.get === 'function') {
+      const value = settings.get(ns)
+      if (typeof value === 'object' && value !== null) return value as Record<string, unknown>
+    }
+    if (typeof settings.describe === 'function') {
+      const descriptors = settings.describe({ redactSecrets: false })
+      if (Array.isArray(descriptors)) {
+        const match = descriptors.find(
+          (d) =>
+            d.ns === ns ||
+            (ns === 'llm-pi-ai' && d.ns === 'llm' && typeof (d.value as { providers?: unknown } | undefined)?.providers === 'object') ||
+            (ns === 'llm-deepseek' && (d.ns === 'llm-deepseek' || d.ns === 'llm-deepseek-api-key')),
+        )
+        if (match !== undefined && typeof match.value === 'object' && match.value !== null) {
+          return match.value as Record<string, unknown>
+        }
+      }
+    }
+  } catch {
+    // Never let a settings read throw into the probe loop or the gate.
+  }
+  return undefined
+}
+
+/** The official adapter's fallback endpoint when no baseURL is configured. */
+const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com'
+
+/** DeepSeek-family provider ids (local predicate; no cross-package import). */
+function isDeepSeekProvider(provider: string): boolean {
+  return provider === 'deepseek' || provider.startsWith('deepseek-')
+}
+
+/**
+ * Resolve a route's provider baseURL from the llm settings namespaces,
+ * mirroring dsh-usage's `routeBaseUrl` (wall follows route, design section
+ * five). Undefined means fail closed: the probe cannot run, so the session
+ * parks until the settings name a path.
+ */
+function makeResolveBaseURL(
+  ctx: Context,
+): (route: { provider: string; model?: string }) => string | undefined {
+  return (route) => {
+    const pi = readSettingsNamespace(ctx, 'llm-pi-ai')
+    const providers = pi?.providers
+    if (typeof providers === 'object' && providers !== null) {
+      const entry = (providers as Record<string, unknown>)[route.provider]
+      const baseURL = typeof entry === 'object' && entry !== null ? (entry as { baseURL?: unknown }).baseURL : undefined
+      if (typeof baseURL === 'string' && baseURL.trim() !== '') return baseURL.trim()
+    }
+    if (isDeepSeekProvider(route.provider)) {
+      const ds = readSettingsNamespace(ctx, 'llm-deepseek')?.baseURL
+      if (typeof ds === 'string' && ds.trim() !== '') return ds.trim()
+      return DEEPSEEK_DEFAULT_BASE_URL
+    }
+    return undefined
+  }
+}
+
+/**
+ * Structural refusal probe for one assistant message (design section three,
+ * L2 half): the current dsh-llm surface carries no `finishReason`/`refusal`
+ * field, so this reads the shapes that COULD carry one and returns false when
+ * none is present - never firing on today's messages, never widening the
+ * progress boolean on a guess.
+ */
+function structuralRefusal(message: unknown): boolean {
+  if (typeof message !== 'object' || message === null) return false
+  const candidate = message as {
+    content?: unknown
+    source?: { finishReason?: { kind?: unknown }; refusal?: unknown }
+  }
+  if (candidate.source?.finishReason?.kind === 'refusal') return true
+  if (candidate.source?.refusal === true) return true
+  const content = candidate.content
+  if (Array.isArray(content)) {
+    return content.some((block) => typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'refusal')
+  }
+  return false
+}
+
 /**
  * Mount the plugin: subscribe to session events, run the policy, log every
  * decision, and serve the loopback status endpoint. Routes and listeners ride
@@ -116,8 +216,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     let wakeTimer: ReturnType<typeof setTimeout> | undefined
 
     // One structured JSON line per record, stamped with the active mode so a
-    // grep can split shadow evidence from live sends.
-    const log = (record: PolicyRecord): void => {
+    // grep can split shadow evidence from live sends. v2 machine records ride
+    // the same line shape (kind `v2-*`).
+    const log = (record: PolicyRecord | V2Record): void => {
       ctx.logger.info(`dsh-session-revive ${JSON.stringify({ mode: resolved.mode, ...record })}`)
     }
 
@@ -134,6 +235,136 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       },
       readHalted: readHostReviveHalted,
     })
+
+    // ── Revival v2 (design session-revival-v2-alert-inbox-1116) ─────────────
+    // 施工第一步, fail-closed 首核: an archived session's transcript must still
+    // decode before ANY revival attempt may exist. The verdict is evaluated
+    // once at mount; while it fails, every v2 entry point logs only a halt
+    // record and nothing can be sent.
+    const firstGate = runTranscriptFirstGate()
+    const machine = new ReviveV2Machine({
+      gate: firstGate,
+      resolveBaseURL: makeResolveBaseURL(ctx),
+    })
+    const v2Writer = new ReviveV2StateWriter()
+    const chainPorts = createLoopbackChainPorts({ apiBase: `http://127.0.0.1:${ctx.webServer.port}` })
+    ctx.logger[firstGate.ok ? 'info' : 'warn'](
+      `dsh-session-revive-v2 first gate ${firstGate.ok ? 'PASS' : 'FAIL'}: ${firstGate.detail}` +
+        (firstGate.ok ? '' : ' - revival attempts stay halted until this proves readable'),
+    )
+
+    let v2WakeTimer: ReturnType<typeof setTimeout> | undefined
+    let probeTimer: ReturnType<typeof setTimeout> | undefined
+    let probeRoundInFlight = false
+
+    // The machine's deferred deadlines (cooldown, stagger plan) drive one
+    // timer; every state change re-arms it.
+    const armV2Wake = (): void => {
+      if (v2WakeTimer !== undefined) {
+        clearTimeout(v2WakeTimer)
+        v2WakeTimer = undefined
+      }
+      const deadline = machine.nextWakeAt()
+      if (deadline === null) return
+      v2WakeTimer = setTimeout(
+        () => {
+          v2WakeTimer = undefined
+          applyV2(machine.releaseDue(Date.now()))
+        },
+        Math.max(0, deadline - Date.now()),
+      )
+    }
+
+    // Event-driven probe scheduling (design section five): probes run only
+    // while a session is parked, immediately when a route has no cached
+    // result, otherwise on the randomised 60-120s cadence. Zero parked
+    // sessions means zero timers - the loop goes silent by construction.
+    const armProbeLoop = (): void => {
+      if (probeTimer !== undefined) {
+        clearTimeout(probeTimer)
+        probeTimer = undefined
+      }
+      const targets = machine.routesNeedingProbe(Date.now())
+      if (targets.length === 0) return
+      const delay = targets.some((target) => target.immediate)
+        ? 0
+        : PROBE_MIN_INTERVAL_MS + Math.floor(Math.random() * (PROBE_MAX_INTERVAL_MS - PROBE_MIN_INTERVAL_MS + 1))
+      probeTimer = setTimeout(
+        () => {
+          probeTimer = undefined
+          void runProbeRound()
+        },
+        delay,
+      )
+    }
+
+    // One probe round over every route with a parked session, through the
+    // GLOBAL fetch slot (same egress as real requests). A connection-layer
+    // failure is attributed through L1 - attribution only, never permission.
+    const runProbeRound = async (): Promise<void> => {
+      if (probeRoundInFlight) return
+      probeRoundInFlight = true
+      try {
+        for (const target of machine.routesNeedingProbe(Date.now())) {
+          let result: ProbeResult
+          if (target.baseURL === undefined) {
+            result = { ok: false, error: 'route base URL unresolved', attribution: 'route-unresolved' }
+          } else {
+            result = await probeRoute(target.baseURL)
+            if (!result.ok && result.attribution === undefined) {
+              result = { ...result, attribution: await attributeProbeFailure() }
+            }
+          }
+          applyV2(machine.onProbeResult(target.provider, result))
+        }
+      } finally {
+        probeRoundInFlight = false
+        armProbeLoop()
+      }
+    }
+
+    // The archive-relay chain (design section four, order never reversed):
+    // verify transcript -> resolve spawn target -> archive -> spawn relay ->
+    // rewrite the ledger reason. Only live mode runs it; shadow feeds back a
+    // withheld result so the evidence line still closes the loop.
+    const runChain = (sessionId: string, reason: V2ArchiveReason): void => {
+      if (resolved.mode !== 'live') {
+        applyV2(machine.onChainResult({ sessionId, ok: false, detail: 'shadow-withheld' }))
+        return
+      }
+      void runArchiveRelayChain({ sessionId, reason, ports: chainPorts })
+        .then((outcome) => {
+          applyV2(
+            machine.onChainResult({
+              sessionId,
+              ok: outcome.ok,
+              ...(outcome.relaySessionId === undefined ? {} : { relaySessionId: outcome.relaySessionId }),
+              detail: outcome.detail,
+            }),
+          )
+        })
+        .catch((error: unknown) => {
+          applyV2(machine.onChainResult({ sessionId, ok: false, detail: String(error).slice(0, 200) }))
+        })
+    }
+
+    // One pass over a batch of machine records: log every record, execute the
+    // two side effects (send, chain) only in live mode, then persist the
+    // section-seven export change-only and re-arm the machine's timers.
+    const applyV2 = (records: V2Record[]): void => {
+      for (const record of records) {
+        log(record)
+        if (record.kind === 'v2-attempt') {
+          if (resolved.mode === 'live') sendNudge(record.sessionId, record.fireAt, record.code)
+          else machine.onAttemptWithheld(record.sessionId)
+        } else if (record.kind === 'v2-archive-relay') {
+          runChain(record.sessionId, record.reason)
+        }
+      }
+      v2Writer.sync(machine.stateSnapshot())
+      armV2Wake()
+      armProbeLoop()
+    }
 
     const sendNudge = (sessionId: string, plannedAt: number, code?: string): void => {
       const delay = Math.max(0, plannedAt - Date.now())
@@ -154,6 +385,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
             log({ kind: 'log', at: Date.now(), event: 'nudge-sent', sessionId, ...(code === undefined ? {} : { detail: { cause: code } }) })
           })
           .catch((error: unknown) => {
+            // The send never ran: clear the machine's in-flight marker so the
+            // next decision can re-gate (a stuck marker would deny forever).
+            machine.onAttemptWithheld(sessionId)
             log({
               kind: 'log',
               at: Date.now(),
@@ -175,11 +409,20 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         if (record.kind === 'breaker' && record.event === 'trip') health.noteTrip()
       }
       health.sync()
-      // Shadow gate: the account above is complete; only the send is withheld.
-      if (resolved.mode !== 'live') return
+      // v2 探针门 (design section two): EVERY revive decision - live and
+      // shadow alike - must clear the three-triage machine first; only a
+      // granted attempt is ever sent, and only in live mode. The ruled
+      // account above stays the quota source; this gate only withholds.
       for (const record of records) {
         if (record.kind === 'decision' && record.action === 'revive') {
-          sendNudge(record.sessionId, record.plannedAt ?? Date.now(), record.code)
+          applyV2(
+            machine.onReviveDecision({
+              sessionId: record.sessionId,
+              at: Date.now(),
+              plannedAt: record.plannedAt ?? Date.now(),
+              ...(record.code === undefined ? {} : { code: record.code }),
+            }),
+          )
         }
       }
     }
@@ -220,6 +463,18 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           // 拍板⑩: the folded request header is the route the failing request
           // used — the wall route a later `model/selection` is compared against.
           const header = session.requestHeader()
+          // v2: the death first triages any in-flight attempt by its ACTUAL
+          // form (section three); the revive decision below is then re-gated
+          // by the machine in applyRecords.
+          applyV2(
+            machine.onDeath({
+              sessionId,
+              at,
+              ...(header === undefined
+                ? {}
+                : { route: { provider: header.config.provider, model: header.config.model } }),
+            }),
+          )
           applyRecords(
             policy.onError({
               sessionId,
@@ -245,6 +500,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           // the output ceiling — so a stale wall loses its subject first; the
           // truncation then enters the same revival account as a death.
           for (const record of policy.onSuccess(sessionId, at)) log(record)
+          // v2: the provider answered, so the in-flight attempt (if any)
+          // triages by its observed form; with no attempt this only supersedes
+          // any deferred decision the new revive decision will re-gate.
+          applyV2(machine.onDeath({ sessionId, at }))
           const origin = session.header.origin
           applyRecords(
             policy.onError({
@@ -258,17 +517,24 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           return
         }
         // Excluded stop causes (design §7.1): evidence line, never continued.
+        // v2: an externally cut turn has no attempt outcome to triage - clear
+        // the in-flight marker (state only) so the next decision can re-gate;
+        // the counters stay untouched (an abort is neither success nor failure).
         if (reason.kind === 'aborted') {
           park(at, sessionId, 'human-abort', { cancel: reason.reason.kind })
+          machine.onAttemptWithheld(sessionId)
           for (const record of policy.onSuccess(sessionId, at)) log(record)
           return
         }
         if (PARKED_TURN_END_REASONS.has(reason.kind)) {
           park(at, sessionId, reason.kind)
+          machine.onAttemptWithheld(sessionId)
           for (const record of policy.onSuccess(sessionId, at)) log(record)
           return
         }
         for (const record of policy.onSuccess(sessionId, at)) log(record)
+        // v2 section three, last row: a completed turn clears every counter.
+        applyV2(machine.onSuccessTurn(sessionId, at))
         // 拍板⑮: a completed turn clears the breaker-streak fact.
         health.noteCompleted()
         health.sync()
@@ -279,6 +545,30 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         if (usage !== undefined) {
           policy.recordUsage(sessionId, usage.inputTokens + (usage.cacheReadTokens ?? 0))
         }
+        // v2: fold spend into the in-flight attempt and the episode, and
+        // record the output half of the progress boolean (state only - a
+        // session outside revival has no entry and stays without one).
+        machine.onAssistant(
+          sessionId,
+          usage === undefined
+            ? { refusal: structuralRefusal(event.data.message) }
+            : {
+                inputTokens: usage.inputTokens,
+                outputTokens: usage.outputTokens,
+                cacheReadTokens: usage.cacheReadTokens ?? 0,
+                refusal: structuralRefusal(event.data.message),
+              },
+        )
+        return
+      }
+      // v2 progress boolean: a model-requested tool is the L1 half, a tool
+      // result that landed WITHOUT an internal error is the L2 half.
+      if (event.type === 'tool/call') {
+        machine.onActivity(sessionId, 'tool-call')
+        return
+      }
+      if (event.type === 'tool/result') {
+        if (event.data.error === undefined) machine.onActivity(sessionId, 'tool-ok')
         return
       }
       // 拍板⑩ 墙随路由走: a durable route switch releases a wall suspension
@@ -288,6 +578,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       if (event.type === 'model/selection') {
         const at = typeof event.time === 'number' ? event.time : Date.now()
         const { provider, model } = event.data
+        // v2: the durable route names the fallback the probe loop targets.
+        machine.setRoute({ provider, model })
         applyRecords(policy.onModelSelection({ sessionId, provider, model, at }))
         armWake()
         return
@@ -308,16 +600,23 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
             code: change.goal?.blockedReason?.code,
             message: change.goal?.blockedReason?.message,
           })
+          // v2: a goal stop is excluded from the account - clear any in-flight
+          // attempt marker so a later decision can re-gate.
+          machine.onAttemptWithheld(sessionId)
           return
         }
         if (change.operation === 'complete') {
           park(at, sessionId, 'goal-complete')
+          machine.onAttemptWithheld(sessionId)
           return
         }
       }
     })
     const offDisposed = ctx.on('session/disposed', (session: Session) => {
       policy.forget(String(session.id))
+      // v2: the session is gone - drop its in-flight attempt and deferred
+      // decision; the account (counters, export row) survives disposal.
+      machine.onDisposed(String(session.id))
     })
     /**
      * Durability stop-cause tap (design §7.1): when goal-round-driver's
@@ -415,6 +714,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         // Exporter already gone during shutdown.
       }
       if (wakeTimer !== undefined) clearTimeout(wakeTimer)
+      if (v2WakeTimer !== undefined) clearTimeout(v2WakeTimer)
+      if (probeTimer !== undefined) clearTimeout(probeTimer)
       for (const timer of sendTimers) clearTimeout(timer)
       sendTimers.clear()
       abort.abort()

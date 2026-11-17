@@ -75,6 +75,46 @@ Host-only — the package declares no `dsh.client` face.
   effective condition lists for post-restart verification and evidence
   review.
 
+## Revival v2 gate (2026-11-16 design)
+
+Since the 2026-11-16 design (`session-revival-v2-alert-inbox-1116`), every
+revive decision — live and shadow alike — must clear the v2 gate before a
+nudge may run. The ruled account above still decides quota, breaker, waves
+and the watermark exactly as before; the v2 gate only withholds sends:
+
+- **Fail-closed first gate**: at activation the plugin proves an archived
+  session's transcript still decodes (multi-frame zstd walk, zero bad
+  frames, at least one event). While that proof fails, every revival stays
+  halted with a `v2-halt` log line — the relay save depends on that
+  transcript, so nothing runs on a hunch.
+- **L2 probe gate**: before an attempt opens, the current route's provider
+  baseURL is probed through the global fetch slot (the same egress real
+  requests use), event-driven only while a session is parked, on a
+  randomised 60–120s cadence. ANY HTTP response (4xx/5xx included) proves
+  the path alive; only a connection-layer failure parks, and an L1 TCP
+  check attributes it to `local-egress-down` vs `provider-path-down` —
+  attribution only, L1 never grants permission, and no L3 token spend
+  exists. A red run beyond the section-eight threshold N (suggested 2h,
+  pending ruling) raises `probeRedAlarmed` in the state export.
+- **Three-triage state machine**: each failure is triaged by its ACTUAL
+  form (spend × progress, two-level boolean): 0-token → 10-minute cooldown
+  plus a strike, three strikes stop as `zero-cost-3strike` (probe
+  false-green / classification anomaly); spend without progress →
+  structured-reason archive → relay depth 1 → 代劳 save (a recidive keeps
+  the scene as `relay-recidive`); spend with progress → 10-minute cooldown
+  plus exactly one progress retry (`progress-retry-failed` on
+  re-failure); any completed turn clears every counter. A granted retry
+  that dies 0-token re-joins the zero-cost channel — the form decides,
+  never the attempt count.
+- **Archive-relay-save chain**: transcript verify → spawn-target resolve →
+  archive with the structured reason → relay spawn (the seed carries
+  `relayDepth=1` and the 代劳 save first step) → ledger reason rewrite; a
+  pre-flight refusal stops the chain before anything is archived.
+- **State export**: `<dsh-home>/session-revive-v2-state.json`, written
+  change-only, carries the bilateral §七 field set (`probe`,
+  `zeroCostStrikes`, `relayDepth`, `stopped`, …) for the alert-inbox
+  reader.
+
 ## Install
 
 Local link install (this package is not published to npm):
