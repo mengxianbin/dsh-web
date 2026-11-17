@@ -540,12 +540,47 @@ export class ShellRegistry {
     await terminate(shell, reason)
   }
 
+  /**
+   * Stop the shells of every owner whose session matches, and forget them.
+   *
+   * This is the archive-time reclamation leg: archiving does NOT dispose the
+   * agent (the row and its resident agent outlive the archive), so waiting on
+   * `agent/disposed` alone leaves a closed-over session's bash resident until
+   * the plugin unloads. The id arrives from the Workspace registry's stop
+   * seam, whose spelling may lack the `session-` prefix the agent's own
+   * session id carries, so both sides are compared in canonical form.
+   * @param sessionId - the session being archived.
+   * @param reason - recorded by the provider for diagnostics.
+   * @returns how many shells this call reclaimed (0 when none matched).
+   */
+  async disposeSession(sessionId: string, reason: string): Promise<number> {
+    const wanted = canonicalSessionKey(sessionId)
+    const doomed: object[] = []
+    for (const owner of this.shells.keys()) {
+      const id = (owner as { session?: { id?: unknown } }).session?.id
+      if (typeof id === 'string' && canonicalSessionKey(id) === wanted) doomed.push(owner)
+    }
+    await Promise.allSettled(doomed.map(owner => this.dispose(owner, reason)))
+    return doomed.length
+  }
+
   /** Stop every shell this registry owns; used on plugin unload. */
   async disposeAll(reason: string): Promise<void> {
     const shells = [...this.shells.values()]
     this.shells.clear()
     await Promise.allSettled(shells.map(shell => terminate(shell, reason)))
   }
+}
+
+/**
+ * One spelling of a session id for matching: `session-<uuid>` and `<uuid>`
+ * name the same session (the archive set stores both), so a stop request must
+ * match an owner either way.
+ * @param id - a session id in either spelling.
+ * @returns the canonical spelling used for comparison.
+ */
+function canonicalSessionKey(id: string): string {
+  return id.startsWith('session-') ? id : `session-${id}`
 }
 
 /** One frame read attempt: the parsed outcome and the raw stdout it came from. */

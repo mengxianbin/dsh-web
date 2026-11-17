@@ -252,6 +252,50 @@ describe.skipIf(!RUNNABLE)('the persistent shell over the real payload', () => {
     expect(shells.has(owner)).toBe(false)
   })
 
+  it('operator archiving a session reclaims only that session\'s shells', async () => {
+    // Given two sessions that each hold a live shell,
+    const shells = new ShellRegistry(provider())
+    const archived = { session: { id: 'session-archived' } }
+    const kept = { session: { id: 'session-still-open' } }
+    await shells.run(archived, { bash: bashPath(), bin: binDir() }, process.cwd(), 'echo one', BUDGET)
+    await shells.run(kept, { bash: bashPath(), bin: binDir() }, process.cwd(), 'echo two', BUDGET)
+    expect(shells.size).toBe(2)
+    // When the archive stop seam names one of them,
+    const reclaimed = await shells.disposeSession('session-archived', 'the owning session was archived')
+    // Then exactly that shell is gone and the other session keeps its own.
+    expect(reclaimed).toBe(1)
+    expect(shells.size).toBe(1)
+    expect(shells.has(archived)).toBe(false)
+    expect(shells.has(kept)).toBe(true)
+    await shells.disposeAll('test teardown')
+  })
+
+  it('operator archiving an id without the session- prefix still matches its owner', async () => {
+    // Given a session whose agent id carries the `session-` prefix,
+    const shells = new ShellRegistry(provider())
+    const owner = { session: { id: 'session-prefixed' } }
+    await shells.run(owner, { bash: bashPath(), bin: binDir() }, process.cwd(), 'echo hi', BUDGET)
+    // When the archive set names it without that prefix,
+    const reclaimed = await shells.disposeSession('prefixed', 'the owning session was archived')
+    // Then the spellings still match and the shell is reclaimed.
+    expect(reclaimed).toBe(1)
+    expect(shells.size).toBe(0)
+  })
+
+  it('operator archiving a session that holds no shell reclaims nothing', async () => {
+    // Given one session with a live shell and an archive naming another,
+    const shells = new ShellRegistry(provider())
+    const owner = { session: { id: 'session-other' } }
+    await shells.run(owner, { bash: bashPath(), bin: binDir() }, process.cwd(), 'echo hi', BUDGET)
+    // When the stop seam names a session this registry never served,
+    const reclaimed = await shells.disposeSession('session-nobody', 'the owning session was archived')
+    // Then nothing is touched: no false match, no dropped shell.
+    expect(reclaimed).toBe(0)
+    expect(shells.size).toBe(1)
+    expect(shells.has(owner)).toBe(true)
+    await shells.disposeAll('test teardown')
+  })
+
   it('user running a command in a per-call workdir gets it resolved before the command', async () => {
     // Given a workdir argument pointing at the payload's own etc directory,
     const shells = new ShellRegistry(provider())

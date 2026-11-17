@@ -171,10 +171,27 @@ export function registerWinBash(ctx: Context, config: WinBashConfig, runtime: Ru
   }, 'dsh-win-bash: win_bash tool and its persistent shells')
 
   // One session's shell dies with that session. The agent object is the key,
-  // so a session that ends for any reason (close, archive, reload) releases
-  // its process instead of leaving it to the plugin's own disposal.
+  // so a session whose agent is torn down (row removal, reload) releases its
+  // process instead of leaving it to the plugin's own disposal.
+  // Archiving does NOT dispose the agent — the row and its resident agent
+  // outlive the archive — so that path arrives through the Workspace
+  // registry's stop seam below; without it a closed-over session's bash would
+  // stay resident until the plugin unloads.
   ctx.on('agent/disposed', ({ agent }) => {
     void shells.dispose(agent, 'the owning agent was disposed')
+  })
+
+  // `workspace/session-stop` is declared by dsh-workspace's archive-admission
+  // seam; this package does not depend on that face, so the subscription is
+  // typed structurally (dsh-session-archive casts its registry face the same
+  // way). It is the archive-time leg: reclaim the persistent shell the moment
+  // the archive is durable, exactly as the registry's other providers stop
+  // what the session still runs.
+  const archiveStop = ctx as unknown as {
+    on(name: 'workspace/session-stop', listener: (request: { readonly sessionId: string }) => void): unknown
+  }
+  archiveStop.on('workspace/session-stop', ({ sessionId }) => {
+    void shells.disposeSession(String(sessionId), 'the owning session was archived')
   })
 
   if (config.replacePwsh) installPwshReplacement(ctx)

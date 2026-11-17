@@ -14,7 +14,9 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-// Type-only: pulls the workspaceRegistry Context merge (dsh-workspace face).
+import type { SessionId } from '@deepseek-ai/dsh-session'
+// Type-only: pulls the workspaceRegistry Context merge (dsh-workspace face)
+// and the `workspace/session-stop` archive-admission event declaration.
 import type {} from '@deepseek-ai/dsh-workspace'
 import { canonicalSessionId } from './session-files.ts'
 
@@ -75,6 +77,22 @@ export async function archiveSession(ctx: Context, id: string): Promise<void> {
     throw new Error('workspace registry does not expose archiveSession')
   }
   await registry.archiveSession(id)
+  // The registry dispatches `workspace/session-stop` only for archives ordered
+  // with `stopActivity`; this wrapper archives without it — the activity check
+  // already refused a session with running work, so on this path the seam
+  // would otherwise never reach its providers. Dispatch it here, after the
+  // durable write and with the same payload the registry uses, so archive-time
+  // reclamation (win_bash's persistent shell) covers manual, override and
+  // janitor archives alike; an already-archived id is a registry no-op and
+  // stopping its residual work is the same outcome the stopActivity path
+  // produces. A rejecting provider — or a host that cannot dispatch at all —
+  // must not undo the archive: the registry logs provider failures and keeps
+  // the write, and this dispatch follows that rule.
+  try {
+    await ctx.parallel('workspace/session-stop', { sessionId: id as SessionId })
+  } catch (error: unknown) {
+    ctx.logger?.warn?.(`workspace: archive stop dispatch for '${id}' failed: ${String(error)}`)
+  }
 }
 
 /**
