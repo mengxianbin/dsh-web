@@ -235,3 +235,89 @@ describe('inventory exposure (contract C3)', () => {
     expect(row.archivedAt).toBeGreaterThan(0)
   })
 })
+
+describe('targeted read behind the write-back (archive-override-noscan-1117)', () => {
+  // The native dialog always posts the seal it just judged, so the write-back
+  // must not re-walk the sessions root: that full index scan (warm ~1.3 s,
+  // cold ~14.5 s on a 2127-session root) was the whole cost behind the 5 s
+  // client abort on POST /archive-override.
+
+  it('force with a caller-provided seal never touches the full directory index', async () => {
+    // Given a fresh service over the fixture home
+    const host = overrideHost()
+    const service = await settledService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
+
+    // When the native channel writes back force + seal (its real shape)
+    const response = await post(url, '/api/dsh-session-archive/archive-override', {
+      ids: ['session-red'],
+      mode: 'force',
+      reason: '真红弹窗确认：板行[x] 收口证据',
+      seal: 'UNSEALED:sentinel-pending',
+    })
+
+    // Then the entry lands with that exact seal, and no full scan was paid
+    expect(response.status).toBe(200)
+    expect(response.body.results[0].seal).toBe('UNSEALED:sentinel-pending')
+    expect(dirIndex.scans).toBe(0)
+  })
+
+  it('force without a seal still judges by targeted probe — equally scan-free', async () => {
+    // Given the seal-less force fixture (its verdicts are computed, not passed)
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-s', updatedAt: 1 }, { sessionId: 'session-red', updatedAt: 1 }],
+      persistedIds: ['session-s', 'session-red'],
+    })
+    writeTranscript(host, 'session-s', [assistantMsg(SAVE_DONE), userMsg('续聊'), assistantMsg('继续')])
+    writeTranscript(host, 'session-red', [userMsg('保存'), assistantMsg(SAVE_TAIL)])
+    const service = await settledService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
+
+    // When the judgement must be derived on the spot
+    await post(url, '/api/dsh-session-archive/archive-override', { ids: ['session-s', 'session-red'], mode: 'force', reason: '真实理由' })
+
+    // Then the same verdicts the full index produced, via the named-id probe only
+    expect(service.ledgerSnapshot().entries['session-s']?.seal).toBe('stale')
+    expect(service.ledgerSnapshot().entries['session-red']?.seal).toBe('UNSEALED:save-tail-no-sentinel')
+    expect(dirIndex.scans).toBe(0)
+  })
+
+  it('note mode (no judgement at all) stays scan-free too', async () => {
+    // Given a fresh service
+    const host = overrideHost()
+    const service = await settledService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
+
+    // When the stale pass-through writes back
+    await post(url, '/api/dsh-session-archive/archive-override', { ids: ['session-native'], mode: 'note' })
+
+    // Then the stale marker lands and the index was never walked
+    expect(service.ledgerSnapshot().entries['session-native']?.seal).toBe('stale')
+    expect(dirIndex.scans).toBe(0)
+  })
+
+  it('the counter stays live: a real inventory consumer still scans exactly once', async () => {
+    // Given a service that has answered write-backs without ever scanning
+    const host = overrideHost()
+    const service = await settledService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    await post(url, '/api/dsh-session-archive/archive-override', {
+      ids: ['session-red'], mode: 'force', reason: '真实理由', seal: 'UNSEALED:sentinel-pending',
+    })
+    const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
+    expect(dirIndex.scans).toBe(0)
+
+    // When the full-inventory path runs (the one consumer that needs the walk)
+    await service.inventory()
+
+    // Then it paid its one scan — zero above meant "skipped", not "broken"
+    expect(dirIndex.scans).toBe(1)
+  })
+})

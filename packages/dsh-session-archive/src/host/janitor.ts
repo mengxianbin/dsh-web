@@ -890,6 +890,15 @@ export class ArchiveService {
    *
    * Deliberately lock-free: one ledger document, atomic whole-file writes,
    * single-process read-modify-write.
+   *
+   * Targeted read (方向①, archive-override-noscan-1117): the native channel
+   * always travels with its own seal and `note` never judges one, so the full
+   * sessions-root index is only needed to *compute* a seal when a force
+   * write-back carries none — that case probes just the named ids (the lookup
+   * `sealCheck` already uses, equal to the full index restricted to them),
+   * instead of re-walking the whole tree on every write-back (warm walk ran
+   * ~1.3 s, cold ~14.5 s on a 2127-session root — the cost the native UI's
+   * 5 s abort used to trip over).
    */
   async archiveOverride(
     ids: readonly string[],
@@ -897,19 +906,23 @@ export class ArchiveService {
     options: { reason?: string; seal?: string } = {},
   ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
     const now = Date.now()
-    const index = await this.dirIndex.get()
+    const providedSeal = typeof options.seal === 'string' && options.seal.trim() !== '' ? options.seal.trim() : undefined
+    // Only a seal-less force needs transcript dirs at all; nothing else in
+    // this method reads the sessions tree.
+    const dirs = mode === 'force' && providedSeal === undefined
+      ? resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
+      : undefined
     const results: ArchiveOverrideRow[] = []
     let changed = false
     for (const id of ids) {
       const existing = this.ledger.entries[id]
       let next: LedgerEntry
       if (mode === 'force') {
-        const providedSeal = typeof options.seal === 'string' && options.seal.trim() !== '' ? options.seal.trim() : undefined
         next = {
           archivedAt: existing?.archivedAt ?? now,
           source: 'override',
           reason: normalizeOverrideReason(options.reason),
-          seal: providedSeal ?? sealMarker(analyzeSeal(id, index.byId.get(id), { recheck: true })),
+          seal: providedSeal ?? sealMarker(analyzeSeal(id, dirs?.get(id), { recheck: true })),
         }
       } else {
         next = existing !== undefined
