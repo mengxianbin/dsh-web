@@ -119,6 +119,35 @@ describe('raw tail balance (scanOpenTurn)', () => {
     // A committed `interrupted` closer is still a `turn/end`: closed.
     expect(scanOpenTurn([ev('turn/start'), ev('turn/end', { reason: { kind: 'interrupted' } })])).toEqual({ open: false })
   })
+
+  it('folds the route the stored log proves, selection pending over request header', () => {
+    // A selection nobody used yet is what the next request would take.
+    expect(scanOpenTurn([ev('turn/start'), ev('model/selection', { provider: 'pi', model: 'm1' })]).route).toEqual({
+      provider: 'pi',
+      model: 'm1',
+    })
+    // The header alone still proves the route when no selection was ever logged.
+    expect(
+      scanOpenTurn([ev('request/header', { header: { config: { provider: 'ds', model: 'old' } } })]).route,
+    ).toEqual({ provider: 'ds', model: 'old' })
+    // A selection applies from the next request: it wins over an older header.
+    expect(
+      scanOpenTurn([
+        ev('request/header', { header: { config: { provider: 'ds', model: 'old' } } }),
+        ev('model/selection', { provider: 'pi', model: 'new' }),
+      ]).route,
+    ).toEqual({ provider: 'pi', model: 'new' })
+    // A different header does not retire the pending selection (same fold as
+    // the harness's modelSelection projection).
+    expect(
+      scanOpenTurn([
+        ev('model/selection', { provider: 'pi', model: 'new' }),
+        ev('request/header', { header: { config: { provider: 'ds', model: 'old' } } }),
+      ]).route,
+    ).toEqual({ provider: 'pi', model: 'new' })
+    // No route evidence at all: no route key (the gate stays fail-closed).
+    expect(scanOpenTurn([ev('turn/start')]).route).toBeUndefined()
+  })
 })
 
 describe('boot sweep orchestration', () => {
@@ -151,6 +180,27 @@ describe('boot sweep orchestration', () => {
       confirmedClosed: 1,
       attached: 0,
     })
+    expect(failures(sinks)).toHaveLength(0)
+  })
+
+  it('seeds the machine route from the stored log before deciding the confirmed orphan', async () => {
+    const order: string[] = []
+    const { deps, sinks } = makeDeps(async () => [row('cand', { projections: TB_OPEN })], {
+      seedRoute: (sessionId, route) => order.push(`seed:${sessionId}:${route.provider}`),
+    })
+    const decide = deps.decide
+    deps.decide = (sessionId, at, contextTokens) => {
+      order.push(`decide:${sessionId}`)
+      return decide(sessionId, at, contextTokens)
+    }
+    deps.readEvents = async () => [
+      ev('turn/start'),
+      ev('request/header', { header: { config: { provider: 'pi', model: 'm1' } } }),
+    ]
+    await runBootSweep(deps)
+    // Route evidence lands before the decision, so the v2 gate never sees a
+    // boot decision without a route.
+    expect(order).toEqual(['seed:cand:pi', 'decide:cand'])
     expect(failures(sinks)).toHaveLength(0)
   })
 

@@ -349,6 +349,30 @@ describe('gate disciplines around attempts', () => {
     })
   })
 
+  it('clears a boot decision once the sweep seeds the stored route', () => {
+    const { m } = machine()
+    m.seedRoute('S', { provider: 'p', model: 'm' })
+    // Known but unprobed route: the gate parks on the probe, never on
+    // route-unknown - the 2026-11-18 boot deadlock this seed closes.
+    expect(m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 })[0]).toMatchObject({
+      verdict: 'defer',
+      why: 'probe-pending',
+    })
+    expect(m.routesNeedingProbe(T0)).toMatchObject([{ provider: 'p' }])
+    // The green result itself releases the deferred decision (the shell sends
+    // from the returned attempt record).
+    expect(kinds(m.onProbeResult('p', { ok: true }))).toContain('v2-attempt')
+    expect(m.releaseDue(T0)).toEqual([])
+  })
+
+  it('keeps the first route evidence when a later seed disagrees', () => {
+    const { m } = machine()
+    m.seedRoute('S', { provider: 'p1' })
+    m.seedRoute('S', { provider: 'p2' })
+    expect(m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 })[0]).toMatchObject({ why: 'probe-pending' })
+    expect(m.routesNeedingProbe(T0)).toMatchObject([{ provider: 'p1' }])
+  })
+
   it('holds a staggered decision until its planned time even on a green path', () => {
     const { m, clock } = machine()
     greenPath(m)

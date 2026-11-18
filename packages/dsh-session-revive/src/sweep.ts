@@ -115,6 +115,15 @@ export interface SweepScan {
   open: boolean
   /** Latest folded usage (inputTokens + cacheReadTokens — the live folding's context definition), when observed. */
   contextTokens?: number
+  /**
+   * The route the next request would use, when the log records one: the latest
+   * `model/selection` not yet retired by a request header, else the last
+   * `request/header`'s config (the same fold as the harness's modelSelection
+   * projection). Boot decisions seed this into the machine — an idle session
+   * never emits `model/selection` live, so the stored log is the only route
+   * evidence a restart leaves behind.
+   */
+  route?: { readonly provider: string; readonly model?: string }
 }
 
 /**
@@ -122,21 +131,41 @@ export interface SweepScan {
  * @param events - events in seq order exactly as `SessionPersistence` returns
  *   them (no synthetic closers — that is what distinguishes an orphan from a
  *   session already resumed after an interruption).
- * @returns whether the log ends inside a turn, plus the last observed context
- *   size for the 1M watermark gate.
+ * @returns whether the log ends inside a turn, the last observed context
+ *   size for the 1M watermark gate, and the route the log proves (see
+ *   {@link SweepScan.route}).
  */
 export function scanOpenTurn(events: readonly SessionEvent[]): SweepScan {
   let open = false
   let contextTokens: number | undefined
+  let pending: { provider: string; model?: string } | undefined
+  let lastUsed: { provider: string; model?: string } | undefined
   for (const event of events) {
     if (event.type === 'turn/start') open = true
     else if (event.type === 'turn/end') open = false
     else if (event.type === 'assistant/message') {
       const usage = event.data.usage
       if (usage !== undefined) contextTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0)
+    } else if (event.type === 'model/selection') {
+      pending = { provider: event.data.provider, model: event.data.model }
+    } else if (event.type === 'request/header') {
+      const config = event.data.header.config
+      lastUsed = { provider: config.provider, model: config.model }
+      if (
+        pending !== undefined &&
+        pending.provider === lastUsed.provider &&
+        pending.model === lastUsed.model
+      ) {
+        pending = undefined
+      }
     }
   }
-  return { open, ...(contextTokens === undefined ? {} : { contextTokens }) }
+  const route = pending ?? lastUsed
+  return {
+    open,
+    ...(contextTokens === undefined ? {} : { contextTokens }),
+    ...(route === undefined ? {} : { route }),
+  }
 }
 
 /** Boot-sweep collaboration surface; the plugin shell binds it to the live host services. */
@@ -149,6 +178,13 @@ export interface BootSweepDeps {
   isAttached: (sessionId: string) => boolean
   /** Fold the confirmed orphan's usage into the watermark gate, then run the ruled gates (zero quota). */
   decide: (sessionId: string, at: number, contextTokens: number | undefined) => PolicyRecord[]
+  /**
+   * Seed the machine's per-session route from the stored log before deciding.
+   * Optional so older bindings keep compiling; without it a boot decision
+   * gates `route-unknown` and parks fail-closed until a `model/selection`
+   * that an idle session never emits (the 2026-11-18 boot deadlock).
+   */
+  seedRoute?: (sessionId: string, route: { readonly provider: string; readonly model?: string }) => void
   /** Log every record and queue the nudge for revive decisions (the existing applyRecords path). */
   apply: (records: PolicyRecord[]) => void
   /** Sweep-scoped structured evidence line. */
@@ -285,6 +321,11 @@ export async function runBootSweep(deps: BootSweepDeps): Promise<void> {
           attached += 1
           continue
         }
+        // Route evidence lands before the decision: the v2 gate reads the
+        // machine's per-session route, and a boot decision with none parks
+        // fail-closed (route-unknown) until a model/selection that an idle
+        // session never emits.
+        if (scan.route !== undefined) deps.seedRoute?.(row.sessionId, scan.route)
         const records = deps.decide(row.sessionId, deps.now(), scan.contextTokens)
         deps.apply(records)
         if (records.some(isRevive)) revived += 1

@@ -41,7 +41,7 @@ import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
 import { makeStatusRoute } from './host/routes.ts'
 import { attributeProbeFailure, probeRoute, type ProbeResult } from './v2-probe.ts'
 import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
-import { SETTINGS_READ_TTL_MS, makeTtlReader, planProbeTimer, wakeDelayFor } from './v2-timers.ts'
+import { SETTINGS_READ_TTL_MS, makeTtlReader, planNudgeDelay, planProbeTimer, wakeDelayFor } from './v2-timers.ts'
 import { ReviveV2StateWriter } from './v2-state.ts'
 import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
 import { runTranscriptFirstGate } from './v2-transcript.ts'
@@ -219,6 +219,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     const sessions = ctx.sessionController as unknown as ReviveSessionApi
     const abort = new AbortController()
     const sendTimers = new Set<ReturnType<typeof setTimeout>>()
+    /** Anti-herd anchor: when the previous nudge will actually fire (see planNudgeDelay). */
+    let lastNudgeAt = 0
     let wakeTimer: ReturnType<typeof setTimeout> | undefined
 
     // One structured JSON line per record, stamped with the active mode so a
@@ -382,7 +384,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     }
 
     const sendNudge = (sessionId: string, plannedAt: number, code?: string): void => {
-      const delay = Math.max(0, plannedAt - Date.now())
+      // Anti-herd (2026-11-12 ruling): a deferred batch released after its
+      // plannedAt collapsed must still space its sends by the ruled stagger.
+      const plan = planNudgeDelay(plannedAt, lastNudgeAt, resolved.staggerMs, Date.now())
+      lastNudgeAt = plan.lastNudgeAt
       const text = nudgeTextFor(code)
       const timer = setTimeout(() => {
         sendTimers.delete(timer)
@@ -411,7 +416,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
               detail: { error: String(error).slice(0, 300), ...(code === undefined ? {} : { cause: code }) },
             })
           })
-      }, delay)
+      }, plan.delay)
       sendTimers.add(timer)
     }
 
@@ -686,6 +691,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         }
       },
       isAttached: (sessionId) => (ctx.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId) !== undefined,
+      seedRoute: (sessionId, route) => machine.seedRoute(sessionId, route),
       decide: (sessionId, at, contextTokens) => {
         // Fold the orphan's last observed usage first so the 1M watermark
         // gate actually bounds this revival (an unknown watermark adds no

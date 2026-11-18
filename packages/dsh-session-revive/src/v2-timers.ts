@@ -85,3 +85,27 @@ export function makeTtlReader<T>(ttlMs: number, read: () => T, now: () => number
     return cache.value
   }
 }
+
+/**
+ * Schedule one nudge send under the anti-herd ruling (2026-11-12: a mass
+ * release never wakes sessions together). A deferred batch can release long
+ * after every `plannedAt` passed - the boot sweep staggers its decisions, but
+ * a probe that turns green late collapses them all into one tick - so the
+ * ruled stagger is re-anchored on the previous send's real firing time
+ * instead of trusting the stale plan. A single nudge is never delayed by
+ * this rule; only spacing between consecutive sends is added.
+ * @param plannedAt - the decision's planned fire time (already <= now when the shell sends).
+ * @param lastNudgeAt - anchor: when the previous nudge will actually fire (0 for the first).
+ * @param staggerMs - the ruled minimum spacing between sends (config floor 10s).
+ * @param now - the scheduling time.
+ * @returns delay before the send, and the anchor the next call must use.
+ */
+export function planNudgeDelay(
+  plannedAt: number,
+  lastNudgeAt: number,
+  staggerMs: number,
+  now: number,
+): { delay: number; lastNudgeAt: number } {
+  const notBefore = Math.max(plannedAt, lastNudgeAt + staggerMs)
+  return { delay: Math.max(0, notBefore - now), lastNudgeAt: Math.max(notBefore, now) }
+}

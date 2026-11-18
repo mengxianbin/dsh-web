@@ -242,6 +242,20 @@ export class ReviveV2Machine {
   }
 
   /**
+   * Seed one session's route from durable evidence (the boot sweep folds the
+   * stored log). A cold machine starts every session without a route and an
+   * idle session never emits `model/selection` to fill one, so boot decisions
+   * would otherwise park fail-closed on route-unknown forever. Never
+   * overwrites evidence the machine already holds.
+   * @param sessionId - the session the stored evidence belongs to.
+   * @param route - the provider and model the next request would use.
+   */
+  seedRoute(sessionId: string, route: { provider: string; model?: string }): void {
+    const state = this.stateOf(sessionId)
+    if (state.route === undefined) state.route = route
+  }
+
+  /**
    * One `turn/end` error. First it triages the in-flight attempt by its ACTUAL
    * form (section three discipline), then it drops any deferred decision this
    * death supersedes. The gate for the NEXT attempt is answered when the ruled

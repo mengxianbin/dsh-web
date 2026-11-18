@@ -4,6 +4,7 @@ import {
   SETTINGS_READ_TTL_MS,
   WAKE_RETRY_FLOOR_MS,
   makeTtlReader,
+  planNudgeDelay,
   planProbeTimer,
   wakeDelayFor,
 } from '../src/v2-timers.ts'
@@ -95,5 +96,36 @@ describe('makeTtlReader', () => {
     at = SETTINGS_READ_TTL_MS
     expect(reader()).toBeUndefined()
     expect(reads).toBe(2)
+  })
+})
+
+describe('planNudgeDelay', () => {
+  const stagger = 10_000
+  const now = 1_760_000_000_000
+
+  it('fires an isolated nudge at once and never delays a single send', () => {
+    // First send ever: plannedAt is already <= now when the shell sends.
+    expect(planNudgeDelay(now - 5_000, 0, stagger, now)).toEqual({ delay: 0, lastNudgeAt: now })
+    // Long after the previous send: nothing left to space.
+    expect(planNudgeDelay(now - 5_000, now - 60_000, stagger, now)).toEqual({ delay: 0, lastNudgeAt: now })
+  })
+
+  it('spaces a collapsed batch by the ruled stagger', () => {
+    // Three decisions released in one tick after every plannedAt passed (the
+    // late-probe boot batch): each send re-anchors on the previous one, so
+    // the anti-herd ruling holds even when the plan went stale.
+    const first = planNudgeDelay(now - 30_000, 0, stagger, now)
+    expect(first).toEqual({ delay: 0, lastNudgeAt: now })
+    const second = planNudgeDelay(now - 20_000, first.lastNudgeAt, stagger, now)
+    expect(second).toEqual({ delay: stagger, lastNudgeAt: now + stagger })
+    const third = planNudgeDelay(now - 10_000, second.lastNudgeAt, stagger, now)
+    expect(third).toEqual({ delay: 2 * stagger, lastNudgeAt: now + 2 * stagger })
+  })
+
+  it('keeps a future planned time that already sits beyond the spacing', () => {
+    expect(planNudgeDelay(now + 45_000, now - 10_000, stagger, now)).toEqual({
+      delay: 45_000,
+      lastNudgeAt: now + 45_000,
+    })
   })
 })
