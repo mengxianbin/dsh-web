@@ -51,6 +51,8 @@ import { InventoryResponseCache, type InventoryResponseServe } from './inventory
 import { canonicalSessionId, deleteRdbSession, indexSessionDirs, isSessionRdb, rdbDbPaths, removeSessionDir, resolveSessionDirs } from './session-files.ts'
 import { dshHome as resolveDshHome } from '../dsh-home.ts'
 import { archiveSession, removeFromWorkspaceRows, unarchiveSessions, unarchiveSeamAvailable } from './workspace-store.ts'
+import { appendJournal, type JournalEvent } from './journal.ts'
+import { REAP_SCAN_INTERVAL_MS, runReapCycle } from './reaper.ts'
 
 /** Thrown when the caller's expected delete total disagrees with the host plan. */
 export class PlanMismatchError extends Error {
@@ -189,6 +191,16 @@ export class ArchiveService {
   private readonly dshHome: string
   private readonly ledgerPath: string
   private readonly statePath: string
+  /** Append-only event journal path (B′, archive-audit-journal-1114). */
+  private readonly journalPath: string
+  /** Last journal batch timestamp; keeps journal batches strictly ordered in-process. */
+  private lastBatchAt = 0
+  /**
+   * Last subagent-reaper scan (archive-cascade-reap-1114): in-memory 24h
+   * throttle, never persisted — a restart scans again, idempotent by design
+   * (design §四 频率). Set only after a fully successful cycle.
+   */
+  private lastReapAt = 0
 
   private ledger: LedgerDocument = { version: 1, entries: {} }
   private autoState: AutoStateDocument = { version: 1 }
@@ -262,6 +274,7 @@ export class ArchiveService {
     this.sealCompute = options.sealCompute
     this.ledgerPath = join(this.dshHome, 'dsh-session-archive', 'archive-ledger.json')
     this.statePath = join(this.dshHome, 'dsh-session-archive', 'state.json')
+    this.journalPath = join(this.dshHome, 'dsh-session-archive', 'archive-events.jsonl')
   }
 
   // ------------------------------------------------------------------
@@ -339,6 +352,32 @@ export class ArchiveService {
   private async flushState(): Promise<void> {
     if (!this.loaded) return
     await writeJsonAtomic(this.statePath, this.autoState).catch(() => {})
+  }
+
+  /**
+   * Batch timestamp for journal rows: wall clock, nudged +1ms on an
+   * in-process same-ms collision so journal batches stay strictly ordered
+   * (design §二). Ledger timestamps are untouched — the nudge only lands on
+   * the side log.
+   */
+  private nextBatchAt(): number {
+    const now = Date.now()
+    this.lastBatchAt = now > this.lastBatchAt ? now : this.lastBatchAt + 1
+    return this.lastBatchAt
+  }
+
+  /**
+   * Best-effort journal append (B′, archive-audit-journal-1114): never
+   * throws — a failed write only warns, so the archive/unarchive result is
+   * never flipped (fail-open, same loud-but-non-blocking shape as C4).
+   */
+  private async journal(events: readonly JournalEvent[]): Promise<void> {
+    if (events.length === 0) return
+    try {
+      await appendJournal(this.journalPath, events)
+    } catch (error) {
+      console.warn(`[dsh-session-archive] journal append failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   // ------------------------------------------------------------------
@@ -742,6 +781,8 @@ export class ArchiveService {
     const built = source === 'auto' ? await this.buildFull() : undefined
     return this.withLock(async () => {
       const results: OpResult[] = []
+      const events: JournalEvent[] = []
+      const journalAt = this.nextBatchAt()
       const now = Date.now()
       const states = built === undefined ? await this.targetStates(ids) : this.statesFromBuilt(built, ids)
       // Identity gate, resolved once per batch from the dispatch plugin's
@@ -820,6 +861,7 @@ export class ArchiveService {
           }
           results.push({ id, status: 'ok' })
           okIds.push(id)
+          events.push({ id, op: 'archive', at: journalAt, ...(actor !== undefined ? { actor } : {}), entry: { ...this.ledger.entries[id] } })
         } catch (error) {
           results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
         } finally {
@@ -828,6 +870,7 @@ export class ArchiveService {
       }
       await this.flushLedger()
       this.patchFreshBuiltArchived(okIds, true, now)
+      await this.journal(events)
       return { results, freedBytes: 0 }
     })
   }
@@ -835,6 +878,8 @@ export class ArchiveService {
   async unarchive(ids: readonly string[]): Promise<BatchResponse> {
     return this.withLock(async () => {
       const results: OpResult[] = []
+      const events: JournalEvent[] = []
+      const journalAt = this.nextBatchAt()
       // Targeted per-id state (方向①): existence and archived-ness come from
       // the in-memory archive set and a directory stat — no full rebuild.
       const states = await this.targetStates(ids)
@@ -856,10 +901,14 @@ export class ArchiveService {
         // ledger keys stay canonical.
         await unarchiveSessions(this.ctx.workspaceRegistry, toUnarchive.map((id) => states.get(id)?.nativeId ?? id))
         for (const id of toUnarchive) {
+          // B′: snapshot the whole entry before the delete erases it — the
+          // journal keeps whatever seal/source/reason/actor the ledger drops.
+          const erased = this.ledger.entries[id] ?? this.ledger.entries[states.get(id)?.nativeId ?? id]
           delete this.ledger.entries[id]
           const native = states.get(id)?.nativeId
           if (native !== undefined && native !== id) delete this.ledger.entries[native]
           results.push({ id, status: 'ok' })
+          events.push({ id, op: 'unarchive', at: journalAt, ...(erased !== undefined ? { entry: { ...erased } } : {}) })
         }
       } catch (error) {
         for (const id of toUnarchive) {
@@ -868,6 +917,7 @@ export class ArchiveService {
       }
       await this.flushLedger()
       this.patchFreshBuiltArchived(toUnarchive.filter((id) => results.find((r) => r.id === id)?.status === 'ok'), false, Date.now())
+      await this.journal(events)
       return { results, freedBytes: 0 }
     })
   }
@@ -1226,6 +1276,8 @@ export class ArchiveService {
   /** Archive without re-acquiring the lock (used inside cycles). */
   private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', nativeIds: Readonly<Record<string, string>>): Promise<BatchResponse> {
     const results: OpResult[] = []
+    const events: JournalEvent[] = []
+    const journalAt = this.nextBatchAt()
     const now = Date.now()
     const okIds: string[] = []
     for (const id of ids) {
@@ -1235,6 +1287,7 @@ export class ArchiveService {
         this.ledger.entries[id] = { archivedAt: now, source }
         results.push({ id, status: 'ok' })
         okIds.push(id)
+        events.push({ id, op: 'archive', at: journalAt, entry: { ...this.ledger.entries[id] } })
       } catch (error) {
         results.push({ id, status: 'failed', reason: 'error', detail: error instanceof Error ? error.message.slice(0, 200) : String(error) })
       } finally {
@@ -1243,6 +1296,7 @@ export class ArchiveService {
     }
     await this.flushLedger()
     this.patchFreshBuiltArchived(okIds, true, now)
+    await this.journal(events)
     return { results, freedBytes: 0 }
   }
 
@@ -1264,6 +1318,45 @@ export class ArchiveService {
     this.schedulerTimer = setTimeout(() => {
       void this.tick()
     }, delay)
+  }
+
+  /**
+   * One throttled subagent-reaper + cascade-ledger-reconcile pass
+   * (archive-cascade-reap-1114, design §四/§五). Public for tests, like
+   * `runAutoCycle`; `tick` is the production caller. Runs under the operation
+   * lock like every other ledger-writing archive path (design §四 串行与失败
+   * 形态): a held lock skips this round with `BusyError` and leaves the 24h
+   * throttle unset; anything else propagates to `tick`, which logs loud and
+   * still arms the next check. `lastReapAt` is set only after a fully
+   * successful cycle (feed read → both passes → ledger flush), so a failure
+   * retries on the next tick instead of waiting a day.
+   */
+  async reapIdleSubagents(): Promise<void> {
+    const now = Date.now()
+    if (now - this.lastReapAt < REAP_SCAN_INTERVAL_MS) return
+    const feed = this.serviceFace<{ list(request: unknown, signal: AbortSignal): Promise<{ items?: unknown[] }> }>('sessionController')
+    const registry = this.serviceFace<{ archivedSessionIds: readonly string[]; archivedAtById?: Record<string, number> }>('workspaceRegistry')
+    if (feed === undefined) throw new Error('sessionController face unavailable')
+    if (registry === undefined) throw new Error('workspaceRegistry face unavailable')
+    await this.withLock(() => runReapCycle({
+      now: Date.now,
+      // inventory.ts 同款请求形 (design §四 扫描数据源): direct face, never
+      // `sources()` — that would pull dirIndex/projcache, the banned big heads.
+      listFeed: () => feed.list({ includeArchived: true, includeSubagents: true, trimHeavyProjections: true }, AbortSignal.timeout(30_000)),
+      archivedSessionIds: () => registry.archivedSessionIds,
+      archivedAtById: () => registry.archivedAtById,
+      // Built inside the lock: live+busy at scan time; `running` rides each feed row.
+      protectedIds: new Set(this.protectedReason(undefined).keys()),
+      ledger: this.ledger,
+      archive: (nativeId) => archiveSession(this.ctx, nativeId),
+      // Rejecting on purpose (unlike the silent `flushLedger` helper): a flush
+      // failure must leave the throttle unset so the next tick retries it.
+      flushLedger: async () => {
+        if (!this.loaded) return
+        await writeJsonAtomic(this.ledgerPath, this.ledger)
+      },
+    }))
+    this.lastReapAt = Date.now()
   }
 
   private async tick(): Promise<void> {
@@ -1296,6 +1389,17 @@ export class ArchiveService {
           }
           await this.flushState()
         }
+      }
+    }
+    // Subagent reaper + cascade-ledger reconcile (archive-cascade-reap-1114,
+    // design §四/§五): runs every tick regardless of the two cycle gates
+    // above; a held lock skips this round (BusyError), anything else logs
+    // loud and fails open — the schedule below still arms.
+    try {
+      await this.reapIdleSubagents()
+    } catch (error) {
+      if (!(error instanceof BusyError)) {
+        console.error(`[dsh-session-archive] reaper cycle failed: ${error instanceof Error ? error.message : String(error)}`)
       }
     }
     this.autoState.nextCheckAt = Date.now() + Math.max(15, this.config.checkIntervalMin) * 60_000
