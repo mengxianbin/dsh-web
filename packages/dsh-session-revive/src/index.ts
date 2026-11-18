@@ -39,8 +39,9 @@ import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
 import { makeStatusRoute } from './host/routes.ts'
-import { attributeProbeFailure, probeRoute, PROBE_MAX_INTERVAL_MS, PROBE_MIN_INTERVAL_MS, type ProbeResult } from './v2-probe.ts'
+import { attributeProbeFailure, probeRoute, type ProbeResult } from './v2-probe.ts'
 import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
+import { SETTINGS_READ_TTL_MS, makeTtlReader, planProbeTimer, wakeDelayFor } from './v2-timers.ts'
 import { ReviveV2StateWriter } from './v2-state.ts'
 import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
 import { runTranscriptFirstGate } from './v2-transcript.ts'
@@ -143,8 +144,13 @@ function isDeepSeekProvider(provider: string): boolean {
 function makeResolveBaseURL(
   ctx: Context,
 ): (route: { provider: string; model?: string }) => string | undefined {
+  // Every scheduling pass resolves a route, and each unresolved namespace is a
+  // full profile-directory scan; the TTL keeps those reads off the hot path
+  // (a settings edit reaches the next probe round within one TTL anyway).
+  const readPi = makeTtlReader(SETTINGS_READ_TTL_MS, () => readSettingsNamespace(ctx, 'llm-pi-ai'))
+  const readDs = makeTtlReader(SETTINGS_READ_TTL_MS, () => readSettingsNamespace(ctx, 'llm-deepseek'))
   return (route) => {
-    const pi = readSettingsNamespace(ctx, 'llm-pi-ai')
+    const pi = readPi()
     const providers = pi?.providers
     if (typeof providers === 'object' && providers !== null) {
       const entry = (providers as Record<string, unknown>)[route.provider]
@@ -152,7 +158,7 @@ function makeResolveBaseURL(
       if (typeof baseURL === 'string' && baseURL.trim() !== '') return baseURL.trim()
     }
     if (isDeepSeekProvider(route.provider)) {
-      const ds = readSettingsNamespace(ctx, 'llm-deepseek')?.baseURL
+      const ds = readDs()?.baseURL
       if (typeof ds === 'string' && ds.trim() !== '') return ds.trim()
       return DEEPSEEK_DEFAULT_BASE_URL
     }
@@ -255,6 +261,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
 
     let v2WakeTimer: ReturnType<typeof setTimeout> | undefined
     let probeTimer: ReturnType<typeof setTimeout> | undefined
+    let probeTimerImmediate = false
     let probeRoundInFlight = false
 
     // The machine's deferred deadlines (cooldown, stagger plan) drive one
@@ -266,12 +273,15 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       }
       const deadline = machine.nextWakeAt()
       if (deadline === null) return
+      // An overdue deadline (release blocked on a red route) retries at 1 Hz
+      // instead of re-arming at 0 ms - that 0 ms loop is what pegged the host
+      // main thread on 2026-11-17.
       v2WakeTimer = setTimeout(
         () => {
           v2WakeTimer = undefined
           applyV2(machine.releaseDue(Date.now()))
         },
-        Math.max(0, deadline - Date.now()),
+        wakeDelayFor(deadline, Date.now()),
       )
     }
 
@@ -280,21 +290,26 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     // result, otherwise on the randomised 60-120s cadence. Zero parked
     // sessions means zero timers - the loop goes silent by construction.
     const armProbeLoop = (): void => {
+      const targets = machine.routesNeedingProbe(Date.now())
+      const plan = planProbeTimer(
+        probeTimer === undefined ? undefined : { immediate: probeTimerImmediate },
+        targets,
+      )
+      if (plan.action === 'keep') return
       if (probeTimer !== undefined) {
         clearTimeout(probeTimer)
         probeTimer = undefined
+        probeTimerImmediate = false
       }
-      const targets = machine.routesNeedingProbe(Date.now())
-      if (targets.length === 0) return
-      const delay = targets.some((target) => target.immediate)
-        ? 0
-        : PROBE_MIN_INTERVAL_MS + Math.floor(Math.random() * (PROBE_MAX_INTERVAL_MS - PROBE_MIN_INTERVAL_MS + 1))
+      if (plan.action === 'clear') return
+      probeTimerImmediate = plan.delay === 0
       probeTimer = setTimeout(
         () => {
           probeTimer = undefined
+          probeTimerImmediate = false
           void runProbeRound()
         },
-        delay,
+        plan.delay,
       )
     }
 
