@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 /**
- * Sysmon seat coordination: the primary tab-row-trailing copy and the fallback
- * header-leading copy must never paint together, and the fallback must cover
- * exactly the states where the primary seat is not mounted.
+ * Sysmon seat coordination: the primary composer-dock-trailing copy and the
+ * fallback header-leading copy must never paint together, and the fallback
+ * must cover exactly the states where the primary seat is not mounted. The
+ * wall clock seats separately in the session header's utilities (order -20,
+ * left of the open-in-app control).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, waitFor } from '@testing-library/react'
@@ -155,23 +157,42 @@ describe('seat coordination', () => {
 })
 
 describe('apply', () => {
-  it('seats the primary copy in the tab-row trailing slot and keeps the leading fallback', () => {
+  it('seats the primary copy in the composer row trailing slot, the clock in the utilities, and the leading fallback', () => {
     // Registration targets are the contract of this move: the primary must
-    // follow the harness's new second-row seat (title row stays clear), the
-    // leading cell keeps covering every state the tab row does not render.
+    // follow the harness's composer-row trailing seat (title row stays
+    // clear), the clock reads as the utilities' first cell, and the leading
+    // cell keeps covering every state the composer row does not render.
     const injected: string[] = []
+    const registered: { name?: string; id?: string; order?: number }[] = []
     const ctx = {
       effect: (fn: () => unknown) => { fn(); return () => {} },
       locale: { register: () => () => {} },
       slots: {
-        inject: (key: string) => { injected.push(key); return () => {} },
-        register: () => () => {},
+        // Run the factory eagerly: the register call inside it is the
+        // contract this test reads back.
+        inject: (key: string, factory: () => unknown) => {
+          injected.push(key)
+          factory()
+          return () => {}
+        },
+        register: (options: { name?: string; id?: string; order?: number }) => {
+          registered.push(options)
+          return () => {}
+        },
       },
     }
     apply(ctx as unknown as ClientContext)
     expect(injected).toEqual([
-      'conversation.session.header.views.trailing',
+      'conversation.composer.dock.trailing',
+      'conversation.session.header.utilities',
       'conversation.header.leading',
     ])
+    const clock = registered.find(row => row.name === 'conversation.session.header.utilities')
+    expect(clock?.id).toBe('sysmon-clock')
+    // -20 sorts below open-in-app (-10): the clock lands at the right
+    // cluster's left edge, immediately left of the folder control.
+    expect(clock?.order).toBe(-20)
+    const primary = registered.find(row => row.name === 'conversation.composer.dock.trailing')
+    expect(primary?.id).toBe('sysmon')
   })
 })

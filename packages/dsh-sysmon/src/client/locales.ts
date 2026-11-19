@@ -8,6 +8,7 @@
 /** Simplified Chinese dictionary (key-set source of truth). */
 export const zh = {
   'chip.aria': '系统负载',
+  'clock.aria': '本地时间',
   'chip.cpu': 'CPU',
   'chip.mem': '内存',
   'chip.disk': '磁盘',
@@ -27,6 +28,7 @@ export type SysmonKey = keyof typeof zh
 /** English dictionary, key-for-key complete against zh. */
 export const en: Record<SysmonKey, string> = {
   'chip.aria': 'System load',
+  'clock.aria': 'Local time',
   'chip.cpu': 'CPU',
   'chip.mem': 'Mem',
   'chip.disk': 'Disk',

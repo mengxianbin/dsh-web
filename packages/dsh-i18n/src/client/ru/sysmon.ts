@@ -7,6 +7,7 @@
 
 export const ru: Record<string, string> = {
   'chip.aria': 'Нагрузка на систему',
+  'clock.aria': 'Местное время',
   'chip.cpu': 'ЦП',
   'chip.mem': 'Память',
   'chip.disk': 'Диск',

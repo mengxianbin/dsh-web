@@ -45,7 +45,7 @@
 | `data-dsh-wallpaper-active` | html + body（body/html 级，另行管理） | WE 壁纸挂载期间置 `true`，卸载 / 禁用清除；供皮肤 CSS 与壁纸中和规则锚定（#734） |
 | `data-dsh-wallpaper-surface` | 官方 shell 全视口背景元素 + 侧栏工作区淡化条（元素级） | `WallpaperController.markWallpaperSurfaces()` 在 WE 壁纸挂载期间打标（全视口 bg-base 背景 + `data-slot="sidebar.workspaces"` 内渐变淡化条），命中 `html[data-dsh-wallpaper-active] [data-dsh-wallpaper-surface]` 中和；卸载清除，不含哈希类依赖（#734） |
 
-## part 组（72 行，含各 owner 行）
+## part 组（73 行，含各 owner 行）
 
 shell 区域（owner: shell）：
 
@@ -127,7 +127,8 @@ family / 插件区域：
 | `save` / `reset` / `disable` / `enable` / `reload` | model-capabilities | 扩展区动作按钮（保存 / 重置 / 禁用此提供方 / 启用 / 重新读取）；panel 内裸值按钮 |
 | `disabled-state` | model-capabilities | 已禁用提供方的卡片提示区（含启用按钮）；panel 内 `[data-dsh-part="disabled-state"]` |
 | `disabled-footer` / `disabled-row` | model-capabilities | Models 页底部存档区与其行；`settings.models.footer` 槽内 `section[data-dsh-part="disabled-footer"]` 与其中 `li[data-dsh-part="disabled-row"]` |
-| `chip` | sysmon | 会话头部系统指标控件根 span；`conversation.session.header.actions` 槽 entry id `sysmon`，`[data-dsh-plugin="sysmon"][data-dsh-part="chip"]`；`data-warn` 为空格分隔的当前告警指标键（`cpu`/`mem`/`disk`；`net` 键随 2026-10-28「失败数撤展示」裁定退出——网络格只显探测往返、永不染红），无告警时缺省 |
+| `chip` | sysmon | composer 行尾槽系统指标控件根 span；`conversation.composer.dock.trailing` 槽 entry id `sysmon`（输入卡下方行最右端、21% 上下文表之后），`[data-dsh-plugin="sysmon"][data-dsh-part="chip"]`；`data-warn` 为空格分隔的当前告警指标键（`cpu`/`mem`/`disk`；`net` 键随 2026-10-28「失败数撤展示」裁定退出——网络格只显探测往返、永不染红），无告警时缺省 |
+| `clock` | sysmon | 头部工具行本地挂钟；`conversation.session.header.utilities` 槽 entry id `sysmon-clock`（order -20，open-in-app 控件左侧），`[data-dsh-plugin="sysmon"][data-dsh-part="clock"]`；兜底 chip 内的挂钟格不带 part，归属交给外层 `chip` |
 
 ## plugin 组（14 个）
 
@@ -146,7 +147,7 @@ family / 插件区域：
 | `session-id` | dsh-session-id | footer action slot entry id `session-id`；`[data-dsh-plugin="session-id"]`（面板 overlay 根 + 入口触发器） |
 | `usage` | dsh-usage | 一级设置分区 settings.section id `dsh-usage`（创意工坊下方）；`[data-dsh-plugin="usage"]` |
 | `model-capabilities` | dsh-model-capabilities | Models 页 `settings.models.provider-card` keyed 槽 key `llm-pi-ai`（提供方卡片扩展区）+ `settings.models.footer` 槽 entry id `ui-model-capabilities`（存档区）；`[data-dsh-plugin="model-capabilities"]` |
-| `sysmon` | dsh-sysmon | 会话头部系统指标 chip；slot entry id `sysmon`（`conversation.session.header.actions`）；`[data-dsh-plugin="sysmon"]` |
+| `sysmon` | dsh-sysmon | 系统指标读数三座位：composer 行尾槽主位 chip + 头部工具行挂钟 + leading 兜底 chip；slot entry id `sysmon` / `sysmon-clock`；`[data-dsh-plugin="sysmon"]` |
 
 ## 已知脆弱点（上游主题缝 PR 诉求）
 

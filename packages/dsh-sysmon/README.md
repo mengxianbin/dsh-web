@@ -2,29 +2,37 @@
 
 English | [中文](README.zh.md)
 
-DSH web GUI plugin sysmon — a live system-metrics chip in the session header.
-It shows CPU, memory and disk activity sampled every second on the Host plus a
-low-frequency probed network-quality reading, and reddens any metric that has
-sat at or above its threshold for a sustained streak, so a saturated machine
-or an unhealthy network is visible without leaving the chat.
+DSH web GUI plugin sysmon — a live system-metrics read-out for the composer
+row and the session header. It shows CPU, memory and disk activity sampled
+every second on the Host plus a low-frequency probed network-quality reading,
+and reddens any metric that has sat at or above its threshold for a sustained
+streak, so a saturated machine or an unhealthy network is visible without
+leaving the chat.
 
 ## What it does
 
-- Seats a compact chip into `conversation.session.header.views.trailing`, the
-  view tab row's trailing cell right of the More launcher — row one stays the
-  Session title's alone: four tabular-numeral read-outs (CPU busy %, memory
-  used %, disk busy %, network) plus a trailing local wall clock
-  (`MM-DD HH:MM`, 2026-10-29 ruling — fullscreen work hides the OS taskbar
-  clock) and a hover tooltip with disk throughput, memory absolutes, and the
-  network detail line. The clock ticks on its own 1s timer, never on the host
-  payload: a stalled host freezes the metric read-outs but never the time.
-  The header reserves the seat's measured width when folding tabs, so the chip
-  never squeezes the tab share into wrapping the row.
-- Mirrors the same chip into `conversation.header.leading`, the one header
-  cell that renders with no Session and stays visible while a blank Session or
-  a single-View header hides the tab row. A module-level mount signal keeps
-  the two seats exclusive, so exactly one copy paints: the trailing copy wins
-  whenever both would be mounted.
+- Seats a compact chip into `conversation.composer.dock.trailing`, the right
+  end of the row below the composer card (after the context meter) — row one
+  stays the Session title's alone: four tabular-numeral read-outs (CPU busy
+  %, memory used %, disk busy %, network) and a hover tooltip with disk
+  throughput, memory absolutes, and the network detail line. The dock copy
+  drops the pill fill and paints its values at the row's quiet tertiary level
+  (matching the statistics pills beside it), so the 1s repaint stops pulling
+  the eye; a warned metric keeps the full semantic error color. Every value
+  cell holds a digit floor, so a reading crossing a digit boundary never
+  re-centers the row.
+- Seats the local wall clock (`MM-DD HH:MM`, 2026-10-29 ruling — fullscreen
+  work hides the OS taskbar clock) into
+  `conversation.session.header.utilities` at order -20: the right cluster's
+  first cell, immediately left of the open-in-app control. It ticks on its
+  own 1s timer, never on the host payload — a stalled host freezes the metric
+  read-outs but never the time, and the route 404 cannot stop the clock.
+- Mirrors the chip into `conversation.header.leading`, the one header cell
+  that renders with no Session and stays visible while a blank Session hides
+  the utilities row. A module-level mount signal keeps the two chip seats
+  exclusive, so exactly one copy paints: the dock copy wins whenever both
+  would be mounted. The fallback carries its own clock cell, because those
+  states have no utilities row to read it from.
 - Samples on the Host every second: CPU from an `os.cpus()` diff, memory from
   `os.totalmem()`/`os.freemem()`, and disk from one resident `typeperf` child
   that streams the three `PhysicalDisk(_Total)` counters over stdout.
@@ -52,8 +60,9 @@ or an unhealthy network is visible without leaving the chat.
 - Warns by sustained streak, not by single spike: a metric reddens only after
   `warnStreak` consecutive samples (default 3) at or above its threshold.
 - Degrades on its own: when the host half is off or disabled the route 404s
-  and the chip hides itself; a stalled disk child shows `—` for disk rather
-  than a stale number; a failed poll keeps the last snapshot and retries.
+  and the read-outs hide themselves (the clock does not ride the payload, so
+  it keeps walking); a stalled disk child shows `—` for disk rather than a
+  stale number; a failed poll keeps the last snapshot and retries.
 
 ## Install
 
@@ -106,8 +115,9 @@ compatibility stubs left for the retired readings).
   clamps it to 100 while history keeps the raw value.
 - The ring buffer is in-memory and lost on restart; there is no history UI yet.
 - The fallback copy sits in the header's leading cell, so between states the
-  chip moves from the left edge (no Session / blank Session / single View) to
-  the tab row after More (active Session with two or more Views).
+  chip moves from the left edge (no Session / blank Session) to the composer
+  row's right end (open Session), with the wall clock hopping from the
+  fallback cell to the header utilities.
 - Per-process attribution is out of scope; run
   `scripts/common/io-attribution.ps1` from m-note when you need the culprit.
 

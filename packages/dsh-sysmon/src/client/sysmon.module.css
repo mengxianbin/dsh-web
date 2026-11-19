@@ -1,13 +1,18 @@
 /*
- * Sysmon header chip: one compact row of CPU / memory / disk read-outs in the
- * view tab row's trailing seat (right of the More launcher — the Session
- * title keeps row one to itself). The chip inherits the header's 12px scale;
- * values are tabular-nums so digits never jitter while polling. Warn coloring
- * rides the semantic error token so light/dark both hold.
+ * Sysmon surface: one compact row of CPU / memory / disk / probe read-outs.
+ * Two seat styles share the metric vocabulary: the composer-dock copy
+ * (chipDock — no pill fill, tertiary values, so the 1s repaint stops pulling
+ * the eye) and the header-leading fallback (the original pill, kept for the
+ * no-session / blank-session / single-View states). Values are tabular-nums
+ * so digits never jitter while polling, and every value cell holds a digit
+ * floor so a value crossing a digit boundary never re-centers its row. Warn
+ * coloring rides the semantic error token so light/dark both hold.
  *
- * The chip lives inside the tab row (ConversationRoot `.tabs`, container-type:
- * inline-size), so @container queries degrade it the same way the View tabs
- * do: first the unit labels drop, then the whole chip, before the row wraps.
+ * Degradation: the dock copy lives inside the composer row (InputBar .dock,
+ * container-type: inline-size), so @container queries degrade it against the
+ * row it sits in — first the unit labels drop, then the whole chip, before
+ * the row has to squeeze the statistics pills. The header fallback keeps the
+ * tab-row-era thresholds (its own outer container, unchanged).
  */
 
 .chip {
@@ -22,6 +27,25 @@
   line-height: 22px;
   white-space: nowrap;
   cursor: default;
+}
+
+/* The composer-dock copy: no pill fill, and the read-outs sit at the row's
+   quiet tertiary level to match the statistics pills beside it. A warned
+   metric keeps the full semantic error color at emphasis weight — quiet when
+   healthy, loud exactly when it matters. */
+.chipDock {
+  background: transparent;
+  padding: 0;
+}
+
+.chipDock .v {
+  color: var(--dsw-alias-label-tertiary);
+  font-weight: 400;
+}
+
+.chipDock .vWarn {
+  color: var(--dsw-alias-state-error-primary);
+  font-weight: 500;
 }
 
 .metric {
@@ -39,6 +63,18 @@
   color: var(--dsw-alias-label-secondary);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+  /* Digit floor: the cell holds its widest plausible value, so a reading
+     crossing a digit boundary (15% -> 100%, 33ms -> 128ms) never shifts the
+     row it sits in. Left-aligned in the floor: label and value stay tight
+     and the separators keep their positions. */
+  display: inline-block;
+  min-width: 4.25ch;
+}
+
+/* The probe round trip adds its unit and may reach four digits, so it floors
+   wider than a percentage cell. */
+.metricNet .v {
+  min-width: 5.4ch;
 }
 
 .vWarn {
@@ -51,8 +87,43 @@
   background: var(--dsw-alias-border-l3);
 }
 
-/* First sacrifice when the tab row narrows: the unit labels go, bare
-   percentages stay (the tooltip keeps the full nouns). */
+/* The utilities wall clock (row one, left of the open-in-app control): a
+   static glance read-out, so it keeps the secondary emphasis — nothing about
+   it repaints below the minute. */
+.clock {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 4px;
+  font-size: 12px;
+  line-height: 24px;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* First sacrifice when the composer row narrows: the unit labels go, bare
+   percentages stay (the tooltip keeps the full nouns). Scoped to the dock
+   copy so the header fallback keeps its own outer-container thresholds. */
+@container (max-width: 740px) {
+  .chipDock .k {
+    display: none;
+  }
+
+  .chipDock {
+    gap: 5px;
+  }
+}
+
+/* Last sacrifice: the whole dock chip yields before the statistics pills
+   have to ellipsize. */
+@container (max-width: 640px) {
+  .chipDock {
+    display: none;
+  }
+}
+
+/* Header-fallback degradation, anchored to whatever outer container the
+   header sits in (tab-row-era thresholds, unchanged). */
 @container (max-width: 620px) {
   .k {
     display: none;
@@ -64,8 +135,6 @@
   }
 }
 
-/* Last sacrifice: the whole chip yields before the tab row has to wrap and
-   grow the header. */
 @container (max-width: 440px) {
   .chip {
     display: none;

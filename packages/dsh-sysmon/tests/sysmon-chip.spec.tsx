@@ -2,7 +2,7 @@
 /** Sysmon header chip: values, warn coloring, the 404 hide contract, the A-case net reading. */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { SysmonChip, chipTitle, formatDayTime, formatGB, netLine } from '../src/client/SysmonChip.tsx'
+import { SysmonChip, SysmonClock, SysmonFallbackChip, chipTitle, formatDayTime, formatGB, netLine } from '../src/client/SysmonChip.tsx'
 import { zh } from '../src/client/locales.ts'
 import type { SysmonKey } from '../src/client/locales.ts'
 import type { SysmonNet, SysmonPayload } from '../src/core/types.ts'
@@ -181,7 +181,20 @@ describe('SysmonChip', () => {
 })
 
 describe('clock cell', () => {
-  it('renders the local MM-DD HH:MM read-out as the trailing cell', async () => {
+  it('renders the local MM-DD HH:MM read-out as the utilities clock', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 0))
+    render(<SysmonClock t={makeTranslate()} />)
+    expect(screen.getByText('10-29 20:33')).toBeTruthy()
+    const clock = screen.getByLabelText(zh['clock.aria'])
+    expect(clock.getAttribute('data-dsh-plugin')).toBe('sysmon')
+    expect(clock.getAttribute('data-dsh-part')).toBe('clock')
+    // The clock cell carries no unit label: MM-DD HH:MM reads unambiguously
+    // and the cell keeps its width when the container query strips labels.
+    expect(clock.querySelector('span + span')).toBeNull()
+  })
+
+  it('never rides the dock copy: the primary chip renders no clock cell', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 0))
     vi.stubGlobal('fetch', vi.fn(async () => ({
@@ -191,21 +204,21 @@ describe('clock cell', () => {
     })))
     render(<SysmonChip t={makeTranslate()} />)
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
-    expect(screen.getByText('10-29 20:33')).toBeTruthy()
-    // The clock cell carries no unit label: MM-DD HH:MM reads unambiguously
-    // and the cell keeps its width when the container query strips labels.
-    const cell = screen.getByText('10-29 20:33').parentElement
-    expect(cell?.querySelector('span + span')).toBeNull()
+    expect(screen.getByText('12%')).toBeTruthy()
+    // The utilities own the wall clock for an open Session: the dock copy
+    // must not paint a second one.
+    expect(screen.queryByText(/^\d{2}-\d{2} \d{2}:\d{2}$/)).toBeNull()
+    expect(screen.queryByLabelText(zh['clock.aria'])).toBeNull()
   })
 
-  it('keeps the clock walking while the host stops answering', async () => {
+  it('keeps the fallback copy walking while the host stops answering', async () => {
     // 2026-10-29 ruling: the clock is a taskbar replacement, so it must tick
     // on its own clock — a transport failure freezes the payload read-outs but
     // must never freeze the time (a stale clock lies worse than a dash).
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 55))
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('transport down') }))
-    render(<SysmonChip t={makeTranslate()} />)
+    render(<SysmonFallbackChip t={makeTranslate()} />)
     await act(async () => { await vi.advanceTimersByTimeAsync(0) })
     expect(screen.getByText('10-29 20:33')).toBeTruthy()
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000) })
@@ -214,16 +227,20 @@ describe('clock cell', () => {
     expect(screen.getAllByText('—')).toHaveLength(4)
   })
 
+  it('keeps the fallback clock when the host route 404s', async () => {
+    // The read-outs die with the host half; time does not (the utilities
+    // clock has the same guarantee for open Sessions — see the apply spec).
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 404, ok: false })))
+    render(<SysmonFallbackChip t={makeTranslate()} />)
+    await waitFor(() => expect(screen.queryByLabelText(zh['chip.aria'])).toBeNull())
+    expect(screen.getByLabelText(zh['clock.aria'])).toBeTruthy()
+    expect(screen.getByText(/^\d{2}-\d{2} \d{2}:\d{2}$/)).toBeTruthy()
+  })
+
   it('re-syncs on the visibility edge so a backgrounded tab never paints a stale minute', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 9, 29, 20, 33, 0))
-    vi.stubGlobal('fetch', vi.fn(async () => ({
-      status: 200,
-      ok: true,
-      json: async () => payload(),
-    })))
-    render(<SysmonChip t={makeTranslate()} />)
-    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    render(<SysmonClock t={makeTranslate()} />)
     expect(screen.getByText('10-29 20:33')).toBeTruthy()
     // Jump the wall clock while the tab is hidden: intervals do not run for a
     // hidden document, so only the visibility edge can catch this up.
