@@ -34,7 +34,7 @@ describe('seal result memo (seal-analyzeseal-cache-1110)', () => {
     writeTranscript(host, 'session-a', [userMsg('hi'), assistantMsg(CLEAN_REPLY)])
     const dir = dirOf(host, 'session-a')
     const first = analyzeSeal('session-a', dir)
-    expect(first).toEqual({ id: 'session-a', verdict: 'NEUTRAL', detail: 'no-save-trace' })
+    expect(first).toEqual({ id: 'session-a', verdict: 'NEUTRAL', detail: 'no-save-trace', lastLine: expect.any(String) })
     expect(sealMemoStats()).toEqual({ hits: 0, misses: 1, size: 1 })
 
     // When the same unchanged transcript is analysed again
@@ -60,7 +60,7 @@ describe('seal result memo (seal-analyzeseal-cache-1110)', () => {
 
     // Then the memo key (mtime + size) no longer matches and the verdict
     // recomputes to the appended truth — never the stale green reading.
-    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending' })
+    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: expect.any(String) })
     expect(sealMemoStats()).toEqual({ hits: 0, misses: 2, size: 1 })
   })
 
@@ -75,7 +75,7 @@ describe('seal result memo (seal-analyzeseal-cache-1110)', () => {
     const second = analyzeSeal('session-b', dir)
 
     // Then the memo hit carries the requested id and the same judgement
-    expect(second).toEqual({ id: 'session-b', verdict: first.verdict, detail: first.detail })
+    expect(second).toEqual({ id: 'session-b', verdict: first.verdict, detail: first.detail, lastLine: first.lastLine })
     expect(sealMemoStats()).toEqual({ hits: 1, misses: 1, size: 1 })
   })
 

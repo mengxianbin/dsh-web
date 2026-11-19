@@ -87,3 +87,90 @@ describe('the archive stop dispatch', () => {
     expect(registry.archiveSession).toHaveBeenCalledWith('session-archived')
   })
 })
+
+/** A host whose activity waterfall answers with the given list (or throws). */
+function activityHost(answer: readonly { kind: string }[] | Error): {
+  ctx: Context
+  registry: { archiveSession: ReturnType<typeof vi.fn> }
+  parallel: ReturnType<typeof vi.fn>
+  warnings: string[]
+  waterfall: ReturnType<typeof vi.fn>
+} {
+  const registry = { archiveSession: vi.fn(async (_id: string, _options?: unknown) => {}) }
+  const warnings: string[] = []
+  const parallel = vi.fn(async () => {})
+  const waterfall = vi.fn(async () => {
+    if (answer instanceof Error) throw answer
+    return answer
+  })
+  const ctx = {
+    workspaceRegistry: registry,
+    logger: { warn: (message: string) => { warnings.push(message) } },
+    parallel,
+    waterfall,
+  } as unknown as Context
+  return { ctx, registry, parallel, warnings, waterfall }
+}
+
+describe('C′ 归档即停轮 — stopTurn with 加固A activity check (2026-11-19 裁定)', () => {
+  it('operator archiving mid-turn with turn-only activity gets the stop ordered with the write', async () => {
+    // Given an activity waterfall reporting the turn family and nothing else,
+    const { ctx, registry, parallel, waterfall } = activityHost([{ kind: 'turn' }])
+    // When the caller asks for the stop-turn archive,
+    await archiveSession(ctx, 'session-turn', { stopTurn: true })
+    // Then the registry archives with stopActivity — it issues the
+    // `workspace/session-stop` dispatch itself after the durable write, so
+    // this wrapper must not dispatch a second stop.
+    expect(waterfall).toHaveBeenCalledWith('workspace/session-activity', { sessionId: 'session-turn' }, expect.any(Function))
+    expect(registry.archiveSession).toHaveBeenCalledWith('session-turn', { stopActivity: true })
+    expect(parallel).not.toHaveBeenCalled()
+  })
+
+  it('operator with a running job beside the turn falls back to the plain archive', async () => {
+    // Given the waterfall reports a job family next to the turn (加固A: never
+    // stop a turn that hosts running work)
+    const { ctx, registry, parallel, waterfall } = activityHost([{ kind: 'turn' }, { kind: 'job' }])
+    // When the stop-turn archive runs,
+    await archiveSession(ctx, 'session-mixed', { stopTurn: true })
+    // Then it degrades to today's plain path: one-arg registry call plus the
+    // wrapper's own manual stop dispatch.
+    expect(registry.archiveSession).toHaveBeenCalledWith('session-mixed')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-mixed' })
+  })
+
+  it('operator with nothing running falls back to the plain archive (no stop to order)', async () => {
+    // Given the waterfall answers an empty list,
+    const { ctx, registry, parallel, waterfall } = activityHost([])
+    // When the stop-turn archive runs,
+    await archiveSession(ctx, 'session-idle', { stopTurn: true })
+    // Then the plain path archives — nothing was running to stop.
+    expect(waterfall).toHaveBeenCalled()
+    expect(registry.archiveSession).toHaveBeenCalledWith('session-idle')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-idle' })
+  })
+
+  it('operator whose activity query fails still archives on the plain path and warns', async () => {
+    // Given the waterfall throws the way a broken provider does (加固A:
+    // a failed query answers false — never toward a wider stop)
+    const { ctx, registry, parallel, warnings, waterfall } = activityHost(new Error('waterfall exploded'))
+    // When the stop-turn archive runs,
+    await expect(archiveSession(ctx, 'session-broken-query', { stopTurn: true })).resolves.toBeUndefined()
+    // Then the plain path archives and the failure is loud, not swallowed.
+    expect(waterfall).toHaveBeenCalled()
+    expect(registry.archiveSession).toHaveBeenCalledWith('session-broken-query')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-broken-query' })
+    expect(warnings.join('\n')).toContain('waterfall exploded')
+  })
+
+  it('operator archiving without stopTurn never queries the activity waterfall', async () => {
+    // Given any activity answer at all,
+    const { ctx, registry, parallel, waterfall } = activityHost([{ kind: 'turn' }])
+    // When the caller does not ask for the stop-turn path (force, stale,
+    // NEUTRAL, reaper, archiveInternal),
+    await archiveSession(ctx, 'session-plain')
+    // Then the waterfall is untouched and the pre-C′ path runs verbatim.
+    expect(waterfall).not.toHaveBeenCalled()
+    expect(registry.archiveSession).toHaveBeenCalledWith('session-plain')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-plain' })
+  })
+})

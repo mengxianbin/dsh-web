@@ -122,11 +122,11 @@ describe('POST /seal-check (contract C1)', () => {
     })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
-      { id: 'session-green', verdict: 'DONE', detail: 'sentinel-ok' },
-      { id: 'session-stale', verdict: 'UNSEALED', detail: 'sentinel-stale', followUpCount: 2 },
-      { id: 'session-red', verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' },
+      { id: 'session-green', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) },
+      { id: 'session-stale', verdict: 'UNSEALED', detail: 'sentinel-stale', followUpCount: 2, lastLine: expect.any(String) },
+      { id: 'session-red', verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: expect.any(String) },
       { id: 'session-unknown', verdict: 'UNKNOWN', detail: 'transcript-not-found' },
-      { id: 'session-neutral', verdict: 'NEUTRAL', detail: 'no-save-trace' },
+      { id: 'session-neutral', verdict: 'NEUTRAL', detail: 'no-save-trace', lastLine: expect.any(String) },
     ])
   })
 
@@ -208,7 +208,7 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-green', status: 'ok' },
-      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' } },
+      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: '保存状态：执行中，稍后继续', expected: expect.any(String), remedy: expect.any(String) } },
       { id: 'session-unknown', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNKNOWN', detail: 'transcript-not-found' } },
     ])
     // Green archived; the refused ids did not.
@@ -226,8 +226,11 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
-      { id: 'session-pending', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'sentinel-pending' } },
+      { id: 'session-pending', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: 'SAVE_STATUS=PENDING(2)', remedy: expect.any(String) } },
     ])
+    // 甲: a pending receipt says "finish the save first", not "paste a line"
+    expect(response.body.results[0].seal.remedy).toContain('save-status.py')
+    expect(response.body.results[0].seal.expected).toBeUndefined()
     expect(host.registry.archivedSessionIds).toEqual([])
   })
 })
@@ -295,7 +298,7 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], actor: 'manual', force: 'yes', reason: 'not-boolean' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
-      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' } },
+      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: '保存状态：执行中，稍后继续', expected: expect.any(String), remedy: expect.any(String) } },
     ])
     expect(host.registry.archivedSessionIds).toEqual([])
   })
@@ -314,14 +317,23 @@ describe('endorsement downgrade at the endpoints (seal-noendorse-green-1106)', (
     const check = await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'] })
     // Then the row is non-green with the scanner's no-endorsement reading
     expect(check.status).toBe(200)
-    expect(check.body.results).toEqual([{ id: 'session-bare', verdict: 'UNSEALED', detail: 'no-endorsement' }])
+    expect(check.body.results).toEqual([{ id: 'session-bare', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: 'SAVE_STATUS=DONE' }])
 
-    // And the archive gate asks for confirmation instead of passing it free
+    // And the archive gate asks for confirmation instead of passing it free —
+    // the seal-required receipt is actionable (seal-remedy-1119, 甲): the
+    // exact line the gate read, the shape it must take, and the one command
+    // that regenerates it.
     const archived = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-bare'], actor: 'manual' })
     expect(archived.status).toBe(200)
     expect(archived.body.results).toEqual([
-      { id: 'session-bare', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'no-endorsement' } },
+      { id: 'session-bare', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: 'SAVE_STATUS=DONE', expected: expect.any(String), remedy: expect.any(String) } },
     ])
+    const seal = archived.body.results[0].seal
+    expect(seal.lastLine).toBe('SAVE_STATUS=DONE')
+    expect(seal.expected).toContain('SAVE_STATUS=DONE repo=')
+    expect(seal.expected).toContain('hashes=')
+    expect(seal.remedy).toContain('python scripts/git/save-status.py --hashes')
+    expect(seal.remedy).toContain('末行')
     expect(host.registry.archivedSessionIds).toEqual([])
   })
 })
@@ -349,5 +361,138 @@ describe('seal-check recheck wiring (archive-seal-falsered-1116 段2)', () => {
     const ok = await fetch(`${url}/api/dsh-session-archive/seal-check?ids=session-bare&recheck=1`)
     expect(ok.status).toBe(200)
     expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: true })
+  })
+})
+
+/** A gate service whose ctx carries the C′ activity seam plus stop-dispatch spies. */
+function cGateService(host: FakeHost, activity: readonly { kind: string }[] | Error): {
+  service: ArchiveService
+  waterfall: ReturnType<typeof vi.fn>
+  parallel: ReturnType<typeof vi.fn>
+} {
+  const waterfall = vi.fn(async () => {
+    if (activity instanceof Error) throw activity
+    return activity
+  })
+  const parallel = vi.fn(async () => {})
+  const ctx = fakeContext(host) as Record<string, unknown>
+  ctx.waterfall = waterfall
+  ctx.parallel = parallel
+  ctx.logger = { warn: () => {} }
+  return { service: new ArchiveService(ctx as never, { dshHome: host.home }), waterfall, parallel }
+}
+
+describe("C′ 归档即停轮 at the archive gate (加固A/B, 2026-11-19 裁定)", () => {
+  it('a fresh-green DONE archive with turn-only activity orders the stop with the write', async () => {
+    // Given the endorsed-green session and a turn-only activity waterfall
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    // When the operator archives it through the gate
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
+    // Then 加固B saw the fresh sentinel (DONE → stopTurn) and 加固A confirmed
+    // the turn family alone — the registry archives with stopActivity and
+    // issues the stop itself, so no second dispatch fires.
+    expect(waterfall).toHaveBeenCalledWith('workspace/session-activity', { sessionId: 'session-green' }, expect.any(Function))
+    expect(archiveSpy).toHaveBeenCalledWith('session-green', { stopActivity: true })
+    expect(parallel).not.toHaveBeenCalled()
+    expect(host.registry.archivedSessionIds).toEqual(['session-green'])
+  })
+
+  it('a NEUTRAL green archive never orders a stop (no fresh sentinel)', async () => {
+    // Given the neutral session over the same turn-only waterfall
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    // When the operator archives it through the gate
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-neutral'], actor: 'manual' })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-neutral', status: 'ok' }])
+    // Then 加固B never even asks: green-for-archiving ≠ fresh sentinel, so
+    // the pre-C′ plain path runs verbatim (one-arg call + manual dispatch).
+    expect(waterfall).not.toHaveBeenCalled()
+    expect(archiveSpy).toHaveBeenCalledWith('session-neutral')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-neutral' })
+  })
+
+  it('a stale pass-through archive never orders a stop (the conversation resumed)', async () => {
+    // Given the stale session over the same turn-only waterfall
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    // When the operator archives it through the gate
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'], actor: 'manual' })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-stale', status: 'ok' }])
+    // Then the stale tier carries no fresh sentinel: no activity query, plain path.
+    expect(waterfall).not.toHaveBeenCalled()
+    expect(archiveSpy).toHaveBeenCalledWith('session-stale')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-stale' })
+    expect(service.ledgerSnapshot().entries['session-stale']?.seal).toBe('stale')
+  })
+
+  it('a forced archive never orders a stop (the human stop channel stays the native dialog)', async () => {
+    // Given the true-red session forced with a real reason
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const response = await post(url, '/api/dsh-session-archive/archive', {
+      ids: ['session-red'],
+      actor: 'manual',
+      force: true,
+      reason: '板行[x] git 收口证据，任务书授权强归',
+    })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-red', status: 'ok' }])
+    // Then force overrides the seal but not 加固B: stopTurn stays false.
+    expect(waterfall).not.toHaveBeenCalled()
+    expect(archiveSpy).toHaveBeenCalledWith('session-red')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-red' })
+  })
+
+  it('a running job beside the turn degrades the stop-turn archive to the plain path (加固A)', async () => {
+    // Given the green session whose activity lists a job next to the turn
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }, { kind: 'job' }])
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    // When the operator archives it through the gate
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
+    // Then the query ran, the job family refused the stop, and the plain
+    // path archived exactly as before the ruling.
+    expect(waterfall).toHaveBeenCalled()
+    expect(archiveSpy).toHaveBeenCalledWith('session-green')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-green' })
+  })
+
+  it('a failed activity query degrades the stop-turn archive to the plain path (加固A fail-closed)', async () => {
+    // Given the green session over a throwing waterfall
+    const host = gateHost()
+    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
+    const { service, waterfall, parallel } = cGateService(host, new Error('waterfall exploded'))
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    // When the operator archives it through the gate
+    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
+    expect(response.status).toBe(200)
+    expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
+    // Then a failed query answers false — toward today's behaviour, never
+    // toward a wider stop — and the plain path archives.
+    expect(waterfall).toHaveBeenCalled()
+    expect(archiveSpy).toHaveBeenCalledWith('session-green')
+    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-green' })
   })
 })

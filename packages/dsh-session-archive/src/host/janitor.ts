@@ -42,7 +42,7 @@ import {
   type LedgerEntry,
   type LedgerSource,
 } from './ledger.ts'
-import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, type AnalyzeSealOptions } from './seal.ts'
+import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, sealRefOf, type AnalyzeSealOptions } from './seal.ts'
 import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
@@ -825,6 +825,16 @@ export class ArchiveService {
         let entrySource: LedgerSource = source
         let entryReason: string | undefined
         let entrySeal: string | undefined
+        // C′ 归档即停轮 (2026-11-19 裁定, 加固B): only a **fresh-green** seal —
+        // DONE (endorsement rechecked green just now) or N_A, both a
+        // last-turn sentinel the gate re-read — may order the archive with
+        // `stopActivity`, so an in-turn self-archive lands and its own turn
+        // stops after the write. Force overrides the seal but not this
+        // decision (the human channel for stopping a live turn stays the
+        // native stop-and-archive dialog); NEUTRAL/LEGACY are green for
+        // archiving but carry no fresh sentinel, and the stale tier means
+        // the conversation resumed after the save — neither may stop a turn.
+        let stopTurn = false
         if (gate !== undefined) {
           // recheck (archive-seal-falsered-1116 段2): this REST gate decides at
           // click time, so a memoized no-endorsement red is re-probed instead
@@ -838,20 +848,23 @@ export class ArchiveService {
             entrySeal = sealMarker(seal)
           } else if (isGreenSeal(seal.verdict)) {
             // Green tier: archives exactly as before — no seal field, source manual.
+            stopTurn = seal.verdict === 'DONE' || seal.verdict === 'N_A'
           } else if (isStaleSeal(seal)) {
             // Stale tier (裁定①): pass through with the pinned marker.
             entrySeal = 'stale'
           } else {
-            // True red (UNSEALED) and UNKNOWN: refuse this id with its grouping.
-            results.push({ id, status: 'skipped', reason: 'seal-required', seal: { verdict: seal.verdict, detail: seal.detail } })
+            // True red (UNSEALED) and UNKNOWN: refuse this id with its
+            // grouping — the receipt carries what to fix (seal-remedy-1119).
+            results.push({ id, status: 'skipped', reason: 'seal-required', seal: sealRefOf(seal) })
             continue
           }
         }
         this.busy.add(id)
         try {
           // The registry records the harness's native id spelling; rows and
-          // ledger keys stay canonical.
-          await archiveSession(this.ctx, state.nativeId ?? id)
+          // ledger keys stay canonical. `stopTurn` reaches the wrapper's 加固A
+          // activity check (turn family alone) before any stop is ordered.
+          await archiveSession(this.ctx, state.nativeId ?? id, { stopTurn })
           this.ledger.entries[id] = {
             archivedAt: now,
             source: entrySource,

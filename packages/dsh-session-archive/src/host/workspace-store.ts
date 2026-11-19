@@ -65,16 +65,71 @@ export async function unarchiveSessions(registry: unknown, ids: readonly string[
 }
 
 /**
+ * Caller choices for {@link archiveSession} (C′ 归档即停轮, 2026-11-19 裁定).
+ */
+export interface ArchiveSessionCallOptions {
+  /**
+   * Order the archive with the registry's `stopActivity` — the archive set
+   * is written first, then the native `workspace/session-stop` dispatches —
+   * so an archive issued from inside a running turn can land at all (the
+   * plain verb refuses a running turn: the 回合并归档死结 this ruling closes).
+   * 加固A: the stop is taken only when the activity waterfall reports the
+   * `turn` family alone; any other running family (job / subagent /
+   * schedule / probe), an empty list (nothing running — the plain path
+   * archives freely anyway) or a failed query falls back to the plain
+   * archive, whose own activity check refuses exactly as before.
+   */
+  readonly stopTurn?: boolean
+}
+
+/**
+ * 加固A (C′, ruling 2026-11-19): whether `workspace/session-activity`
+ * reports the `turn` family and nothing else. A failed query answers
+ * `false` — the caller falls back to the plain archive, whose own check
+ * decides (fail-closed toward today's behaviour, never toward a wider stop).
+ * The `kind` union reads through this package's view of the harness map
+ * (providers merge their keys from packages this plugin does not compile
+ * against), so the structural string read is the wire shape that matters.
+ */
+async function turnFamilyAlone(ctx: Context, id: string): Promise<boolean> {
+  try {
+    const activity: readonly { readonly kind: string }[] = await ctx.waterfall(
+      'workspace/session-activity',
+      { sessionId: id as SessionId },
+      () => Promise.resolve([]),
+    )
+    return activity.length > 0 && activity.every((entry) => entry.kind === 'turn')
+  } catch (error: unknown) {
+    ctx.logger?.warn?.(`workspace: session-activity query for '${id}' failed: ${String(error)} — falling back to plain archive`)
+    return false
+  }
+}
+
+/**
  * Archive one session through the public verb. Idempotent for already
  * archived ids; throws when the session does not exist live or in
- * persistence.
+ * persistence. With {@link ArchiveSessionCallOptions.stopTurn} and a
+ * turn-only activity answer, the archive is ordered with `stopActivity`
+ * (C′) and the registry issues the stop itself — see the option for the
+ * 加固A fallback rules.
  */
-export async function archiveSession(ctx: Context, id: string): Promise<void> {
+export async function archiveSession(ctx: Context, id: string, options: ArchiveSessionCallOptions = {}): Promise<void> {
   const registry = ctx.workspaceRegistry as unknown as {
-    archiveSession?(sessionId: string): Promise<void>
+    archiveSession?(sessionId: string, options?: { readonly stopActivity?: boolean }): Promise<void>
   }
   if (typeof registry?.archiveSession !== 'function') {
     throw new Error('workspace registry does not expose archiveSession')
+  }
+  const stopTurn = options.stopTurn === true && (await turnFamilyAlone(ctx, id))
+  if (stopTurn) {
+    // The registry writes the archive set first, then dispatches
+    // `workspace/session-stop` itself (stopSessionActivity — the same event
+    // this wrapper's manual dispatch below would send), so the manual
+    // dispatch is skipped: one stop, issued after durability, provider
+    // failures logged without undoing the write — identical to the native
+    // stop-and-archive confirm's ordering.
+    await registry.archiveSession(id, { stopActivity: true })
+    return
   }
   await registry.archiveSession(id)
   // The registry dispatches `workspace/session-stop` only for archives ordered

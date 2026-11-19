@@ -289,7 +289,7 @@ describe('computeSealInWorker (default off-loop path)', () => {
     const host = createFakeHost()
     writeTranscript(host, 'session-worker', [sessionRoot('session-worker', repo.dir), userMsg('收口'), assistantMsg(endorsedDone(repo))])
     const result = await computeSealInWorker('session-worker', dirOf(host, 'session-worker'))
-    expect(result).toEqual({ id: 'session-worker', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-worker', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
   }, 20_000)
 
   it('operator gets the transcript-not-found UNKNOWN when the worker receives no dir', async () => {
