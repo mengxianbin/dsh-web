@@ -597,7 +597,7 @@ export function classifyGitRunError(error: unknown): { cause: GitRunCause; detai
  * command, the repo, and the stderr tail — and success still reads the plain
  * output string (callers only ever needed "did it answer / what did it say").
  */
-function gitRun(repo: string, args: readonly string[]): GitRunResult {
+function gitRun(repo: string, args: readonly string[], silent = false): GitRunResult {
   try {
     return {
       ok: true,
@@ -610,9 +610,43 @@ function gitRun(repo: string, args: readonly string[]): GitRunResult {
     }
   } catch (error) {
     const { cause, detail } = classifyGitRunError(error)
-    console.warn(`[seal-git] ${cause}: git ${args.join(' ')} (repo=${repo}) — ${detail}`)
+    // silent =批量化快路的预取探针（archive-seal-gitprobe-1117）：它失败后立即
+    // 落回逐 hash 原路，判级由原路的探针决定 —— 快路失败不影响判级就不该出告警
+    // （告警一律归「探针记录」原路，seal-recheck.spec 的 6-warn 行文断言不受快路干扰）。
+    if (!silent) console.warn(`[seal-git] ${cause}: git ${args.join(' ')} (repo=${repo}) — ${detail}`)
     return { ok: false, cause, detail }
   }
+}
+
+/**
+ * Batched existence probe (archive-seal-gitprobe-1117 ③ 批量化): one
+ * `cat-file --batch-check` answers for **every** hash in a single git spawn —
+ * present hashes echo `<oid> commit <size>`, absent ones echo their input with
+ * a trailing ` missing` (exit 0 either way, so absence is data here, not a
+ * probe failure). Returns `null` when git itself could not answer (spawn /
+ * timeout / non-zero exit / unexpected line count): the caller then falls back
+ * to the per-hash `cat-file -e`, which carries the canonical `[seal-git]` warn
+ * — a batch failure must never swallow the failure log (falsered-1116 段1).
+ */
+function batchPresence(repo: string, hashes: readonly string[]): Map<string, boolean> | null {
+  const input = `${hashes.map((hash) => `${hash}^{commit}`).join('\n')}\n`
+  let out: string
+  try {
+    out = execFileSync('git', ['-C', repo, 'cat-file', '--batch-check'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 10_000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      input,
+    })
+  } catch {
+    return null
+  }
+  const lines = out.split('\n').filter((line) => line !== '')
+  if (lines.length !== hashes.length) return null
+  const presence = new Map<string, boolean>()
+  hashes.forEach((hash, index) => presence.set(hash, / commit \d+$/.test(lines[index] ?? '')))
+  return presence
 }
 
 /**
@@ -714,6 +748,15 @@ function checkEndorsement(message: string, transcript: string): EndorsementCheck
     if (hashes.length === 0) return { holds: false, probeFailed: false }
   }
   const repos = repoCandidates(transcript)
+  // archive-seal-gitprobe-1117 ③ 批量化快路: ≥2 hash 才走（1 个 hash 无批可言，
+  // 且 seal-recheck.spec 的「恰好 6 条 `git cat-file -e` warn」钉死单 hash 原文）。
+  // 快路只做「全绿短路」：任何非绿 outcome（批命令失败 / 某 hash 无仓可归 /
+  // 任一组 count>0 / 输出解析失败）都返回 null，静默落回下面逐 hash 原路 ——
+  // warn 行文、probeFailed latch、当场重试逐字节同构，由原路兜底。
+  if (hashes.length >= 2) {
+    const fast = checkEndorsementBatched(hashes, repos)
+    if (fast !== null) return fast
+  }
   let probeFailed = false
   for (const hash of hashes) {
     let home: string | undefined
@@ -737,4 +780,61 @@ function checkEndorsement(message: string, transcript: string): EndorsementCheck
     if (refs.length === 0) return { holds: false, probeFailed }
   }
   return { holds: true, probeFailed }
+}
+
+/**
+ * Green-only batched fast path (archive-seal-gitprobe-1117 ③ 批量化).
+ *
+ * One `cat-file --batch-check` per candidate repo homes every still-pending
+ * hash in a single spawn (stdin carries all `<hash>^{commit}` lines), then one
+ * `rev-list --count <hashes…> --not --remotes` per home repo proves
+ * containment for the whole group — set-equivalent to the legacy per-hash
+ * `branch -r --contains`: count==0 ⟺ every hash ∈ reach(refs/remotes) ⟺ each
+ * `branch -r --contains` list non-empty (m-note 2026-11-19 实测: 5 已推 hash
+ * → 0; 本地未推 commit → 1).
+ *
+ * Returns `{holds: true, probeFailed: false}` **only** when the whole judgment
+ * is genuinely green. Every other outcome — batch spawn failure, a hash no
+ * candidate repo holds, any group with count>0, unparseable output — returns
+ * `null` so {@link checkEndorsement} re-runs the untouched legacy per-hash
+ * probes: warn 行文、`probeFailed` latch 与 falsered-1116 当场重试 then stay
+ * byte-identical by construction (e.g. a cross-repo hash latches `probeFailed`
+ * through the legacy `cat-file -e` miss, which a green-only fast path never
+ * needs to replicate). Never warns itself — every `[seal-git]` line comes from
+ * the legacy probes of record, so the exactly-6-warn assertion cannot see this
+ * path. Cost on the green path: 1 batch-check + 1 rev-list per home repo
+ * regardless of hash count (was: up to 3N `cat-file -e` + N `branch --contains`).
+ */
+function checkEndorsementBatched(hashes: readonly string[], repos: readonly string[]): EndorsementCheck | null {
+  const homes = new Map<string, string>()
+  let pending = [...hashes]
+  for (const repo of repos) {
+    if (pending.length === 0) break
+    const presence = batchPresence(repo, pending)
+    if (presence === null) return null
+    const still: string[] = []
+    for (const hash of pending) {
+      if (presence.get(hash) === true) homes.set(hash, repo)
+      else still.push(hash)
+    }
+    pending = still
+  }
+  // 某 hash 无仓可归 → 落回原路（原路逐仓 -e 留 [seal-git] warn 并 latch probeFailed → 当场重试）。
+  if (pending.length > 0) return null
+  const groups = new Map<string, string[]>()
+  for (const [hash, home] of homes) {
+    const group = groups.get(home)
+    if (group === undefined) groups.set(home, [hash])
+    else group.push(hash)
+  }
+  for (const [home, group] of groups) {
+    const probe = gitRun(home, ['rev-list', '--count', ...group, '--not', '--remotes'], true)
+    if (!probe.ok) return null
+    const count = Number.parseInt(probe.out.trim(), 10)
+    if (!Number.isFinite(count)) return null
+    // count>0 = 有 hash 不在任何 remote-tracking ref 内 → 不在快路下判红：
+    // 落回原路拿到逐仓 -e 的 latch / 干净阴性语义与重试口径（不减重试）。
+    if (count > 0) return null
+  }
+  return { holds: true, probeFailed: false }
 }
