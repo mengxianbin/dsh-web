@@ -18,8 +18,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { closeSync, mkdirSync, openSync, readSync, statSync, unlinkSync, writeSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SubprocessHandle, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { buildFrame, markerFor, parseFrame, type FrameMarker, type FrameOutcome } from './protocol.ts'
@@ -47,6 +47,18 @@ const POLL_INTERVAL_MS = 15
 
 /** How long a freshly spawned shell gets to answer its startup handshake. */
 const HANDSHAKE_TIMEOUT_MS = 15_000
+
+/** How long one spawn waits for its ledger line before reporting the pid unavailable. */
+const SHELL_PID_TIMEOUT_MS = 1000
+
+/** Poll cadence while waiting for the ledger line of the spawn in flight. */
+const SHELL_PID_POLL_MS = 15
+
+/** Age past which a spawn lock is abandoned (its holder died mid-section). */
+const SPAWN_LOCK_STALE_MS = 10_000
+
+/** How long one spawn may wait for the cross-process lock before proceeding unlocked. */
+const SPAWN_LOCK_WAIT_MS = 2000
 
 /** Exit status reported for a call the tool itself gave up on. */
 export const TIMEOUT_EXIT_CODE = 124
@@ -110,6 +122,179 @@ export function shellTempDir(): string {
   return temp
 }
 
+/**
+ * Where the subprocess seam appends its observational spawn ledger.
+ *
+ * The registry reads that ledger to learn each shell's tree-root pid: the
+ * shared handle type has no pid (removed from the seam on 2026-08-28), while
+ * the ledger's `runner` field records the direct child the host spawned — the
+ * three-piece root whose parent is the host (verified live 2026-11-19:
+ * `node.exe` → `bash.exe` + `conhost.exe`). Resolution follows the provider's
+ * own order minus the layered data-root config file (best effort: a home
+ * relocated only through that layer reads as missing here and degrades to
+ * pid -1, never a throw).
+ * @returns the absolute ledger path.
+ */
+function subprocessLedgerPath(): string {
+  const override = process.env.DSH_SUBPROCESS_LEDGER
+  if (override !== undefined && override.trim() !== '') return override.trim()
+  const home = process.env.DSH_HOME
+  if (home !== undefined && home.trim() !== '') return join(home.trim(), 'subprocess-ledger.jsonl')
+  return join(homedir(), '.dsh', 'subprocess-ledger.jsonl')
+}
+
+/** One held cross-process spawn lock, or the unlocked stand-in when none was taken. */
+interface SpawnLock {
+  /** Release the lock; idempotent, never throws. */
+  release(): void
+}
+
+/** The stand-in returned when the lock could not be taken: releasing it does nothing. */
+const UNLOCKED_SPAWN_LOCK: SpawnLock = {
+  release(): void {
+    // Nothing was taken, so nothing can be released.
+  },
+}
+
+/**
+ * Take the cross-process spawn lock, so this spawn's ledger line cannot be
+ * interleaved with another host's shell spawn between the offset read and the
+ * tail read. A lock older than {@link SPAWN_LOCK_STALE_MS} is stolen (its
+ * holder died mid-section); a lock that never frees within the wait degrades
+ * to the unlocked stand-in, because the ledger read is best-effort by contract
+ * and a shell must never fail to start over bookkeeping.
+ * @param lockPath - the lock file next to the ledger.
+ * @returns the held lock.
+ */
+async function acquireSpawnLock(lockPath: string): Promise<SpawnLock> {
+  const deadline = Date.now() + SPAWN_LOCK_WAIT_MS
+  for (;;) {
+    try {
+      const fd = openSync(lockPath, 'wx')
+      try {
+        writeSync(fd, String(process.pid))
+      } finally {
+        closeSync(fd)
+      }
+      let released = false
+      return {
+        release: (): void => {
+          if (released) return
+          released = true
+          try {
+            unlinkSync(lockPath)
+          } catch {
+            // Already stolen by a stale-age reclaim or removed by cleanup.
+          }
+        },
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return UNLOCKED_SPAWN_LOCK
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > SPAWN_LOCK_STALE_MS) {
+          unlinkSync(lockPath)
+          continue
+        }
+      } catch {
+        // The lock vanished between attempts: retry immediately.
+      }
+      if (Date.now() > deadline) return UNLOCKED_SPAWN_LOCK
+      await new Promise<void>(resolve => { setTimeout(resolve, SHELL_PID_POLL_MS) })
+    }
+  }
+}
+
+/**
+ * The byte offset this spawn's ledger line must be read from. A missing ledger
+ * counts as offset 0: the provider creates it on first append, and while the
+ * lock is held no other win-bash spawn on this machine can write one.
+ * @param ledgerPath - the seam's ledger file.
+ * @returns the current file size in bytes, or 0 when absent.
+ */
+function ledgerOffset(ledgerPath: string): number {
+  try {
+    return statSync(ledgerPath).size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * Whether the pid names a live process right now.
+ *
+ * The ledger line is written on the runner's spawn event, so the pid is fresh
+ * when it is recorded — but a runner that dies before this read could have had
+ * its pid recycled (observed live 2026-11-19), which would hand a kill-anchor
+ * consumer somebody else's process. Liveness is a floor, not identity: a
+ * recycled-but-live pid passes and is indistinguishable here by design.
+ * @param pid - the candidate tree-root pid.
+ * @returns false only when the pid is provably gone.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+/**
+ * Resolve the tree-root pid of the spawn that starts at `offset`.
+ *
+ * Reads only bytes appended after `offset` and accepts the first `spawn` line
+ * whose `target` equals this spawn's argv[0] exactly: the payload's absolute
+ * bash path is spawned only by this plugin (verified repo-wide 2026-11-19), so
+ * the match is exact rather than heuristic, and the caller holds the spawn
+ * lock across the whole window so another host's shell spawn cannot slip in.
+ * Never throws: a ledger that never delivers (disabled, unwritable, or a
+ * fallback spawn path that records nothing) reports -1 after the timeout, and
+ * the shell itself is unaffected.
+ * @param ledgerPath - the seam's ledger file.
+ * @param offset - byte offset recorded before the spawn.
+ * @param target - this spawn's argv[0], matched exactly.
+ * @returns the live tree-root pid, or -1 when the ledger did not deliver one.
+ */
+async function resolveShellPid(ledgerPath: string, offset: number, target: string): Promise<number> {
+  const deadline = Date.now() + SHELL_PID_TIMEOUT_MS
+  let position = offset
+  let pending = ''
+  const buffer = Buffer.alloc(8 * 1024)
+  for (;;) {
+    let text = pending
+    try {
+      const fd = openSync(ledgerPath, 'r')
+      try {
+        for (;;) {
+          const read = readSync(fd, buffer, 0, buffer.length, position)
+          if (read <= 0) break
+          position += read
+          text += buffer.toString('utf8', 0, read)
+        }
+      } finally {
+        closeSync(fd)
+      }
+    } catch {
+      // Ledger absent so far: wait for the provider to create it.
+    }
+    const lines = text.split('\n')
+    pending = lines.pop() ?? ''
+    for (const line of lines) {
+      if (!line.includes('"event":"spawn"')) continue
+      let record: { readonly runner?: unknown, readonly target?: unknown }
+      try {
+        record = JSON.parse(line) as { readonly runner?: unknown, readonly target?: unknown }
+      } catch {
+        continue
+      }
+      if (record.target !== target || typeof record.runner !== 'number') continue
+      return isProcessAlive(record.runner) ? record.runner : -1
+    }
+    if (Date.now() >= deadline) return -1
+    await new Promise<void>(resolve => { setTimeout(resolve, SHELL_PID_POLL_MS) })
+  }
+}
+
 /** One command's complete result, as the tool consumes it. */
 export interface ShellResult {
   /** The command's stdout, bounded to the visible budget. */
@@ -165,6 +350,19 @@ export class ShellUnavailableError extends Error {
 interface LiveShell {
   /** The spawned process handle. */
   readonly handle: SubprocessHandle
+  /**
+   * Epoch ms when this record was constructed — the shell's birth moment,
+   * assigned from the registry's clock in the same object literal as the handle.
+   */
+  readonly born: number
+  /**
+   * Tree-root process id of the shell's three-piece tree (`node runner.js` →
+   * `bash.exe` → `conhost.exe`, parent = the host), or -1 when the seam's
+   * ledger did not deliver a live one. The shared handle type carries no pid —
+   * it was removed from the seam on 2026-08-28 (a95f0b368f) — so this rides
+   * the provider's own spawn ledger instead; see {@link resolveShellPid}.
+   */
+  shellPid: number
   /** Set once the handle's outcome settles, so a dead shell is never reused. */
   exited: boolean
   /**
@@ -190,6 +388,22 @@ interface ShellCursor {
   stdout: number
   /** Bytes of stderr already consumed by earlier calls. */
   stderr: number
+}
+
+/**
+ * One shell as the introspection endpoint reports it: the facts a consumer
+ * needs to tie a live OS process to the session that owns it, without any
+ * handle, stream or mutation escaping the registry.
+ */
+export interface ShellSnapshot {
+  /** Canonical session id of the owning agent, or null when it cannot be read. */
+  readonly sessionId: string | null
+  /** Tree-root process id of the shell's three-piece tree, or -1 when unavailable. */
+  readonly shellPid: number
+  /** Epoch ms when the shell record was constructed. */
+  readonly born: number
+  /** Whether the shell's outcome has already settled. */
+  readonly exited: boolean
 }
 
 /** Budgets and deadline for one {@link ShellRegistry.run} call. */
@@ -338,6 +552,30 @@ export class ShellRegistry {
   }
 
   /**
+   * A read-only view of every shell this registry holds.
+   *
+   * Read-only by construction — one pass over the map, no mutation, no spawn,
+   * nothing that can fail — so the introspection endpoint can answer under any
+   * registry state. An owner whose session id is unreadable reports a null
+   * sessionId instead of throwing: one bad owner must never take the whole
+   * endpoint down.
+   * @returns one entry per held shell, in map order.
+   */
+  snapshot(): ShellSnapshot[] {
+    const snapshots: ShellSnapshot[] = []
+    for (const [owner, shell] of this.shells) {
+      const id = (owner as { session?: { id?: unknown } }).session?.id
+      snapshots.push({
+        sessionId: typeof id === 'string' ? canonicalSessionKey(id) : null,
+        shellPid: shell.shellPid,
+        born: shell.born,
+        exited: shell.exited,
+      })
+    }
+    return snapshots
+  }
+
+  /**
    * Run one command in the owner's persistent shell, starting it on first use.
    * @param owner - the calling agent (the shell lifetime key).
    * @param runtime - absolute shell and payload paths.
@@ -460,26 +698,37 @@ export class ShellRegistry {
     const existing = this.shells.get(owner)
     if (existing !== undefined && !existing.exited) return existing
     if (existing !== undefined) this.shells.delete(owner)
-    const handle = this.subprocess.spawn({
-      argv: shellArgv(runtime),
-      cwd,
-      stdio: {
-        stdin: 'pipe',
-        stdout: { maxBytes: FRAME_WATCH_BYTES, spill: { maxBytes: DEFAULT_SPILL_BYTES } },
-        stderr: { maxBytes: SHELL_STDERR_CAPTURE_BYTES, spill: { maxBytes: DEFAULT_SPILL_BYTES } },
-      },
-      graceMs: GRACE_MS,
-      env: shellEnvironment(runtime, shellTempDir()),
-    })
-    const shell: LiveShell = { handle, exited: false, cursor: { stdout: 0, stderr: 0 }, exitCode: null }
-    const markExited = (outcome: { exitCode: number | null }): void => {
-      shell.exitCode = outcome.exitCode
-      shell.exited = true
+    const argv = shellArgv(runtime)
+    const ledgerPath = subprocessLedgerPath()
+    // The lock spans offset → spawn → tail read so another host's shell spawn
+    // cannot slip its ledger line into this window and lend us its pid.
+    const lock = await acquireSpawnLock(ledgerPath + '.spawn-lock')
+    try {
+      const offset = ledgerOffset(ledgerPath)
+      const handle = this.subprocess.spawn({
+        argv,
+        cwd,
+        stdio: {
+          stdin: 'pipe',
+          stdout: { maxBytes: FRAME_WATCH_BYTES, spill: { maxBytes: DEFAULT_SPILL_BYTES } },
+          stderr: { maxBytes: SHELL_STDERR_CAPTURE_BYTES, spill: { maxBytes: DEFAULT_SPILL_BYTES } },
+        },
+        graceMs: GRACE_MS,
+        env: shellEnvironment(runtime, shellTempDir()),
+      })
+      const shell: LiveShell = { handle, born: this.now(), shellPid: -1, exited: false, cursor: { stdout: 0, stderr: 0 }, exitCode: null }
+      const markExited = (outcome: { exitCode: number | null }): void => {
+        shell.exitCode = outcome.exitCode
+        shell.exited = true
+      }
+      void handle.done.then(markExited, () => { shell.exited = true })
+      this.shells.set(owner, shell)
+      shell.shellPid = await resolveShellPid(ledgerPath, offset, argv[0])
+      await this.handshake(shell, signal)
+      return shell
+    } finally {
+      lock.release()
     }
-    void handle.done.then(markExited, () => { shell.exited = true })
-    this.shells.set(owner, shell)
-    await this.handshake(shell, signal)
-    return shell
   }
 
   /**

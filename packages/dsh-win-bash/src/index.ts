@@ -45,6 +45,7 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 import type {} from '@deepseek-ai/dsh-tools'
 import { Config, resolveConfig, type WinBashConfig, type WinBashConfigInput } from './config.ts'
 import { startLiangShenGate, LIANGSHEN_PRESET_ID, type GateOptions, type GateOutcome } from './gate.ts'
+import { registerShellsIntrospection } from './host/shells-route.ts'
 import { installPwshReplacement } from './pwsh-replacement.ts'
 import { resolveRuntime, type RuntimeReady, type HostPlatform } from './runtime.ts'
 import { ShellRegistry } from './shell.ts'
@@ -193,6 +194,10 @@ export function registerWinBash(ctx: Context, config: WinBashConfig, runtime: Ru
   archiveStop.on('workspace/session-stop', ({ sessionId }) => {
     void shells.disposeSession(String(sessionId), 'the owning session was archived')
   })
+
+  // Read-only introspection for the reaper/duty faces: soft-read, so a host
+  // without the web server mounts exactly as it did before.
+  registerShellsIntrospection(ctx, shells)
 
   if (config.replacePwsh) installPwshReplacement(ctx)
 }
