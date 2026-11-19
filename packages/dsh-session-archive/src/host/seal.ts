@@ -13,9 +13,12 @@
  * 2026-11-14, extending the last-line gate seal-judge-lastline-1106): the
  * sentinel only ever counts in a **last non-empty trimmed line** of an
  * assistant message inside the last turn (turn = the events after the
- * transcript's last `user/message`), scanned newest-first so the newest
- * signal-bearing line decides — the endorsement-line form, isomorphic to
- * the save SKILL's "sentinel line = the completion report's last line".
+ * transcript's last `user/message`) — the endorsement-line form, isomorphic
+ * to the save SKILL's "sentinel line = the completion report's last line".
+ * seal-shadow-1119 (2026-11-19, 用户裁定乙) keeps that scope but collects
+ * every signal line newest-first and lets only a *deciding* signal stop the
+ * scan (N_A / PENDING / an endorsed DONE): a trailing quote or bare
+ * save-trace can no longer shadow an older endorsed sentinel.
  * The decode method follows
  * `content/tech/ai/session-forensics.md` 场景十六: magic-scan the zstd frame
  * headers and decompress frame by frame with `node:zlib`
@@ -35,7 +38,7 @@ import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { zstdDecompressSync } from 'node:zlib'
-import type { SealCheckResult, SealVerdict } from '../core/types.ts'
+import type { SealCheckResult, SealRef, SealVerdict } from '../core/types.ts'
 
 // ---- Vocabulary copied from scripts/dsh/session-sentinel-scan.mjs ----
 
@@ -97,6 +100,36 @@ export function isStaleSeal(result: { readonly verdict: SealVerdict; readonly de
  */
 export function sealMarker(result: { readonly verdict: SealVerdict; readonly detail: string }): string {
   return isStaleSeal(result) ? 'stale' : `${result.verdict}:${result.detail}`
+}
+
+/** The endorsement-line shape save-status.py prints (seal-remedy-1119 receipt). */
+const ENDORSEMENT_SHAPE = 'SAVE_STATUS=DONE repo=<仓路径> commits=n/n pushedBranch=n/n merged=n/n pushedMain=n/n auditCleaned=yes dirty=0 hashes=<h1>,<h2>,…'
+
+/** The paste-one-line remedy for an unsealed turn (seal-remedy-1119 receipt). */
+const PASTE_REMEDY = '末行须原样粘贴 save-status.py 输出的整行背书（禁引用、禁改写、禁加尾注）：python scripts/git/save-status.py --hashes <本批hash>，把输出行作为末条助手消息的末行后重试归档'
+
+/** The save-first remedy for a pending turn (seal-remedy-1119 receipt). */
+const SAVE_FIRST_REMEDY = 'save 未完成（PENDING）：先完成 save（清 dirty / 合入 / 推送），重跑 python scripts/git/save-status.py 取 DONE 背书行整行作为末条助手消息末行后重试归档'
+
+/**
+ * The actionable `seal-required` receipt (seal-remedy-1119, 2026-11-19 用户
+ * 裁定甲「回执可执行化」): the machine grouping plus what the gate read
+ * (`lastLine`), the shape the last line must take (`expected`) and the one
+ * command that regenerates it (`remedy`) — a refused session fixes its last
+ * line and retries instead of giving up on a bare detail code. UNKNOWN rows
+ * carry only the grouping: an unreadable transcript is not fixed by
+ * re-pasting a line. Pending rows get the save-first remedy, not the
+ * paste-one (a PENDING sentinel is honestly emitted; the save itself is
+ * what is missing). `SealRef` fields are readonly, so the receipt is built
+ * literally in one pass.
+ */
+export function sealRefOf(result: SealCheckResult): SealRef {
+  const line = result.lastLine !== undefined && result.lastLine !== '' ? { lastLine: result.lastLine } : {}
+  if (result.verdict !== 'UNSEALED') return { verdict: result.verdict, detail: result.detail, ...line }
+  if (result.detail.startsWith(DETAIL.pending)) {
+    return { verdict: result.verdict, detail: result.detail, ...line, remedy: SAVE_FIRST_REMEDY }
+  }
+  return { verdict: result.verdict, detail: result.detail, ...line, expected: ENDORSEMENT_SHAPE, remedy: PASTE_REMEDY }
 }
 
 // ---- Multi-frame zstd decoding (session-forensics.md 场景十六) ----
@@ -188,9 +221,9 @@ function lastLineOf(text: string): string {
 }
 
 /**
- * One direct judgement: the verdict, its detail, and the message whose last
- * line carried the signal (the endorsement recheck reads that message, not
- * whatever happens to be last in the turn).
+ * One judged signal from a last-turn message's last line: the verdict, its
+ * detail, and the message whose last line carried the signal (the endorsement
+ * recheck reads that message, not whatever happens to be last in the turn).
  */
 interface JudgeHit {
   readonly verdict: SealVerdict
@@ -199,34 +232,46 @@ interface JudgeHit {
 }
 
 /**
- * Judge the last turn's assistant messages, newest first; null = no direct
- * signal (caller consults the whole transcript).
+ * Collect **every** signal-bearing last line of the last turn, newest first
+ * (seal-shadow-1119, 2026-11-19 用户裁定乙「读侧遮蔽修复」); the caller then
+ * decides in order instead of letting the newest signal shadow older ones.
  *
  * Last-turn gate (seal-lastturn-1113, 2026-11-14, extends the last-line gate
  * seal-judge-lastline-1106): the search scope is each assistant message's
  * **last non-empty trimmed line** inside the last turn (turn = the events
- * after the transcript's last `user/message`), scanned newest-first so the
- * newest signal-bearing line decides — a save completed earlier in the same
- * turn stays DONE when a trailing message follows (the repeat step the gate
- * used to demand), while a sentinel before the last turn still reads stale.
- * The endorsement-line form, the three-value judgement, the SAVE_TRACE
- * fallback and the caller's WORK_TRACE/LEGACY split keep their logic
- * unchanged, so prose quotes of `SAVE_STATUS=` in a body still never read
- * green (verbatim-same as the scanner's `judge()`, contract C1).
+ * after the transcript's last `user/message`). seal-shadow-1119 keeps that
+ * scope and the newest-first order but drops the "first signal wins
+ * immediately" short-circuit: a trailing line that only *quotes*
+ * `SAVE_STATUS=DONE` (no endorsement tail) or carries a bare save-trace used
+ * to flip a properly endorsed save red — quote form live in session-73d57ef3
+ * (verified 2026-11-19: that sample's real endorsement sits in the previous
+ * turn, which the last-turn gate conservatively excludes, so it stays red;
+ * the in-turn fix is pinned by the seal-lastline quote-shadow tests).
+ * N_A and PENDING still decide
+ * outright; a DONE decides only after its endorsement holds (caller side); a
+ * save-trace line never decides while a sentinel claim exists below it. The
+ * three-value judgement, the endorsement-line form, the SAVE_TRACE fallback
+ * and the caller's WORK_TRACE/LEGACY split keep their logic, so prose quotes
+ * of `SAVE_STATUS=` in a body still never read green by themselves
+ * (verbatim-same as the scanner's `judge()`, contract C1).
+ * @param messages - the last turn's assistant messages, oldest first.
+ * @returns the signal hits, newest first; empty = no direct signal.
  */
-function judge(messages: readonly string[]): JudgeHit | null {
+function judge(messages: readonly string[]): JudgeHit[] {
+  const hits: JudgeHit[] = []
   for (let index = messages.length - 1; index >= 0; index--) {
     const line = lastLineOf(messages[index])
     const lastMatch = [...line.matchAll(new RegExp(SENTINEL, 'g'))].pop()
     if (lastMatch) {
       const value = lastMatch[1]
-      if (value === 'DONE') return { verdict: 'DONE', detail: DETAIL.sentinelOk, message: messages[index] }
-      if (value === 'N_A') return { verdict: 'N_A', detail: DETAIL.noArtifacts, message: messages[index] }
-      return { verdict: 'UNSEALED', detail: DETAIL.pending, message: messages[index] }
+      if (value === 'DONE') hits.push({ verdict: 'DONE', detail: DETAIL.sentinelOk, message: messages[index] })
+      else if (value === 'N_A') hits.push({ verdict: 'N_A', detail: DETAIL.noArtifacts, message: messages[index] })
+      else hits.push({ verdict: 'UNSEALED', detail: DETAIL.pending, message: messages[index] })
+      continue
     }
-    if (SAVE_TRACE.test(line)) return { verdict: 'UNSEALED', detail: DETAIL.saveTail, message: messages[index] }
+    if (SAVE_TRACE.test(line)) hits.push({ verdict: 'UNSEALED', detail: DETAIL.saveTail, message: messages[index] })
   }
-  return null
+  return hits
 }
 
 // ---- Analysis ----
@@ -423,20 +468,36 @@ function deriveSeal(
   // failure did before the memo existed.
   const lastTs = stamp?.mtimeMs ?? 0
   const legacy = lastTs > 0 && lastTs < SENTINEL_ERA_START
-  const legacyRow = (): SealCheckResult => ({ id, verdict: 'LEGACY', detail: DETAIL.legacy })
+  // The wire last line (seal-remedy-1119): what the gate read as the turn's
+  // final line — the thing a `seal-required` receipt tells the caller to fix.
+  const lastLine = lastLineOf(turnMessages[turnMessages.length - 1] ?? '').slice(0, 300)
+  const legacyRow = (): SealCheckResult => ({ id, verdict: 'LEGACY', detail: DETAIL.legacy, lastLine })
 
-  const direct = judge(turnMessages)
-  if (direct !== null) {
-    if (direct.verdict === 'UNSEALED' && legacy && !direct.detail.startsWith(DETAIL.pending)) return legacyRow()
-    // Post-verdict endorsement downgrade (seal-noendorse-green-1106): a DONE
-    // verdict whose endorsement recheck fails leaves the green tier, so a bare
-    // `SAVE_STATUS=DONE` (AI self-assessment without save-status.py backing)
-    // goes dark at the light and turns the archive gate into a confirmation.
-    // N_A never runs the recheck (zero-output exemption, scanner --recheck 同口径).
-    // The recheck reads the message that carried the signal — under the
-    // last-turn gate it may sit earlier in the turn than the final message.
-    if (direct.verdict === 'DONE') {
-      let endorsement = checkEndorsement(direct.message, text)
+  // The decision pass (seal-shadow-1119, 乙): hits arrive newest-first and
+  // the first **deciding** signal wins — N_A and PENDING decide outright; a
+  // DONE decides only once its endorsement recheck holds (a parse-failed
+  // DONE, e.g. an inline quote without `commits=`, is remembered and the
+  // scan continues to older messages); a bare save-trace line never decides
+  // while a sentinel claim exists below it. Fail-closed on exhaustion: the
+  // newest failed DONE reads `no-endorsement`, else the newest save-trace
+  // reads `save-tail-no-sentinel` — a turn with no signal at all still
+  // falls through to the whole-transcript grouping below, unchanged.
+  const hits = judge(turnMessages)
+  let decided: JudgeHit | undefined
+  let failedDone: JudgeHit | undefined
+  let saveTail: JudgeHit | undefined
+  for (const hit of hits) {
+    if (hit.verdict === 'N_A') { decided = hit; break }
+    if (hit.detail === DETAIL.pending) { decided = hit; break }
+    if (hit.verdict === 'DONE') {
+      // Post-verdict endorsement downgrade (seal-noendorse-green-1106): a DONE
+      // whose endorsement recheck fails leaves the green tier, so a bare
+      // `SAVE_STATUS=DONE` (AI self-assessment without save-status.py backing)
+      // goes dark at the light and turns the archive gate into a confirmation.
+      // N_A never runs the recheck (zero-output exemption, scanner --recheck 同口径).
+      // The recheck reads the message that carried *this* hit — under the
+      // last-turn gate it may sit earlier in the turn than the final message.
+      let endorsement = checkEndorsement(hit.message, text)
       // archive-seal-falsered-1116 段2b (当场重试一次再判红): a git probe that
       // failed (timeout / spawn / non-zero exit, each logged by gitRun) is not
       // an answer, so the whole recheck reruns once on the spot before the red
@@ -445,27 +506,40 @@ function deriveSeal(
       // the retry costs one extra probe round on the failure path only
       // (板行四问①预批：仅失败路径多一轮 git 探针).
       if (!endorsement.holds && endorsement.probeFailed) {
-        endorsement = checkEndorsement(direct.message, text)
+        endorsement = checkEndorsement(hit.message, text)
       }
-      if (!endorsement.holds) {
-        return { id, verdict: 'UNSEALED', detail: DETAIL.noEndorsement }
-      }
+      if (endorsement.holds) { decided = hit; break }
+      // The downgrade (seal-noendorse-green-1106) happens here, not at return:
+      // a failed DONE's *decision* is UNSEALED/no-endorsement even though the
+      // raw signal read DONE/sentinel-ok — remembering the raw hit would
+      // re-green the very red this branch exists to produce.
+      failedDone ??= { verdict: 'UNSEALED', detail: DETAIL.noEndorsement, message: hit.message }
+      continue
     }
-    return { id, verdict: direct.verdict, detail: direct.detail }
+    saveTail ??= hit
+  }
+  decided ??= failedDone ?? saveTail
+  if (decided !== undefined) {
+    // An unsealed read of a pre-era file default-passes as LEGACY — every
+    // UNSEALED decision except pending, exactly as the cut always applied
+    // (no-endorsement joins that set uniformly; a pre-era file carrying an
+    // unendorsed DONE claim is the same legacy default-pass).
+    if (decided.verdict === 'UNSEALED' && legacy && !decided.detail.startsWith(DETAIL.pending)) return legacyRow()
+    return { id, verdict: decided.verdict, detail: decided.detail, lastLine }
   }
   if (saveTraceAnywhere || earlierSentinel) {
     if (legacy) return legacyRow()
     if (earlierSentinel) {
       // Stale tier: a save completed earlier, the conversation continued after it.
-      return { id, verdict: 'UNSEALED', detail: DETAIL.stale, followUpCount: chatCount - chatAtSentinel }
+      return { id, verdict: 'UNSEALED', detail: DETAIL.stale, followUpCount: chatCount - chatAtSentinel, lastLine }
     }
-    return { id, verdict: 'UNSEALED', detail: DETAIL.saveTrace }
+    return { id, verdict: 'UNSEALED', detail: DETAIL.saveTrace, lastLine }
   }
   // 补法闸 (2026-11-05): no sentinel, no save trace, but the transcript shows
   // real work (commit hash / board backfill) — UNSEALED instead of the
   // default-pass NEUTRAL, so the gate never silently swallows it.
-  if (WORK_TRACE.test(text)) return { id, verdict: 'UNSEALED', detail: DETAIL.workTrace }
-  return { id, verdict: 'NEUTRAL', detail: DETAIL.noSaveTrace }
+  if (WORK_TRACE.test(text)) return { id, verdict: 'UNSEALED', detail: DETAIL.workTrace, lastLine }
+  return { id, verdict: 'NEUTRAL', detail: DETAIL.noSaveTrace, lastLine }
 }
 
 // ---- Endorsement recheck (seal-noendorse-green-1106, save 可靠性批3 ②) ----

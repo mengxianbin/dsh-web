@@ -89,7 +89,7 @@ describe('gitRun 失败留痕（archive-seal-falsered-1116 段1）', () => {
       const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
 
       // Then the red still fails closed…
-      expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+      expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
       // …and every failed probe left a `[seal-git]` line naming the cause,
       // the exact command, the repo, and the git stderr tail.
       const lines = warn.mock.calls.map((call) => String(call[0] ?? '')).filter((line) => line.startsWith('[seal-git]'))
@@ -114,11 +114,11 @@ describe('no-endorsement 不随转录戳粘滞（archive-seal-falsered-1116 段2
       assistantMsg(endorsedDone(1, [repo.hash])),
     ])
     const dir = dirOf(host, 'session-a')
-    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
     expect(sealMemoStats()).toEqual({ hits: 0, misses: 1, size: 1 })
 
     // When the same unchanged transcript is read WITHOUT recheck (the lamp-pull path)
-    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
     // Then it still serves the memo — lamp checks keep their zero-cost window (四问②：灯查频度与成本不变)
     expect(sealMemoStats()).toEqual({ hits: 1, misses: 1, size: 1 })
 
@@ -128,11 +128,11 @@ describe('no-endorsement 不随转录戳粘滞（archive-seal-falsered-1116 段2
     // When the click gate asks with recheck
     const rechecked = analyzeSeal('session-a', dir, { recheck: true })
     // Then the memoized red is re-derived (git re-probed) and the verdict is green — 判红不粘滞
-    expect(rechecked).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(rechecked).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(sealMemoStats()).toEqual({ hits: 1, misses: 2, size: 1 })
 
     // And the healed green refills the memo for the lamp path
-    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(sealMemoStats()).toEqual({ hits: 2, misses: 2, size: 1 })
   })
 
@@ -141,10 +141,10 @@ describe('no-endorsement 不随转录戳粘滞（archive-seal-falsered-1116 段2
     const host = createFakeHost()
     writeTranscript(host, 'session-a', [userMsg('hi'), assistantMsg('还有两步没收口。\n\nSAVE_STATUS=PENDING(2)')])
     const dir = dirOf(host, 'session-a')
-    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending' })
+    expect(analyzeSeal('session-a', dir)).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: expect.any(String) })
 
     // When the click gate asks with recheck
-    expect(analyzeSeal('session-a', dir, { recheck: true })).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending' })
+    expect(analyzeSeal('session-a', dir, { recheck: true })).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: expect.any(String) })
 
     // Then no re-probe happened: the stamp-keyed verdict still serves (重探只在判红=git 红时触发)
     expect(sealMemoStats()).toEqual({ hits: 1, misses: 1, size: 1 })
@@ -166,7 +166,7 @@ describe('git 探针失败当场重试一次（archive-seal-falsered-1116 段2b�
       const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
 
       // Then it still fails closed
-      expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+      expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
       // And the probe round ran twice: 3 repo candidates × 1 hash × 2 passes
       // (the first pass failed → 当场重试一次) = 6 logged failures — a single
       // pass would log exactly 3.

@@ -94,7 +94,7 @@ describe('ArchiveService.sealCheck — targeted read behind the six-value groupi
     const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
     expect(dirIndex.scans).toBe(0)
     expect(results).toEqual([
-      { id: 'session-green', verdict: 'N_A', detail: 'no-artifacts-by-design' },
+      { id: 'session-green', verdict: 'N_A', detail: 'no-artifacts-by-design', lastLine: expect.any(String) },
       { id: 'session-ghost', verdict: 'UNKNOWN', detail: 'transcript-not-found' },
     ])
 

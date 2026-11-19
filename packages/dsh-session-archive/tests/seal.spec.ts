@@ -100,7 +100,7 @@ describe('seal grouping — green tier', () => {
       assistantMsg(endorsedDone(1, [repo.hash])),
     ])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -117,7 +117,7 @@ describe('seal grouping — green tier', () => {
     const host = createFakeHost()
     withTranscript(host, 'session-a', [userMsg('hello'), assistantMsg(CLEAN_REPLY)])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'NEUTRAL', detail: 'no-save-trace' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'NEUTRAL', detail: 'no-save-trace', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -128,7 +128,7 @@ describe('seal grouping — green tier', () => {
       assistantMsg('落点头 = `03a153a0`（修 batch），任务回填进 tasks.md#some-anchor。'),
     ])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'work-trace-no-sentinel' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'work-trace-no-sentinel', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(false)
   })
 })
@@ -138,14 +138,14 @@ describe('seal grouping — unsealed tier', () => {
     const host = createFakeHost()
     withTranscript(host, 'session-a', [assistantMsg(SAVE_PENDING)])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: expect.any(String) })
   })
 
   it('save flow stopped in the last assistant message reads save-tail-no-sentinel', () => {
     const host = createFakeHost()
     withTranscript(host, 'session-a', [userMsg('保存'), assistantMsg(SAVE_TAIL)])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'save-tail-no-sentinel' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: expect.any(String) })
   })
 
   it('save traces earlier but no sentinel anywhere reads save-trace-no-sentinel', () => {
@@ -156,7 +156,7 @@ describe('seal grouping — unsealed tier', () => {
       assistantMsg(CLEAN_REPLY),
     ])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'save-trace-no-sentinel' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'save-trace-no-sentinel', lastLine: expect.any(String) })
   })
 
   it('sentinel in an earlier message with a continued conversation reads sentinel-stale with followUpCount', () => {
@@ -169,7 +169,7 @@ describe('seal grouping — unsealed tier', () => {
     ])
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Chat messages strictly after the sentinel-bearing message = 2.
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-stale', followUpCount: 2 })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'sentinel-stale', followUpCount: 2, lastLine: expect.any(String) })
     expect(isStaleSeal(result)).toBe(true)
     expect(isGreenSeal(result.verdict)).toBe(false)
   })
@@ -180,7 +180,7 @@ describe('seal grouping — legacy cut', () => {
     const host = createFakeHost()
     withTranscript(host, 'session-a', [assistantMsg(SAVE_TAIL)], { mtimeMs: SENTINEL_ERA_START - 86_400_000 })
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'LEGACY', detail: 'legacy-save-no-sentinel' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'LEGACY', detail: 'legacy-save-no-sentinel', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -297,7 +297,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     // When the seal is judged
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then it leaves the green tier with the scanner's no-endorsement reading
-    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(false)
     expect(sealMarker(result)).toBe('UNSEALED:no-endorsement')
   })
@@ -313,7 +313,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     // When the seal is judged, the endorsement recheck finds the hash and its remote ref
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then the DONE verdict stays in the green tier
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -327,7 +327,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     ])
     // When the seal is judged, the endorsement recheck misses the hash
     // Then the endorsement fails and the verdict leaves the green tier
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator gets non-green when one of two endorsed hashes is unreachable', () => {
@@ -340,7 +340,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     ])
     // When the seal is judged, the recheck walks every hash in the message
     // Then the whole endorsement fails
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator gets non-green when commits= names no backticked hash at all', () => {
@@ -351,7 +351,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     ])
     // When the seal is judged, there is nothing to recheck
     // Then it cannot stay green
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator keeps N_A green without any endorsement recheck', () => {
@@ -363,7 +363,7 @@ describe('endorsement recheck — a bare DONE never stays green (seal-noendorse-
     // When the seal is judged, N_A never runs the recheck
     // Then it keeps its green tier
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
-    expect(result).toEqual({ id: 'session-a', verdict: 'N_A', detail: 'no-artifacts-by-design' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'N_A', detail: 'no-artifacts-by-design', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 })
@@ -380,7 +380,7 @@ describe('declared-list endorsement — 核验与声明同源 (seal-declare-veri
     // When the seal is judged, only the declared list is verified
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then the DONE verdict stays green — 清单外散文 hash 一概不核
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -392,7 +392,7 @@ describe('declared-list endorsement — 核验与声明同源 (seal-declare-veri
     ])
     // When the seal is judged, the declared hash fails verification
     // Then the endorsement fails and the verdict leaves the green tier
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator gets non-green when commits= length disagrees with the declared list', () => {
@@ -405,7 +405,7 @@ describe('declared-list endorsement — 核验与声明同源 (seal-declare-veri
     ])
     // When the seal is judged, the list cannot back the claimed commits count
     // Then the endorsement fails (防伪：commits 与清单长度不符仍红)
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator keeps the legacy message-wide scan when the tail declares no list', () => {
@@ -418,7 +418,7 @@ describe('declared-list endorsement — 核验与声明同源 (seal-declare-veri
     ])
     // When the seal is judged, the legacy path still scans the whole message
     // Then the dead prose hash fails the endorsement exactly as before
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 })
 
@@ -435,7 +435,7 @@ describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtic
     // When the seal is judged, the closing backtick is stripped, not hashed
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then the declared list verifies and DONE stays green
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -448,7 +448,7 @@ describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtic
       assistantMsg(`落点头已声明。\n\nSAVE_STATUS=DONE${declaredTail([repo.hash, 'zz'], 2)}\``),
     ])
     // When the seal is judged, the invalid item fails closed — never silently dropped
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 
   it('operator keeps DONE green when list items carry their own backticks', () => {
@@ -463,7 +463,7 @@ describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtic
     // When the seal is judged, each item is stripped then verified
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then DONE stays green — 项级剥离
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -475,7 +475,7 @@ describe('lexical-decoration stripping — 剥首尾反引号 (seal-hash-backtic
     ])
     // When the seal is judged, stripping only repairs formatting, not content
     // Then the dead hash still fails verification (剥离只及排版不及内容)
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 })
 
@@ -495,7 +495,7 @@ describe('in-item truncation — 项内截断 (seal-backtick-miditem-1108)', () 
     // When the seal is judged, each item truncates at its first non-hex char
     const result = analyzeSeal('session-a', dirOf(host, 'session-a'))
     // Then the declared list verifies and DONE stays green (三态：中段粘连)
-    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(result).toEqual({ id: 'session-a', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) })
     expect(isGreenSeal(result.verdict)).toBe(true)
   })
 
@@ -511,6 +511,6 @@ describe('in-item truncation — 项内截断 (seal-backtick-miditem-1108)', () 
       ),
     ])
     // Then the empty truncated item fails closed — never silently dropped
-    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(analyzeSeal('session-a', dirOf(host, 'session-a'))).toEqual({ id: 'session-a', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: expect.any(String) })
   })
 })

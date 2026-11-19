@@ -52,12 +52,33 @@ export interface SealCheckResult {
   readonly detail: string
   /** Chat messages after the last sentinel-bearing message; stale rows only. */
   readonly followUpCount?: number
+  /**
+   * The newest last-turn assistant message's last non-empty line, as the gate
+   * read it (seal-remedy-1119, 2026-11-19). Absent when no transcript could
+   * be decoded far enough to have a last line; truncated for the wire.
+   */
+  readonly lastLine?: string
 }
 
-/** The per-id seal attachment on a `seal-required` skip (contract C2). */
+/**
+ * The per-id seal attachment on a `seal-required` skip (contract C2).
+ *
+ * seal-remedy-1119 (2026-11-19, 甲「回执可执行化」裁定): a refused session
+ * must receive an actionable receipt, not just the machine grouping — what
+ * the gate read (`lastLine`), the shape its last line must take (`expected`)
+ * and the one command that regenerates it (`remedy`) — so the caller can fix
+ * its last line and retry instead of giving up (the receipt leg of C′'s
+ * in-turn self-correction loop).
+ */
 export interface SealRef {
   readonly verdict: SealVerdict
   readonly detail: string
+  /** The last line the gate actually read (the thing to fix). */
+  readonly lastLine?: string
+  /** The endorsement-line shape this verdict requires on the last line. */
+  readonly expected?: string
+  /** One-command remedy: regenerate the line, paste it whole, retry. */
+  readonly remedy?: string
 }
 
 /** One per-session result inside a batch operation response. */

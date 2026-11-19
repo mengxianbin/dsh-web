@@ -240,3 +240,77 @@ describe('seal last-turn gate — seal-lastturn-1113 (extends seal-judge-lastlin
     expect(isGreenSeal(result.verdict)).toBe(false)
   })
 })
+
+describe('quote-shadow fix — seal-shadow-1119 (2026-11-19 用户裁定乙)', () => {
+  it("operator's endorsed save stays DONE when the newest line only quotes SAVE_STATUS=DONE", () => {
+    // Given an endorsed save earlier in the turn and a trailing 对账 reply whose
+    // last line merely quotes `SAVE_STATUS=DONE` with no endorsement tail —
+    // the live sample session-73d57ef3 shape (the quote read no-endorsement
+    // while the real endorsement line sat one message below)
+    const repo = endorsedRepo()
+    const result = seal([
+      sessionRoot('session-a', repo.dir),
+      userMsg('收口'),
+      assistantMsg(endorsedDone(repo)),
+      assistantMsg('对账引用：SAVE_STATUS=DONE（引自上一条，非本轮背书）。'),
+    ])
+    // When the gate scans newest-first but only a *deciding* signal stops it
+    // Then the failed quote is remembered, the scan reaches the endorsed line, and DONE holds
+    expect(result).toMatchObject({ verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it("operator's endorsed save stays DONE when the newest line is a bare save-trace", () => {
+    // Given an endorsed save earlier in the turn and a trailing message whose
+    // last line is only a save-progress trace (no sentinel claim at all)
+    const repo = endorsedRepo()
+    const result = seal([
+      sessionRoot('session-a', repo.dir),
+      userMsg('收口'),
+      assistantMsg(endorsedDone(repo)),
+      assistantMsg(SAVE_TAIL),
+    ])
+    // When the gate walks past the save-trace line (it never decides while a
+    // sentinel claim exists below it)
+    // Then the endorsed DONE below still decides
+    expect(result).toMatchObject({ verdict: 'DONE', detail: 'sentinel-ok' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+
+  it("operator's quote-only turn still fails closed to no-endorsement", () => {
+    // Given a turn whose only signal is an unendorsed SAVE_STATUS=DONE quote
+    // (nothing older to endorse it)
+    const result = seal([userMsg('收口'), assistantMsg('引用收口：SAVE_STATUS=DONE')])
+    // When the scan exhausts every hit with no endorsement holding
+    // Then it fails closed exactly as before — the fix never widens green
+    expect(result).toMatchObject({ verdict: 'UNSEALED', detail: 'no-endorsement' })
+    expect(isGreenSeal(result.verdict)).toBe(false)
+  })
+
+  it("operator's newest PENDING still decides over an older endorsed save", () => {
+    // Given an endorsed save earlier in the turn and a newer honest PENDING
+    const repo = endorsedRepo()
+    const result = seal([
+      sessionRoot('session-a', repo.dir),
+      userMsg('收口'),
+      assistantMsg(endorsedDone(repo)),
+      assistantMsg(PENDING),
+    ])
+    // When the gate scans newest-first, PENDING decides outright (no
+    // endorsement walk) — the shadow fix only un-shadows *failed* signals
+    expect(result).toMatchObject({ verdict: 'UNSEALED', detail: 'sentinel-pending' })
+    expect(isGreenSeal(result.verdict)).toBe(false)
+  })
+
+  it("operator's newest N_A still decides over an older failed DONE quote", () => {
+    // Given an unendorsed DONE quote earlier in the turn and a newer N_A report
+    const result = seal([
+      userMsg('收口'),
+      assistantMsg('草稿引用：SAVE_STATUS=DONE'),
+      assistantMsg(ENDORSED_NA),
+    ])
+    // When the gate scans newest-first, N_A decides outright
+    expect(result).toMatchObject({ verdict: 'N_A', detail: 'no-artifacts-by-design' })
+    expect(isGreenSeal(result.verdict)).toBe(true)
+  })
+})
