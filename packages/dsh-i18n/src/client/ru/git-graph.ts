@@ -19,6 +19,7 @@ export const ru: Record<string, string> = {
   'branch.graph': 'Граф Git',
   'branch.search': 'Поиск веток',
   'chip.aria.branch': 'Ветка',
+  'chip.loading': 'Загрузка…',
   'error.baseRefNotFound': 'Базовой ветки или ревизии не существует.',
   'error.branchAlreadyExists': 'Такая ветка уже существует. Выберите другое имя.',
   'error.branchInOtherWorktree': 'Эта ветка уже используется в другом worktree.',

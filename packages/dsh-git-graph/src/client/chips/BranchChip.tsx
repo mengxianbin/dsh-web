@@ -30,6 +30,9 @@ export type BranchChipProps =
 /** Minimum gap between window-focus git refetches (ms). */
 export const FOCUS_REFRESH_MIN_MS = 5_000
 
+/** Bounded backoff (ms) between retries after a transient repo-status failure; exhaustion settles to the hidden state. */
+export const RETRY_DELAYS_MS = [400, 800, 1_600, 3_200, 5_000]
+
 const SKIN_CENTER_BODY_ATTR = 'data-dsh-skin-center'
 const DARK_THEME_BODY_ATTR = 'data-ds-dark-theme'
 const DSH_BODY_ATTR_PREFIX = 'data-dsh-'
@@ -141,6 +144,10 @@ export function BranchChip(props: BranchChipProps) {
   const [heroRow, setHeroRow] = useState<HTMLElement | null>(null)
   const anchorRef = useRef<HTMLDivElement | null>(null)
   const chipRef = useRef<HTMLDivElement | null>(null)
+  /** Consecutive transient status failures in the current refetch chain. */
+  const retryRef = useRef(0)
+  /** Pending bounded-retry timer, cleared when the refetch chain is torn down. */
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   // Hero-phase placement: the rc.6 shell renders the dock as its own row
   // between the official hero chip row and the composer card. In the blank
@@ -148,7 +155,7 @@ export function BranchChip(props: BranchChipProps) {
   // immediately after the agent-preset seat, matching the official row gap,
   // tokens, and alignment without manual pixel measurement.
   useLayoutEffect(() => {
-    if (!heroSeat || repo === undefined || repo === null) {
+    if (!heroSeat) {
       setHeroRow(null)
       return undefined
     }
@@ -162,7 +169,7 @@ export function BranchChip(props: BranchChipProps) {
     const observer = new MutationObserver(update)
     observer.observe(parent.parentElement ?? parent, { childList: true, subtree: true })
     return () => { observer.disconnect() }
-  }, [heroSeat, repo !== undefined && repo !== null])
+  }, [heroSeat])
 
   // The row ends with an options group that carries `margin-left: auto`, so an
   // appended chip lands at the far right of the selector row. Keep the portaled
@@ -184,10 +191,39 @@ export function BranchChip(props: BranchChipProps) {
 
   const refetch = useCallback(() => {
     let live = true
-    props.repoStatus(sessionId)
-      .then((status) => { if (live) setRepo(status) })
-      .catch(() => { if (live) setRepo(null) })
-    return () => { live = false }
+    const run = (): void => {
+      props.repoStatus(sessionId)
+        .then((status) => {
+          if (!live) return
+          retryRef.current = 0
+          setRepo(status)
+        })
+        .catch(() => {
+          // Transient failure (workspace root not yet published, transport
+          // blip): keep the loading face and retry on a bounded backoff
+          // instead of collapsing to the terminal null that would hide the
+          // chip until an unrelated window focus re-triggers a fetch.
+          if (!live) return
+          const attempt = retryRef.current
+          if (attempt >= RETRY_DELAYS_MS.length) {
+            setRepo(null)
+            return
+          }
+          retryRef.current = attempt + 1
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = undefined
+            if (live) run()
+          }, RETRY_DELAYS_MS[attempt])
+        })
+    }
+    run()
+    return () => {
+      live = false
+      if (retryTimerRef.current !== undefined) {
+        clearTimeout(retryTimerRef.current)
+        retryTimerRef.current = undefined
+      }
+    }
   }, [props.repoStatus, sessionId])
 
   // Blank-session data stays fresh through the initial load, host-pushed
@@ -230,11 +266,15 @@ export function BranchChip(props: BranchChipProps) {
     return () => { live = false }
   }, [heroSeat, branchOpen, props.branches, sessionId])
 
-  // Active sessions intentionally expose no branch-selection control. Loading
-  // and non-repository workspaces likewise render no dead control.
-  if (!heroSeat || repo === undefined || repo === null) return null
+  // Active sessions intentionally expose no branch-selection control, and
+  // non-repository workspaces render no dead control. While the status is
+  // still in flight — or a transient failure is inside its bounded retry
+  // window — the chip shows its loading face instead of vanishing, so a
+  // just-created blank session never reads as "the branch chip is missing".
+  if (!heroSeat || repo === null) return null
 
   const openBranchPopover = (): void => {
+    if (repo === undefined) return
     setBranchOpen(open => !open)
   }
 
@@ -251,12 +291,14 @@ export function BranchChip(props: BranchChipProps) {
         <Chip
           hero={heroSeat}
           icon={<IconBranchOutlineRegular size={14} />}
-          label={repo.branch === '' ? props.t('branch.detached') : repo.branch}
+          label={repo === undefined
+            ? props.t('chip.loading')
+            : repo.branch === '' ? props.t('branch.detached') : repo.branch}
           ariaLabel={props.t('chip.aria.branch')}
-          open={branchOpen}
+          open={repo !== undefined && branchOpen}
           onClick={openBranchPopover}
         />
-        {branchOpen && branchesView !== null && (
+        {repo !== undefined && branchOpen && branchesView !== null && (
           <BranchPopover
             hero={heroSeat}
             view={branchesView}

@@ -69,6 +69,8 @@ interface BenchOptions {
   createWorktreeResult?: { ok: true; path: string; branch: string; name: string } | { ok: false; error: { code: 'worktree-already-exists'; message: string } }
   /** Override the graph verb (e.g. a deferred promise for the loading state). */
   graph?: (limit?: number) => Promise<GraphView | null>
+  /** Transient repoStatus rejections before the first success (retry path). */
+  repoStatusFailures?: number
   /** The dock seat's conversation composer phase (blank = the hero phase). */
   /** The dock seat's conversation open state (open = the hero phase). */
   openState?: 'open' | 'loading'
@@ -103,10 +105,21 @@ function bench(options: BenchOptions = {}) {
     calls[key].push(args)
   }
 
+  let repoFailures = options.repoStatusFailures ?? 0
+
   const injected: GitGraphInjected = {
     // Mirrors the real inject face: without a session cwd every git verb
-    // resolves no workspace (null), so the chip has nothing to show.
-    repoStatus: vi.fn(async (sessionId: SessionId | undefined) => { record('repoStatus', sessionId); return cwd === undefined ? null : repoStatus }),
+    // resolves no workspace — the status verb throws (transient, the row is
+    // not published yet), so the chip stays on its loading face and retries.
+    repoStatus: vi.fn(async (sessionId: SessionId | undefined) => {
+      record('repoStatus', sessionId)
+      if (cwd === undefined) throw new Error('session has no workspace yet')
+      if (repoFailures > 0) {
+        repoFailures -= 1
+        throw new Error('transient git route failure')
+      }
+      return repoStatus
+    }),
     branches: vi.fn(async (sessionId: SessionId | undefined) => { record('branches', sessionId); return cwd === undefined ? null : branchesView }),
     switchBranch: vi.fn(async (sessionId: SessionId | undefined, branch: string) => {
       record('switchBranch', sessionId, branch)
@@ -391,10 +404,24 @@ describe('BranchChip', () => {
     expect(screen.queryByRole('button', { name: '分支' })).toBeNull()
   })
 
-  it('hides the branch chip without a session cwd (cold start)', async () => {
+  it('keeps the loading chip while the session cwd is not yet published (cold start)', async () => {
     bench({ cwd: undefined })
     await new Promise(resolve => setTimeout(resolve, 50))
-    expect(screen.queryByRole('button', { name: '分支' })).toBeNull()
+    const chip = screen.getByRole('button', { name: '分支' })
+    expect(chip.textContent).toContain('加载中…')
+    // The loading face never opens the branch popover.
+    fireEvent.click(chip)
+    expect(screen.queryByRole('listbox', { name: '搜索分支' })).toBeNull()
+  })
+
+  it('keeps the loading chip and retries after a transient status failure', async () => {
+    const { injected } = bench({ repoStatusFailures: 1 })
+    const chip = await screen.findByRole('button', { name: '分支' })
+    expect(chip.textContent).toContain('加载中…')
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '分支' }).textContent).toContain('main')
+    })
+    expect(injected.repoStatus.mock.calls.length).toBe(2)
   })
 
   it('switches a branch from the list and closes on success', async () => {

@@ -110,12 +110,25 @@ export function apply(ctx: ClientContext): void {
   // Conditional mount: the conversation service being up is the
   // registration-safe signal (the GoalDock/QueueDock seam). The chip mounts on
   // the input dock, the composer seam every shipped shell declares.
-  ctx.inject(['slots', 'conversation', 'sessions', 'uiWorkspace'], (scope: ClientContext) => {
+  ctx.inject(['slots', 'conversation', 'sessions', 'workspaces', 'uiWorkspace'], (scope: ClientContext) => {
     const sessions = scope.sessions
+    const workspaces = scope.workspaces
 
-    /** The session's workspace root, resolved at call time from the sessions baseline. */
-    const cwdOf = (sessionId: SessionId | undefined): string | undefined =>
-      sessionId === undefined ? undefined : sessions.list.getSnapshot().byId[sessionId]?.cwd
+    /**
+     * The session's workspace root, resolved at call time from the sessions
+     * baseline, falling back to Workspace membership: a just-created row is
+     * born before the authoritative upsert carries `cwd`, while the member
+     * seat lands synchronously with the create — so the branch chip's first
+     * status fires at mount instead of collapsing to the hidden state until
+     * some later refresh (in practice: the next window focus).
+     */
+    const cwdOf = (sessionId: SessionId | undefined): string | undefined => {
+      if (sessionId === undefined) return undefined
+      const listed = sessions.list.getSnapshot().byId[sessionId]?.cwd
+      if (listed !== undefined && listed !== '') return listed
+      return workspaces.list.getSnapshot().items
+        .find(item => item.sessionIds.includes(sessionId))?.path
+    }
 
     /** The injected face shared by every seat this chip registers into. */
     const injected = (): GitGraphInjected => {
@@ -128,7 +141,12 @@ export function apply(ctx: ClientContext): void {
       return {
         repoStatus: async (sessionId) => {
           const resolved = pathOf(sessionId)
-          if (!resolved.ok) return null
+          // A not-yet-published workspace root is a transient gap (the list
+          // row is born without cwd on some flows), not "not a repository":
+          // throw so the chip keeps its loading state and retries instead of
+          // collapsing into the terminal null that hides it until a window
+          // focus happens to re-trigger a fetch.
+          if (!resolved.ok) throw new Error(resolved.error.message)
           const result = await git.status(resolved.path)
           return result.ok ? result.value : null
         },
