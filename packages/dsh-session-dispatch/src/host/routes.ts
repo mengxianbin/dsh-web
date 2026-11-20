@@ -130,6 +130,13 @@ export interface DispatchAttentionApi {
    * @param sessionClass - declared class (wire default applied by the route).
    */
   declare(sessionId: string, sessionClass: SessionClass): Promise<void>
+  /**
+   * Read face for `GET /api/session-dispatch/attention` (hover-sessionclass-1121):
+   * canonical session id → class for every recorded Session, straight from the
+   * same ledger `declare` writes. Read-only — it never touches pin state, and
+   * the attention route is mounted only while this face is composed.
+   */
+  classes(): Promise<Record<string, SessionClass>>
 }
 
 /** Neutral slash-command executor consumed by the optional permission pin. */
@@ -423,6 +430,32 @@ export function makeBindingsRoute(bindings: DispatchBindingStore): WebRoute {
   }
 }
 
+/**
+ * GET /api/session-dispatch/attention — read-only attention ledger surface:
+ * the canonical session id → class map the hover card's session-origin line
+ * reads (hover-sessionclass-1121). Loopback-fenced like every route here;
+ * a ledger failure answers 500 with the error detail, never a partial map.
+ */
+export function makeAttentionRoute(attention: DispatchAttentionApi): WebRoute {
+  return {
+    kind: 'exact',
+    path: `${DISPATCH_API_PREFIX}/attention`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'GET') {
+        writeJson(res, 405, { ok: false, error: 'method not allowed: use GET' })
+        return
+      }
+      try {
+        const classes = await attention.classes()
+        writeJson(res, 200, { ok: true, classes }, { 'cache-control': 'no-store' })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: errorDetail(error) })
+      }
+    },
+  }
+}
+
 /** One validated session-send request. Deliberately mode-free: delivery is queue-only. */
 export interface SessionSendRequest {
   readonly sessionId: string
@@ -593,9 +626,10 @@ export function makeSessionStopRoute(services: SessionStopServices): WebRoute {
   }
 }
 
-/** All dispatch routes: the POST endpoint, its liveness probe, and the bindings ledger. */
+/** All dispatch routes: the POST endpoint, its liveness probe, the bindings ledger, and the attention read face. */
 export function makeDispatchRoutes(services: DispatchServices): WebRoute[] {
   const routes = [makeDispatchRoute(services), makeHealthRoute()]
   if (services.bindings !== undefined) routes.push(makeBindingsRoute(services.bindings))
+  if (services.attention !== undefined) routes.push(makeAttentionRoute(services.attention))
   return routes
 }

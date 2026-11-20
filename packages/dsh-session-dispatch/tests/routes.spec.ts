@@ -826,6 +826,7 @@ describe('dispatch sessionClass (attention ledger)', () => {
     const services = happyServices({
       attention: {
         async declare(sessionId, sessionClass) { declared.push([sessionId, sessionClass]) },
+        async classes() { return {} },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
@@ -841,6 +842,7 @@ describe('dispatch sessionClass (attention ledger)', () => {
     const services = happyServices({
       attention: {
         async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+        async classes() { return {} },
       },
       sessions: {
         async create() { order.push('create'); return { sessionId: 'session-abc' } },
@@ -860,6 +862,7 @@ describe('dispatch sessionClass (attention ledger)', () => {
     const services = happyServices({
       attention: {
         async declare(_sessionId, sessionClass) { order.push(`declare:${sessionClass}`) },
+        async classes() { return {} },
       },
       sessions: {
         async create() { order.push('create'); return { sessionId: 'session-abc' } },
@@ -878,6 +881,7 @@ describe('dispatch sessionClass (attention ledger)', () => {
     const services = happyServices({
       attention: {
         async declare() { throw new Error('ledger disk full') },
+        async classes() { return {} },
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!

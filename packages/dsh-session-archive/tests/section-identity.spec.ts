@@ -181,15 +181,18 @@ describe('archived-sessions section identity', () => {
     const mounted = mountClient()
 
     // When the fiber unmounts and the half mounts again
-    // Then the seat is released on unmount and re-taken on the next mount
-    expect(mounted.registrations).toHaveLength(1)
+    // Then the section seat is released on unmount and re-taken on the next
+    // mount (the half seats two entries since hover-sessionclass-1121: the
+    // section plus the hover line)
+    expect(mounted.registrations.filter((entry) => entry.name === 'settings.section')).toHaveLength(1)
     expect(mounted.releases()).toBe(0)
     mounted.unmount()
-    expect(mounted.releases()).toBe(1)
+    // Both seats release: the section plus the hover line.
+    expect(mounted.releases()).toBe(2)
 
     const remounted = mountClient()
-    expect(remounted.registrations).toHaveLength(1)
+    expect(remounted.registrations.filter((entry) => entry.name === 'settings.section')).toHaveLength(1)
     remounted.unmount()
-    expect(remounted.releases()).toBe(1)
+    expect(remounted.releases()).toBe(2)
   })
 })

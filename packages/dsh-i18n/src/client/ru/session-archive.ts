@@ -42,6 +42,7 @@ export const ru: Record<string, string> = {
   'arch.row.size': 'Размер: {size}',
   'arch.row.children': 'Дочерних сессий: {n}',
   'arch.row.created': 'Создана {time}',
+  'arch.hover.class': 'Тип сессии: {class}',
   'arch.status.running': 'Выполняется',
   'arch.status.blank': 'Пустая',
   'arch.status.archived': 'В архиве',

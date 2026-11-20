@@ -1,0 +1,7 @@
+/* Hover-card session-origin line: same weak-gray metadata scale as the
+   card's time line (12/16 tertiary) — informational, never a ring. */
+.line {
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-tertiary);
+}

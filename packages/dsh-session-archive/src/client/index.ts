@@ -38,6 +38,7 @@ import { createElement } from 'react'
 import { ArchiveController } from './archive-controller.ts'
 import { mainViewSessionId } from './main-session.ts'
 import { SessionArchiveCard, type SessionArchiveFace } from './SessionArchiveCard.tsx'
+import { SessionClassLine } from './SessionClassLine.tsx'
 import { NS, en, setRuntimeTranslate, zh } from './locales.ts'
 import { createServedEntryForm } from './settings-entry-form.ts'
 import type { SessionArchiveConfig } from '../core/config.ts'
@@ -76,6 +77,10 @@ const ARCHIVE_ENTRY_IDS: readonly string[] = [AGGREGATE_ENTRY_ID, ARCHIVE_SETTIN
 const SECTION_ID = 'dsh-session-archive'
 const SECTION_ORDER = 25
 
+/** Occupant id and list order for the hover-card session-origin line. */
+const HOVER_LINE_ID = 'dsh-session-archive.class'
+const HOVER_LINE_ORDER = 10
+
 /** Required services. */
 export const inject = ['slots', 'locale', 'connection', 'configForms', 'remote', 'sessions']
 
@@ -102,6 +107,18 @@ declare module '@deepseek-ai/cordis' {
      * service (`ctx.configForms`) by profile entry id directly.
      */
     webUiSettings?: { bind<S>(spec: SessionArchiveFormSpec<S>): ConfigForm<S> }
+  }
+}
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    /**
+     * Section of the Session row's hover card between its relative time and
+     * its trailing status line (hover-sessionclass-1121). The owner share
+     * mirrors the harness ui-workspace contract: the row's Session identity
+     * only — rendering never binds or retains the Session.
+     */
+    'sidebar.session.row.hover': { kind: 'list'; scope: 'root'; owner: { readonly sessionId: string } }
   }
 }
 
@@ -174,6 +191,26 @@ export function apply(ctx: ClientContext): void {
         locale: NS,
         inject: face,
       }, SessionArchiveCard)
+      return () => {
+        unregister()
+      }
+    } catch {
+      return () => {}
+    }
+  })
+
+  // Hover-card session-origin line (hover-sessionclass-1121): mounts only
+  // while a row's hover card is open, reads GET /api/session-dispatch/attention
+  // once per page (cached, zero polling), and renders nothing when the ledger
+  // has no record for the session or the endpoint is unreachable — quiet
+  // absence, never a banner.
+  ctx.slots.inject('sidebar.session.row.hover', () => {
+    try {
+      const unregister = ctx.slots.register({
+        name: 'sidebar.session.row.hover',
+        id: HOVER_LINE_ID,
+        order: HOVER_LINE_ORDER,
+      }, SessionClassLine)
       return () => {
         unregister()
       }

@@ -286,6 +286,23 @@ export class AttentionLedger {
   }
 
   /**
+   * Read face for `GET /api/session-dispatch/attention` (hover-sessionclass-1121):
+   * the canonical id → class map for every recorded Session, served through the
+   * same load chain (a startup pass still in flight answers after it settles).
+   * Read-only: pin state is never touched, and the map is exactly what the
+   * archive channel's identity table already reads from this ledger's file.
+   * @returns resolution after the table is loaded (a store failure rejects).
+   */
+  classes(): Promise<Record<string, SessionClass>> {
+    return this.tx(async () => {
+      const table = await this.load()
+      const classes: Record<string, SessionClass> = {}
+      for (const [id, record] of Object.entries(table.sessions)) classes[id] = record.class
+      return classes
+    })
+  }
+
+  /**
    * First real user message: give an undeclared Session the `human` default
    * (and retry a pending record). Workspace membership gates this path —
    * subagent children emit user messages too but are not workspace members,
