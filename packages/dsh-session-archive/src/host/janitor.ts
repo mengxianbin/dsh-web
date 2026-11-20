@@ -159,6 +159,22 @@ const INVENTORY_RESPONSE_TTL_MS = 15 * 60_000
 const FRESH_BUILT_TTL_MS = 15_000
 
 /**
+ * Boot prewarm cadence (#inventory-first-open-1120): the first attempt runs
+ * this long after start() so the catch-up auto tick (also armed near boot)
+ * gets the event loop first, and while the session-feed face is not answering
+ * yet the attempt retries on {@link PREWARM_RETRY_MS} — a full-corpus build
+ * taken without the feed would cache a disk-only snapshot (every row flagged
+ * `unreadable`) for a whole TTL window, which is worse than no prewarm at
+ * all. After {@link PREWARM_MAX_ATTEMPTS} attempts the prewarm gives up and
+ * the first open pays the rebuild inline, exactly as before.
+ */
+export const PREWARM_DELAY_MS = 5_000
+/** Retry cadence while the session-feed face is still mounting. */
+export const PREWARM_RETRY_MS = 1_000
+/** Attempts the boot prewarm makes before leaving the first open to pay. */
+export const PREWARM_MAX_ATTEMPTS = 30
+
+/**
  * Per-target state for archive/restore decisions (方向① targeted read): what
  * one id needs from the inventory — existence, archived flag, the
  * harness-native spelling, and the sessions-root directory the seal gate
@@ -264,6 +280,10 @@ export class ArchiveService {
   private readonly busy = new Set<string>()
   private cycleRunning = false
   private schedulerTimer: ReturnType<typeof setTimeout> | undefined
+  /** Boot prewarm retry timer ({@link PREWARM_DELAY_MS}); cleared on stop. */
+  private prewarmTimer: ReturnType<typeof setTimeout> | undefined
+  /** Prewarm attempts made so far, readiness retries included. */
+  private prewarmAttempts = 0
   /** The turn-end seal sync, alive exactly while this service is mounted. */
   private sealState: SealStateSync | undefined
   private readonly sealCompute: SealStateOptions['compute']
@@ -312,6 +332,12 @@ export class ArchiveService {
       ...(this.sealCompute === undefined ? {} : { compute: this.sealCompute }),
     })
     this.sealState.start()
+    // First-open prewarm (#inventory-first-open-1120): the first panel open
+    // after a restart otherwise pays the whole 11–35 s rebuild inline, because
+    // the response cache starts cold at boot. One background build with no
+    // reader waiting turns that open into a hit; a failure, or a feed face
+    // that never answers, is left to the first real reader.
+    this.schedulePrewarm(PREWARM_DELAY_MS)
   }
 
   stop(): void {
@@ -320,6 +346,37 @@ export class ArchiveService {
     this.sealState = undefined
     if (this.schedulerTimer !== undefined) clearTimeout(this.schedulerTimer)
     this.schedulerTimer = undefined
+    if (this.prewarmTimer !== undefined) clearTimeout(this.prewarmTimer)
+    this.prewarmTimer = undefined
+  }
+
+  /** Arm one prewarm attempt in `delayMs` (a no-op once disposed). */
+  private schedulePrewarm(delayMs: number): void {
+    if (this.disposed) return
+    if (this.prewarmTimer !== undefined) clearTimeout(this.prewarmTimer)
+    this.prewarmTimer = setTimeout(() => {
+      this.prewarmTimer = undefined
+      this.prewarm()
+    }, delayMs)
+  }
+
+  /**
+   * One boot-prewarm attempt: wait for the session-feed face (a build taken
+   * without it caches a disk-only snapshot — every row flagged `unreadable`
+   * — for a whole TTL window), then let the response cache kick its single
+   * background build. Failures stay swallowed there; the first real reader
+   * retries them.
+   */
+  private prewarm(): void {
+    if (this.disposed) return
+    if (this.serviceFace('sessionController') === undefined) {
+      if (this.prewarmAttempts < PREWARM_MAX_ATTEMPTS) {
+        this.prewarmAttempts += 1
+        this.schedulePrewarm(PREWARM_RETRY_MS)
+      }
+      return
+    }
+    this.responseCache.prewarm()
   }
 
   applyConfig(raw: unknown): void {
@@ -694,6 +751,30 @@ export class ArchiveService {
    */
   inventoryCached(): Promise<InventoryResponseServe> {
     return this.responseCache.serve()
+  }
+
+  /**
+   * The panel's explicit refresh (#inventory-first-open-1120): drop the
+   * title-file memo — the only memo with no TTL of its own, so a title that
+   * lands on disk after a pass would stay invisible until the next mutation
+   * clears it — plus the two 2 s index memos, then pay the rebuild for THIS
+   * reader instead of answering with the retained bytes. Plain GETs keep the
+   * stale-while-revalidate path untouched: the taskbot's 10 s poll must
+   * never queue behind a refresh click.
+   */
+  async inventoryFresh(): Promise<InventoryResponseServe> {
+    this.projcacheFiles.clear()
+    this.dirIndex.invalidate()
+    this.projcacheIndex.invalidate()
+    return this.responseCache.rebuild()
+  }
+
+  /**
+   * Whole-response rebuilds the response cache performed; diagnostics for
+   * tests (the boot prewarm must issue one with no reader having asked).
+   */
+  get inventoryBuilds(): number {
+    return this.responseCache.builds
   }
 
   autoView(): AutoStateView {

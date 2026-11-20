@@ -11,12 +11,15 @@
  * invalidation, a clock that steps back, an invalidation landing mid-rebuild)
  * are pinned with an injected clock; the service-level cases rest on the
  * invalidation being synchronous with the operation completing, not on
- * measured durations.
+ * measured durations. The owner's two deliberate exceptions to "reads never
+ * pay" are pinned too: the boot prewarm issues the first build with no
+ * reader, and an explicit refresh (rebuild) pays it for its caller while
+ * every other reader keeps the retained bytes.
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { InventoryResponseCache } from '../src/host/inventory-response-cache.ts'
-import { ArchiveService } from '../src/host/janitor.ts'
-import { createFakeHost, fakeContext } from './fixtures.ts'
+import { ArchiveService, PREWARM_DELAY_MS, PREWARM_RETRY_MS } from '../src/host/janitor.ts'
+import { createFakeHost, fakeContext, writeProjcacheSessionFile } from './fixtures.ts'
 
 /** Let the single-flight background refresh land (its builds resolve immediately). */
 function flush(): Promise<void> {
@@ -352,6 +355,163 @@ describe('Given an explicit invalidation', () => {
   })
 })
 
+describe('Given the boot prewarm', () => {
+  it('operator gets a warm first read, with nobody paying for the warmup', async () => {
+    // Given a cold cache nobody has read
+    let buildCount = 0
+    const cache = new InventoryResponseCache({
+      ttlMs: 15_000,
+      build: async () => ({ payload: `{"n":${++buildCount}}`, generatedAt: 1_000 }),
+      now: () => 1_000,
+    })
+
+    // When the owner prewarms it
+    cache.prewarm()
+    await flush()
+
+    // Then one background build landed without any reader asking
+    expect(buildCount).toBe(1)
+    expect(cache.builds).toBe(1)
+
+    // And the first read is a hit over those bytes, paying no second build
+    const first = await cache.serve()
+    expect(first.hit).toBe(true)
+    expect(first.payload).toBe('{"n":1}')
+    expect(cache.builds).toBe(1)
+  })
+
+  it('operator gets no second build when a prewarm lands on a snapshot that already exists', async () => {
+    // Given a cache already holding a snapshot
+    let buildCount = 0
+    const cache = new InventoryResponseCache({
+      ttlMs: 15_000,
+      build: async () => ({ payload: `{"n":${++buildCount}}`, generatedAt: 1_000 }),
+      now: () => 1_000,
+    })
+    await cache.serve()
+
+    // When the owner prewarms anyway
+    cache.prewarm()
+    await flush()
+
+    // Then the existing snapshot still answers and nothing was rebuilt
+    expect(cache.builds).toBe(1)
+    const served = await cache.serve()
+    expect(served.hit).toBe(true)
+    expect(cache.builds).toBe(1)
+  })
+
+  it('operator pays one build when the prewarm lands on a cold read already in flight', async () => {
+    // Given a cache whose first build is gated mid-flight
+    const { cache, release, builds } = gatedBuild()
+
+    // When a cold read and the prewarm meet that build
+    const reading = cache.serve()
+    cache.prewarm()
+    release?.()
+    const served = await reading
+
+    // Then they shared one build: the prewarm never started a competing one
+    expect(builds()).toBe(1)
+    expect(served.hit).toBe(false)
+    expect(served.payload).toBe('{"n":1}')
+  })
+})
+
+describe('Given an explicit refresh (rebuild)', () => {
+  it('operator gets rebuilt bytes, never the retained body, and the window follows', async () => {
+    // Given a cache holding one payload
+    let buildCount = 0
+    const cache = new InventoryResponseCache({
+      ttlMs: 60_000,
+      build: async () => ({ payload: `{"n":${++buildCount}}`, generatedAt: 1_000 }),
+      now: () => 1_000,
+    })
+    await cache.serve()
+
+    // When the owner serves an explicit refresh
+    const refreshed = await cache.rebuild()
+
+    // Then this reader paid the rebuild and received the new bytes
+    expect(refreshed.hit).toBe(false)
+    expect(refreshed.stale).toBe(false)
+    expect(refreshed.payload).toBe('{"n":2}')
+    expect(cache.builds).toBe(2)
+
+    // And the window now answers with those bytes
+    const after = await cache.serve()
+    expect(after.hit).toBe(true)
+    expect(after.payload).toBe('{"n":2}')
+    expect(cache.builds).toBe(2)
+  })
+
+  it('operator never queues behind an explicit refresh: concurrent reads keep the retained body', async () => {
+    // Given a cache holding one payload whose refresh build is gated
+    let buildCount = 0
+    let release: (() => void) | undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const cache = new InventoryResponseCache({
+      ttlMs: 60_000,
+      build: async () => {
+        buildCount += 1
+        if (buildCount > 1) await gate
+        return { payload: `{"n":${buildCount}}`, generatedAt: 1_000 }
+      },
+      now: () => 1_000,
+    })
+    await cache.serve()
+
+    // When an explicit refresh waits on its rebuild while another reader arrives
+    const refreshing = cache.rebuild()
+    const concurrent = await cache.serve()
+
+    // Then the concurrent read answered at once from the retained body
+    expect(concurrent.hit).toBe(true)
+    expect(concurrent.stale).toBe(true)
+    expect(concurrent.payload).toBe('{"n":1}')
+
+    // And the refresh reader still ends with the rebuilt bytes
+    release?.()
+    const refreshed = await refreshing
+    expect(refreshed.payload).toBe('{"n":2}')
+    expect(buildCount).toBe(2)
+  })
+
+  it('operator never receives a refresh build a mutation aborted, and never waits forever', async () => {
+    // Given a cache holding one payload whose next build hangs until aborted
+    let buildCount = 0
+    let produced = 0
+    let hangs = false
+    const cache = new InventoryResponseCache({
+      ttlMs: 15_000,
+      build: (signal) => {
+        buildCount += 1
+        if (hangs) {
+          hangs = false
+          return new Promise((_, reject) => {
+            signal.addEventListener('abort', () => reject(new Error('scan cancelled')), { once: true })
+          })
+        }
+        produced += 1
+        return Promise.resolve({ payload: `{"n":${produced}}`, generatedAt: 1_000 })
+      },
+      now: () => 1_000,
+    })
+    await cache.serve()
+
+    // When a mutation invalidates while the explicit refresh waits
+    hangs = true
+    const refreshing = cache.rebuild()
+    cache.invalidate()
+    const refreshed = await refreshing
+
+    // Then the reader retried under the new generation and got a real
+    // payload — never the dead build's — and the aborted attempt was not counted
+    expect(refreshed.payload).toBe('{"n":2}')
+    expect(cache.builds).toBe(2)
+  })
+})
+
 describe('Given the service that owns the response cache', () => {
   it('operator sees the cached window, and every mutation refreshes behind the next read', async () => {
     // Given a service over a fake host with one unarchived session
@@ -422,5 +582,100 @@ describe('Given the service that owns the response cache', () => {
     // every operation, so freshness never depends on guessing what mutated
     const after = await service.inventoryCached()
     expect(after.stale).toBe(true)
+  })
+
+  it('operator gets a background build issued at boot, before any reader asked', async () => {
+    // Given a service that has just started
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-a', updatedAt: 1 }],
+      persistedIds: ['session-a'],
+    })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    vi.useFakeTimers()
+    try {
+      await service.start()
+
+      // When the prewarm delay elapses with nobody reading
+      expect(service.inventoryBuilds).toBe(0)
+      await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS)
+
+      // Then one background build was issued for the first open
+      expect(service.inventoryBuilds).toBe(1)
+
+      // And the first reader coalesces with it instead of paying a second build
+      const first = await service.inventoryCached()
+      expect(service.inventoryBuilds).toBe(1)
+      expect(JSON.parse(first.payload).rows[0].id).toBe('session-a')
+    } finally {
+      service.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('operator gets no prewarm build while the feed face is down, and one once it answers', async () => {
+    // Given a service whose session-feed face is not answering yet
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-a', updatedAt: 1 }],
+      persistedIds: ['session-a'],
+    })
+    const base = fakeContext(host) as { get(name: string): unknown }
+    let feedFaceUp = false
+    const ctx = {
+      get(name: string): unknown {
+        if (name === 'sessionController' && !feedFaceUp) return undefined
+        return base.get(name)
+      },
+    }
+    const service = new ArchiveService(ctx as never, { dshHome: host.home })
+    vi.useFakeTimers()
+    try {
+      await service.start()
+
+      // When the prewarm delay elapses with the face still down
+      await vi.advanceTimersByTimeAsync(PREWARM_DELAY_MS)
+
+      // Then no build ran: a feedless pass would cache a degraded snapshot
+      expect(service.inventoryBuilds).toBe(0)
+
+      // And when the face answers on the next retry, the build is issued
+      feedFaceUp = true
+      await vi.advanceTimersByTimeAsync(PREWARM_RETRY_MS)
+      expect(service.inventoryBuilds).toBe(1)
+    } finally {
+      service.stop()
+      vi.useRealTimers()
+    }
+  })
+
+  it('operator sees a late-landed title on an explicit refresh, never on a plain read', async () => {
+    // Given a listed session whose per-session projcache file carries no title
+    const host = createFakeHost({
+      feedItems: [{ sessionId: 'session-late', updatedAt: 10 }],
+      dirs: ['session-late'],
+    })
+    writeProjcacheSessionFile(host.home, 'session-late', { createdAt: 1 })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    await service.start()
+    try {
+      // When the window is built while the session still has no title
+      const before = await service.inventoryCached()
+      expect(JSON.parse(before.payload).rows[0].title).toBeUndefined()
+
+      // And the title lands on disk afterwards
+      writeProjcacheSessionFile(host.home, 'session-late', { title: '迟到的标题', createdAt: 1 })
+
+      // Then a plain read still answers with the retained bytes — the window
+      // is the freshness authority, and a landed title is not a mutation
+      const plain = await service.inventoryCached()
+      expect(plain.hit).toBe(true)
+      expect(JSON.parse(plain.payload).rows[0].title).toBeUndefined()
+
+      // And the explicit refresh waits out a rebuild over the dropped title memo
+      const refreshed = await service.inventoryFresh()
+      expect(refreshed.hit).toBe(false)
+      expect(JSON.parse(refreshed.payload).rows[0].title).toBe('迟到的标题')
+    } finally {
+      service.stop()
+    }
   })
 })

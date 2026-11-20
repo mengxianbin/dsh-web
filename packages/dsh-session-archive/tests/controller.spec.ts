@@ -83,6 +83,46 @@ async function pump(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0))
 }
 
+describe('ArchiveController.load', () => {
+  it('keeps the rows on screen through a refresh and asks the host for a rebuild', async () => {
+    // Given a controller whose inventory holds one row and whose fresh read
+    // hangs until the rebuilt payload is handed over
+    let resolveFresh: ((inventory: InventoryView) => void) | undefined
+    const inventoryCalls: ({ fresh?: boolean } | undefined)[] = []
+    const { api } = stubApi({
+      inventory: (options) => {
+        inventoryCalls.push(options)
+        if (options?.fresh === true) {
+          return new Promise<InventoryView>((resolve) => { resolveFresh = resolve })
+        }
+        return Promise.resolve(makeInventory([row({ id: 'session-old' })]))
+      },
+    })
+    const controller = new ArchiveController({ api })
+
+    // When the first load lands and the user clicks refresh
+    await controller.load()
+    const refreshing = controller.load({ fresh: true })
+
+    // Then the old rows stay on screen while the refresh waits
+    const during = controller.store.getSnapshot()
+    expect(during.status).toBe('loading')
+    expect(during.inventory?.rows.map((entry) => entry.id)).toEqual(['session-old'])
+
+    // And the refresh asked the host for a rebuild, the first load did not
+    expect(inventoryCalls).toEqual([undefined, { fresh: true }])
+
+    // When the rebuilt payload lands
+    resolveFresh?.(makeInventory([row({ id: 'session-new' })]))
+    await refreshing
+
+    // Then the list swaps to it
+    const after = controller.store.getSnapshot()
+    expect(after.status).toBe('ready')
+    expect(after.inventory?.rows.map((entry) => entry.id)).toEqual(['session-new'])
+  })
+})
+
 describe('ArchiveController.runBatch', () => {
   it('chunks large batches and tracks progress per chunk', async () => {
     const rows = Array.from({ length: 450 }, (_, index) => row({ id: `session-${index}` }))

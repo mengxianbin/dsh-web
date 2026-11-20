@@ -97,7 +97,7 @@ export function SessionArchiveCard(props: SessionArchiveProps): ReactNode {
           <span className={styles.title}>{t('arch.title')}</span>
           <span className={styles.count}>{t('arch.results.count', { n: filtered.length })}</span>
         </div>
-        <button type="button" className={styles.button} disabled={ui.status === 'loading'} onClick={() => { void controller.load() }}>
+        <button type="button" className={styles.button} disabled={ui.status === 'loading'} onClick={() => { void controller.load({ fresh: true }) }}>
           {ui.status === 'loading' ? t('arch.refreshing') : t('arch.refresh')}
         </button>
       </div>
@@ -186,7 +186,13 @@ export function SessionArchiveCard(props: SessionArchiveProps): ReactNode {
       </div>
 
       <div className={styles.list} data-dsh-part="list">
-        {filtered.length === 0 && <div className={styles.empty}>{t('arch.empty')}</div>}
+        {filtered.length === 0 && (
+          <div className={styles.empty}>
+            {/* First open, still loading: "no sessions" would be a lie the
+                data has not earned yet (#inventory-first-open-1120). */}
+            {ui.status === 'loading' ? t('arch.loading') : t('arch.empty')}
+          </div>
+        )}
         {shown.map((row) => {          const chips = statusChips(row, currentId)
           const issues = issueLabels(row)
           const selected = selection.has(row.id)

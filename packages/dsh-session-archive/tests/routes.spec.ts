@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { AddressInfo } from 'node:net'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService, PlanMismatchError } from '../src/host/janitor.ts'
-import { assistantMsg, createFakeHost, fakeContext, writeTranscript } from './fixtures.ts'
+import { assistantMsg, createFakeHost, fakeContext, writeProjcacheSessionFile, writeTranscript } from './fixtures.ts'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 
 function startServer(routes: WebRoute[]): Promise<{ server: Server; url: string }> {
@@ -241,6 +241,43 @@ describe('route fencing and contracts', () => {
     expect(fourth.headers.get('x-dsh-inventory-cache')).toBe('hit')
     const fourthBody = JSON.parse(await fourth.text()) as { rows: { archived: boolean }[] }
     expect(fourthBody.rows[0]?.archived).toBe(true)
+  })
+
+  it('serves a rebuilt document for ?fresh=1 while plain reads keep the window', async () => {
+    // Given a window built while the listed session's projcache file carries
+    // no title (the panel's untitled-row complaint, #inventory-first-open-1120)
+    const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
+    writeProjcacheSessionFile(host.home, 'session-a', { createdAt: 1 })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+
+    const first = await fetch(url + '/api/dsh-session-archive/inventory')
+    expect(first.headers.get('x-dsh-inventory-cache')).toBe('miss')
+    const firstBody = JSON.parse(await first.text()) as { rows: { title?: string }[] }
+    expect(firstBody.rows[0]?.title).toBeUndefined()
+
+    // When the title lands on disk afterwards
+    writeProjcacheSessionFile(host.home, 'session-a', { title: '迟到的标题', createdAt: 1 })
+
+    // Then a plain read still answers with the retained bytes: a landed title
+    // is not a mutation, so the window — not the disk — is its freshness
+    const plain = await fetch(url + '/api/dsh-session-archive/inventory')
+    expect(plain.headers.get('x-dsh-inventory-cache')).toBe('hit')
+    const plainBody = JSON.parse(await plain.text()) as { rows: { title?: string }[] }
+    expect(plainBody.rows[0]?.title).toBeUndefined()
+
+    // And the panel's explicit refresh waits out a rebuild that sees it
+    const fresh = await fetch(url + '/api/dsh-session-archive/inventory?fresh=1')
+    expect(fresh.headers.get('x-dsh-inventory-cache')).toBe('miss')
+    const freshBody = JSON.parse(await fresh.text()) as { rows: { title?: string }[] }
+    expect(freshBody.rows[0]?.title).toBe('迟到的标题')
+
+    // And the window now answers with those rebuilt bytes
+    const after = await fetch(url + '/api/dsh-session-archive/inventory')
+    expect(after.headers.get('x-dsh-inventory-cache')).toBe('hit')
+    const afterBody = JSON.parse(await after.text()) as { rows: { title?: string }[] }
+    expect(afterBody.rows[0]?.title).toBe('迟到的标题')
   })
 })
 

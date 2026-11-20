@@ -98,11 +98,13 @@ export class ArchiveController {
     return this.getCurrentSessionId()
   }
 
-  async load(): Promise<void> {
+  async load(options?: { fresh?: boolean }): Promise<void> {
     const actions = this.store.actions
+    // The rows already on screen stay there through the reload (setStatus
+    // keeps the inventory): a refresh swaps bytes, it never blanks the list.
     actions.setStatus('loading', null)
     try {
-      const inventory = await this.api.inventory()
+      const inventory = await this.api.inventory(options)
       actions.setInventory(inventory)
     } catch (error) {
       actions.setStatus('error', error instanceof Error ? error.message : String(error))

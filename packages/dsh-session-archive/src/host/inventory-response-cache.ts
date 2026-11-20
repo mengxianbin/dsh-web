@@ -16,9 +16,12 @@
  *   served immediately and a single-flight background rebuild refreshes it —
  *   reader latency stays sub-millisecond even when a rebuild outlives the
  *   taskbot's whole timeout;
- * - only a reader that finds no snapshot at all (first build after boot)
- *   pays a synchronous rebuild, and concurrent cold readers coalesce into
- *   one.
+ * - only a reader that finds no snapshot at all pays a synchronous rebuild,
+ *   and concurrent cold readers coalesce into one. The owner's boot prewarm
+ *   ({@link InventoryResponseCache.prewarm}) issues that first build in the
+ *   background with no reader waiting, so the first panel open after a
+ *   restart is a hit; an explicit refresh ({@link InventoryResponseCache.rebuild})
+ *   is the one read that deliberately pays the rebuild for its caller.
  *
  * Freshness never depends on the window alone: the owner (ArchiveService)
  * invalidates after every mutating operation, and invalidation wins over an
@@ -179,14 +182,55 @@ export class InventoryResponseCache {
   }
 
   /**
-   * Start a background refresh if none is running. Errors are swallowed —
-   * the retained snapshot keeps answering until a later serve retries — but
-   * the build counter still records the attempt for tests. A refresh aborted
-   * by an invalidation is not an attempt that ever ran to an outcome: its
-   * count is given back (方向④, "不白计").
+   * Start the first build in the background with no reader waiting on it (the
+   * boot prewarm): once it lands, the first panel open is a cache hit instead
+   * of paying the 11–35 s rebuild inline. A no-op when a snapshot exists —
+   * serve() already answers from it — and a no-op while a build runs: that is
+   * the build a reader would join anyway. A failure is swallowed exactly like
+   * a background refresh's: the first real reader retries it.
    */
-  private kick(): void {
-    if (this.inflight !== undefined && this.inflight.generation === this.generation) return
+  prewarm(): void {
+    if (this.entry !== undefined) return
+    this.kick()
+  }
+
+  /**
+   * The explicit-refresh read (the panel's refresh button): drop the
+   * generation so the retained bytes stop answering, then pay the rebuild for
+   * THIS reader instead of serving them. Every other reader arriving meanwhile
+   * still gets the retained bytes immediately (stale-while-revalidate), so a
+   * refresh click never queues the taskbot's poll behind it; the caller waits
+   * out the build and, when a mutation aborts it mid-flight, retries under the
+   * new generation — it never receives the dead build's bytes.
+   */
+  async rebuild(): Promise<InventoryResponseServe> {
+    this.invalidate()
+    for (;;) {
+      const inflight = this.kick()
+      try {
+        const built = await inflight.promise
+        return { payload: built.payload, hit: false, stale: false, ageMs: 0 }
+      } catch (error) {
+        // invalidate() aborted this build (a mutation landed, or a second
+        // refresh click): retry under the new generation rather than
+        // surfacing the cancellation as a 500.
+        if (inflight.controller.signal.aborted) continue
+        throw error
+      }
+    }
+  }
+
+  /**
+   * Start a background refresh if none is running, and hand back the build
+   * that now covers the current generation (started or joined). Errors are
+   * swallowed — the retained snapshot keeps answering until a later serve
+   * retries — but the build counter still records the attempt for tests. A
+   * refresh aborted by an invalidation is not an attempt that ever ran to an
+   * outcome: its count is given back (方向④, "不白计").
+   */
+  private kick(): InflightBuild {
+    const running = this.inflight
+    if (running !== undefined && running.generation === this.generation) return running
     const generation = this.generation
     const controller = new AbortController()
     const promise = (async () => {
@@ -208,6 +252,7 @@ export class InventoryResponseCache {
     ).finally(() => {
       if (this.inflight?.promise === promise) this.inflight = undefined
     })
+    return started
   }
 
   /**

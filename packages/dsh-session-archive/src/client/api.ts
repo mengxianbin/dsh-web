@@ -13,6 +13,12 @@ import type {
 } from '../core/types.ts'
 
 const DEFAULT_TIMEOUT_MS = 30_000
+/**
+ * A fresh inventory read waits out the full pass server-side (the route
+ * answers by the build's own 30 s abort), so its timeout must outlast that
+ * to see the server's error rather than racing it with a client abort.
+ */
+const FRESH_TIMEOUT_MS = 45_000
 /** Batch deletes of thousands of sessions can take a while server-side. */
 const BATCH_TIMEOUT_MS = 300_000
 
@@ -42,8 +48,17 @@ async function request<T>(path: string, init: RequestInit | undefined, timeoutMs
   return body as T
 }
 
+export interface InventoryOptions {
+  /**
+   * The panel's explicit refresh (`?fresh=1`): ask the host for a rebuild
+   * over dropped memos instead of the cached window; this read waits out
+   * the pass server-side.
+   */
+  fresh?: boolean
+}
+
 export interface ArchiveApi {
-  inventory(): Promise<InventoryView>
+  inventory(options?: InventoryOptions): Promise<InventoryView>
   preview(id: string): Promise<SessionPreviewView>
   archive(ids: string[], currentSessionId?: string): Promise<BatchResponse>
   unarchive(ids: string[]): Promise<BatchResponse>
@@ -61,7 +76,11 @@ export function createArchiveApi(): ArchiveApi {
   // `<base href="./">` so a sub-path deployment reaches the host route.
   const prefix = 'api/dsh-session-archive'
   return {
-    inventory: () => request(`${prefix}/inventory`, undefined, DEFAULT_TIMEOUT_MS),
+    inventory: (options) => request(
+      options?.fresh === true ? `${prefix}/inventory?fresh=1` : `${prefix}/inventory`,
+      undefined,
+      options?.fresh === true ? FRESH_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
+    ),
     preview: (id) => request(`${prefix}/preview?id=${encodeURIComponent(id)}`, undefined, DEFAULT_TIMEOUT_MS),
     archive: (ids, currentSessionId) => request(`${prefix}/archive`, post(ids, currentSessionId === undefined ? {} : { currentSessionId }), BATCH_TIMEOUT_MS),
     unarchive: (ids) => request(`${prefix}/unarchive`, post(ids, {}), BATCH_TIMEOUT_MS),

@@ -102,8 +102,14 @@ export function makeInventoryRoute(service: ArchiveService): WebRoute {
         // freshness authority (the plugin invalidates it after every
         // archive/restore/delete it performs). `x-dsh-inventory-cache`
         // (hit/stale/miss) and `age` make the window observable without
-        // parsing the body.
-        const served = await service.inventoryCached()
+        // parsing the body. The one exception to that never-pays rule is the
+        // panel's explicit refresh: `?fresh=1` waits out a rebuild over the
+        // dropped title/index memos (ArchiveService.inventoryFresh) instead
+        // of the retained bytes; every other reader — the taskbot's 10 s poll
+        // among them — keeps the window.
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const fresh = url.searchParams.get('fresh') === '1' || url.searchParams.get('fresh') === 'true'
+        const served = fresh ? await service.inventoryFresh() : await service.inventoryCached()
         writeRawJson(res, 200, served.payload, {
           'cache-control': 'no-store',
           'x-dsh-inventory-cache': served.stale ? 'stale' : served.hit ? 'hit' : 'miss',
