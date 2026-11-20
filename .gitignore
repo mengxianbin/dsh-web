@@ -54,4 +54,5 @@ packages/dsh-usage/lib/
 /sessions/
 /storages/
 /.anonymous-user-id
+/.wt/
 /.wt-meta.yaml
