@@ -1,0 +1,3 @@
+ M "docs/file with spaces.txt"
+?? "docs/another file with spaces.txt"
+?? untracked-dir/

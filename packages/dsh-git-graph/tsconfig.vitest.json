@@ -25,7 +25,6 @@
   // merges), which must not meet the browser merges in one program; it is
   // typechecked by the host project instead (tests never import it).
   "exclude": [
-    "src/index.ts",
-    "src/invariant.ts"
+    "src/index.ts"
   ]
 }

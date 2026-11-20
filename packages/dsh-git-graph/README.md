@@ -1,32 +1,38 @@
-# dsh-git-graph
+# dsh-git-graph · Visual Git Commit Graph & Multi-Agent Worktree Isolation for DeepSeek Harness (DSH)
 
 English | [中文](README.zh.md)
 
-External dsh Web GUI plugin: a **git branch selector** and **Git graph** panel. The selector appears only in blank sessions, in the context hole of the official input selector row (`conversation.input.selector.context`, a session-maybe list slot) next to the official workspace selector pill. If the running shell does not declare that slot (the npm SDK rc.6 removed it), it waits `CONTEXT_FALLBACK_MS` then falls back to `conversation.input.dock`; in its blank-session hero phase the chip lifts into the official hero row immediately after the agent-preset seat, using the same transparent 28px pill recipe and `--dsw-*` theme tokens as the official workspace and preset chips. Active sessions expose no branch-selection control. Git capabilities run in the host process (checkout-tree `git switch`) and the UI is browser React; workspace selection remains the official entry.
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-git-graph?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
 
-Behavior aligns with ZCode's `GitBranchSwitcher`: searchable popover, a checkmark on the current item, bottom actions "创建并检出新分支… / Git 图谱" (Create and check out new branch… / Git graph), a switch guard (unresolved conflicts / an operation in progress / the target branch checked out by another worktree) and readable errors.
+<p align="center">
+  <strong>Visual Git Commit Graph & Multi-Agent Worktree Isolation for DeepSeek Harness (DSH)</strong><br>
+  <em>Interactive Commit Graph · Blank-Session Branch Switcher · Worktree Isolation · Conflict Prevention · Security Guards</em>
+</p>
+
+An external plugin for DeepSeek Harness (DSH) Web GUI and official desktop client: featuring an **interactive Git branch switcher** and a **visual Git commit graph** panel. The branch switcher appears exclusively on blank conversations, mounting on the shell's composer dock (`conversation.input.dock`), the seam every shipped shell declares. In blank conversation hero state, the chip elevates into the hero row directly right of the agent-preset chip, styled with authentic 28px pill layout and `--dsw-*` theme tokens. Active sessions hide the switcher. Git operations run in the host process (`git switch`) while the UI renders via React.
+
+Mirrors ZCode's `GitBranchSwitcher` behavior: searchable dropdown, active checkmark, "Create and switch branch... / Git Graph" footer actions, safety guards (unresolved merge conflicts, operations in progress, branch locked by other worktrees), and clear error diagnostics.
 
 ## Repository layout and build
 
-Kept as a sibling of the DeepSeek Harness main repo (sibling checkout, same turtle-ui layout; the path is arbitrary, below is only an example):
-
-```text
-~/code/deepseek-harness   # deepseek-harness checkout (sibling)
-~/code/dsh-git-graph      # this repository
-```
-
-All peer APIs come from the sibling checkout's source (tsconfig resolves via the paths of `../deepseek-harness/tsconfig.base.json`; when the sibling directory has a different name, replace the `../deepseek-harness` relative path in the tsconfig files with the actual directory). The type gate is `pnpm run typecheck` (`tsc -b`, which also builds the sibling packages referenced by `references`, writing declaration artifacts into the sibling's `lib/` — the same design as turtle-ui).
+The plugin is a self-contained cordis plugin package inside the dsh-web family monorepo (see "Generic install" below); no DeepSeek Harness source checkout is involved. All peer APIs come from the official `@deepseek-ai/*` npm SDK declared in `devDependencies`, resolved from `node_modules`, and the type gate is `pnpm run typecheck` (`tsc -b` over the package's own host and client programs).
 
 ```sh
 pnpm install
-pnpm run typecheck   # tsc -b (including sibling referenced projects)
+pnpm run typecheck   # tsc -b (host + client programs)
 pnpm test            # vitest (core pure functions / real git service / jsdom components)
-pnpm run build       # tsc -b && tsdown (lib/index.js + lib/invariant.js + lib/client.js)
+pnpm run build       # tsc -b && tsdown (lib/index.js + lib/client.js)
 ```
 
-`lib/client.js` is the browser bundle (a closure-factory artifact, `window.__ModuleLoader__.load`), served by the host's client-modules at `/plugins/<id>/client.js`; the build presets `build/tsdown.client.ts` + `build/web/src/platform.ts` are copies taken from the main repo's `packages/client/tsdown.client.ts` / `packages/client/web/src/platform.ts`, and must be kept in sync when the main repo changes.
+`lib/client.js` is the browser bundle (a closure-factory artifact, `window.__ModuleLoader__.load`), served by the host's client-modules at `/plugins/<id>/client.js`; both `tsdown.config.ts` and `tsdown.prepare.config.ts` import the one shared client preset at `shared/tsdown.client.ts` (with the browser platform seed table it reads), and the package keeps no copy of either.
 
-Git installs (consumer machines without a sibling checkout) go through the `prepare` script: `tsdown --config tsdown.prepare.config.ts` transpiles directly from src without type checking (`tsconfig.prepare.json` is self-contained).
+Git installs go through the `prepare` script: `tsdown --config tsdown.prepare.config.ts` transpiles directly from src without type checking (`tsconfig.prepare.json` is self-contained).
 
 ## Activation
 
@@ -85,7 +91,7 @@ dsh plugin --profile web remove @linxin666/dsh-client-ui-git-graph
 - Boundary and load-chain research and key decisions: see [docs/ADR-001-plugin-boundary.md](docs/ADR-001-plugin-boundary.md).
 - The host half's `/git/*` only accepts paths of registered workspaces (realpath check) and trusted clients (loopback socket + loopback Host, the same fence as dsh-ssh, plus a live paired-device cookie when `dsh-remote-web-ui` is loaded); the browser cannot run git against arbitrary directories, and a LAN-exposed dsh web answers unpaired non-loopback clients with 403.
 - The switch semantics are workspace-level: `git switch --no-guess <branch>` operates on the repoRoot checkout tree and affects all sessions of that workspace; project switch = activate the target workspace and open its (reused or newly created) blank session, without changing the cwd of existing sessions.
-- Mount seam: `conversation.input.selector.context` (the officially declared session-maybe list slot) is the context hole of the input selector row beside the official workspace pill. The branch pill renders only for blank sessions and hides when there is no session cwd or the workspace is not a Git repository. Declaration-aware fallback waits `CONTEXT_FALLBACK_MS` for that slot (the npm SDK rc.6 shell removed its declaration); if no declaration arrives, it mounts on `conversation.input.dock` for the blank-session hero phase. There the chip re-anchors into the official hero row after the agent-preset seat (2px row gap, vertically centered, with matching workspace/preset chip metrics and tokens) and opens its picker downward like the official workspace menu. Active sessions have no branch-selection control. Only one seat is mounted, and late context declarations after the fallback are ignored.
+- Mount seam: `conversation.input.dock`, the composer dock the shell declares for its own queue and todo docks. Registration waits for that declaration through `slots.inject` (a bare `register` is rejected for undeclared slots) and there is no second seat. The branch pill renders only for blank sessions and hides when there is no session cwd, the workspace is not a Git repository, or the session is no longer blank. There the chip re-anchors into the official hero row after the agent-preset seat (2px row gap, vertically centered, with matching workspace/preset chip metrics and tokens) and opens its picker downward like the official workspace menu. React appends portal children at the end of that row, so the chip re-orders itself immediately before the row's trailing options group, which is pinned to the right edge with `margin-left: auto`; without that step it would render above the composer card's right corner instead of beside the preset chip. Active sessions have no branch-selection control.
 - Workspace selection is not inside this plugin: the official workspace pill (`conversation.input.selector.workspace`) is the only entry; this plugin only provides git branch context.
 - Branch state refresh: fetch when the blank-session chip mounts / the popover opens / a switch succeeds, plus host SSE (`/git/events`, polling workspace state every 30s while subscribed, each probe bounded by a 15s deadline so a hung git never stalls the stream) pushing external changes and a window-focus refresh (throttled to once per 5s). Active sessions do not subscribe. The SSE stream is shared across tabs through a cross-tab leader relay (Web Locks + BroadcastChannel): one stream per URL browser-wide, so extra tabs never exhaust the same-origin HTTP connection pool (#383).
 

@@ -1,16 +1,12 @@
 /**
  * Git-graph surface plugin, browser half. The branch selector is rendered
- * only for blank sessions: it uses the input selector row's context hole
- * (`conversation.input.selector.context`) beside the official workspace
- * selector. When that shell slot is unavailable, it waits for
- * {@link CONTEXT_FALLBACK_MS} then uses `conversation.input.dock` for the
- * blank-session hero phase, where it joins the official hero chip row after
- * the agent-preset seat. Active sessions render no branch-selection control.
+ * only for blank sessions and mounts on `conversation.input.dock`, the
+ * composer dock every shipped shell declares; in the blank-session hero phase
+ * the chip joins the official hero chip row after the agent-preset seat.
+ * Active sessions render no branch-selection control.
  *
  * All git facts arrive through this package's host /git routes. The inject
- * face carries the business verbs and the components remain pure props. The
- * published npm SDK (rc.6) dropped the context-hole type, so it is declared
- * locally below for type-checked registration.
+ * face carries the business verbs and the components remain pure props.
  * @module dsh-git-graph/client
  */
 
@@ -19,15 +15,16 @@ import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
 // Type-only: pulls the ctx.slots merge (the renderer owns the slot registry since 0.1.2).
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the ui-conversation SlotMap merge (the conversation
-// slots); the selector-context hole is spelled locally below because the
-// published npm SDK (rc.6) dropped it while the running shell still renders it.
+// Type-only: pulls the ui-conversation SlotMap merge (the conversation slots).
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 // Type-only: pulls the ui-session standard-props merge (sessionId on
 // session/session-maybe slots, useSessions on GlobalStandardProps); the
 // 0.1.2-alpha.2 cohort trimmed ui-conversation's peer set, so this edge is
 // no longer reachable transitively and must be declared here.
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+// Type-only: pulls the workspace plugin's Context merge (ctx.uiWorkspace), the
+// multi-instance navigation face that replaced ISessions.open().
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   BranchesView, GitError, GitFeatureConfig, GraphView, RepoStatus, SwitchResult,
@@ -47,34 +44,12 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
     /** The git-graph chip copy. */
     'git-graph': GitGraphKey
   }
-
-  interface SlotMap {
-    /**
-     * The input selector context-chip hole: feature chips rendered right
-     * after the workspace selector (the git branch selector's seat).
-     * Session-maybe: the component identifies blank sessions from the
-     * baseline and renders no control for an active session.
-     *
-     * Declared and rendered by the running dsh web shell
-     * (ui-conversation's InputSelectorRow); the published npm SDK (rc.6)
-     * dropped this hole, so it is spelled locally to keep the chip's
-     * registration type-checked without depending on the sibling SDK surface.
-     */
-    'conversation.input.selector.context': {
-      kind: 'list'
-      scope: 'session-maybe'
-      owner: InputSelectorContextOwnerProps
-    }
-  }
 }
-
-/** Owner share of the input selector context-chip hole (empty by contract). */
-export interface InputSelectorContextOwnerProps {}
 
 /** Dictionary namespace owned by this plugin. */
 const NS = 'git-graph'
 
-/** Required services: slots for the selector-context entry, sessions for the cwd lookup, workspaces for worktree sessions, locale for the copy. */
+/** Required services: slots for the dock entry, sessions for the cwd lookup, workspaces for worktree sessions, locale for the copy. */
 export const inject = ['slots', 'sessions', 'workspaces', 'connection', 'locale']
 
 /** Injected business face of the branch chip: git verbs, keyed by the current session id. */
@@ -105,16 +80,8 @@ export interface GitGraphInjected {
 const NO_WORKSPACE: GitError = { code: 'workspace-unknown', message: 'session has no workspace' }
 
 /**
- * How long the chip waits for the selector-context declaration before
- * falling back to the input dock. The window covers the shell's first
- * render of the input selector row after the conversation service is up;
- * shells that never declare the hole (rc.6) land on the dock after it.
- */
-export const CONTEXT_FALLBACK_MS = 2000
-
-/**
  * Client plugin body: the branch chip entry with its git verbs, on the
- * selector-context hole with an input-dock fallback.
+ * composer's input dock.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
@@ -136,23 +103,14 @@ export function apply(ctx: ClientContext): void {
   // workspaces service's startSession so New Session on a git workspace
   // lands in a fresh managed worktree. Shape mismatch degrades to the
   // official behavior. The fiber's dispose restores the official method.
-  ctx.inject(['workspaces', 'sessions'], (worktreeScope: ClientContext) => {
+  ctx.inject(['workspaces', 'sessions', 'uiWorkspace'], (worktreeScope: ClientContext) => {
     worktreeScope.effect(() => installAutoIsolation(worktreeScope, git), 'dsh-git-graph: auto-isolation')
   })
 
-  // The context-fallback timer, armed once the conversation seam is up and
-  // cleared when this fiber unloads (the slot inject waits die with the
-  // fiber too, so no seat survives an unload).
-  let fallbackTimer: ReturnType<typeof setTimeout> | undefined
-  ctx.effect(() => () => {
-    if (fallbackTimer !== undefined) clearTimeout(fallbackTimer)
-  }, 'dsh-git-graph: context fallback timer')
-
   // Conditional mount: the conversation service being up is the
-  // registration-safe signal (the GoalDock/QueueDock seam). The chip then
-  // prefers the selector-context hole and falls back to the input dock when
-  // that declaration never arrives.
-  ctx.inject(['slots', 'conversation', 'sessions'], (scope: ClientContext) => {
+  // registration-safe signal (the GoalDock/QueueDock seam). The chip mounts on
+  // the input dock, the composer seam every shipped shell declares.
+  ctx.inject(['slots', 'conversation', 'sessions', 'uiWorkspace'], (scope: ClientContext) => {
     const sessions = scope.sessions
 
     /** The session's workspace root, resolved at call time from the sessions baseline. */
@@ -218,7 +176,9 @@ export function apply(ctx: ClientContext): void {
             // resolves the new SessionId; open() is the separate navigation
             // step that selects it (matching the old startSession behavior).
             const createdSessionId = await scope.sessions.create({ workspaceId: workspace.workspaceId })
-            scope.sessions.open(createdSessionId)
+            // Navigation belongs to the workspace UI since the multi-instance
+            // Client Session model; the Session Controller no longer opens one.
+            scope.uiWorkspace.openSession(createdSessionId)
           } catch (error: unknown) {
             await git.removeWorktree(resolved.path, created.value.path, { force: true })
             return { ok: false, error: { code: 'internal', message: `workspace registration failed: ${String(error)}` } }
@@ -250,41 +210,17 @@ export function apply(ctx: ClientContext): void {
       }
     }
 
-    // The entry shape shared by both seats; each register call spells the
-    // seat's literal name so its own declaration is checked.
-    const chipEntry = { id: 'git-graph', order: 100, locale: NS, inject: injected } as const
-
-    // Declaration-aware with a fallback. A bare register() would throw on
-    // shells that dropped the hole (SDK SlotCore.register rejects undeclared
-    // slots), so both seats route through inject like the pet / remote-web-ui
-    // entries. The preferred context wait resolves the moment the shell
-    // declares the hole; when it never does (rc.6 and the current shipped
-    // shell), the fallback disposes that wait and uses the dock only for the
-    // blank-session hero phase. Exactly one seat mounts: a context declaration
-    // landing after the fallback finds the wait gone.
-    let mounted = false
-    const disposeContextWait = scope.slots.inject('conversation.input.selector.context', () => {
-      mounted = true
+    // Declaration-aware mount. A bare register() would throw on shells that
+    // dropped the hole (SDK SlotCore.register rejects undeclared slots), so the
+    // entry routes through inject like the pet / remote-web-ui entries.
+    scope.slots.inject('conversation.input.dock', () => {
       try {
         return scope.slots.register(
-          { name: 'conversation.input.selector.context', ...chipEntry },
+          { name: 'conversation.input.dock', id: 'git-graph', order: 100, locale: NS, inject: injected },
           BranchChip)
       } catch {
         return () => {}
       }
     })
-    fallbackTimer = setTimeout(() => {
-      if (mounted) return
-      disposeContextWait()
-      scope.slots.inject('conversation.input.dock', () => {
-        try {
-          return scope.slots.register(
-            { name: 'conversation.input.dock', ...chipEntry },
-            BranchChip)
-        } catch {
-          return () => {}
-        }
-      })
-    }, CONTEXT_FALLBACK_MS)
   })
 }
