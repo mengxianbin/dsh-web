@@ -13,6 +13,7 @@ function skill(name: string, description: string, extra: Partial<SkillEntry> = {
     provider: 'filesystem',
     level: 'user-dsh',
     path: '/work/' + name + '/SKILL.md',
+    fileState: 'editable',
     modelInvocable: true,
     userInvocable: true,
     ...extra,
@@ -83,5 +84,138 @@ describe('selectGroups', () => {
     const visible = selectGroups(groups, { workspace: 'all', query: 'runtime' })
     expect(visible.map(item => item.key)).toEqual(['runtime'])
     expect(JSON.stringify(groups)).toBe(before)
+  })
+})
+
+describe('selectGroups: source facet', () => {
+  const groups = [
+    group('project-dsh', [skill('project-skill', 'project scoped')]),
+    group('user-dsh', [skill('user-skill', 'user scoped')]),
+    group('bundled', [skill('bundled-skill', 'shipped')]),
+  ]
+
+  it('user ticking one source sees only that source', () => {
+    // Given a payload with three source groups
+    // When the user narrows to the user root only
+    const visible = selectGroups(groups, { workspace: 'all', query: '', levels: ['user-dsh'] })
+    // Then just that group survives
+    expect(visible.map(item => item.key)).toEqual(['user-dsh'])
+  })
+
+  it('user ticking two sources sees both of them', () => {
+    // Given the same three groups
+    // When the user ticks two of them
+    const visible = selectGroups(groups, { workspace: 'all', query: '', levels: ['user-dsh', 'bundled'] })
+    // Then both are listed in host order
+    expect(visible.map(item => item.key)).toEqual(['user-dsh', 'bundled'])
+  })
+
+  it('user ticking a source with no matching rows sees no group at all', () => {
+    // Given the same three groups
+    // When the source facet and the query cannot both be satisfied
+    const visible = selectGroups(groups, { workspace: 'all', query: 'bundled', levels: ['user-dsh'] })
+    // Then the empty group is dropped rather than rendered blank
+    expect(visible).toEqual([])
+  })
+})
+
+describe('selectGroups: status facet', () => {
+  const groups = [
+    group('user-dsh', [
+      skill('enabled-skill', 'on'),
+      skill('disabled-skill', 'off', { modelInvocable: false }),
+    ]),
+  ]
+
+  it('user filtering to enabled skills sees only those', () => {
+    // Given one enabled and one disabled skill
+    // When the user picks the enabled facet
+    const visible = selectGroups(groups, { workspace: 'all', query: '', status: 'enabled' })
+    // Then only the enabled row remains
+    expect(visible[0].skills.map(item => item.name)).toEqual(['enabled-skill'])
+  })
+
+  it('user filtering to disabled skills sees only those', () => {
+    // Given the same pair
+    // When the user picks the disabled facet
+    const visible = selectGroups(groups, { workspace: 'all', query: '', status: 'disabled' })
+    // Then only the disabled row remains
+    expect(visible[0].skills.map(item => item.name)).toEqual(['disabled-skill'])
+  })
+
+  it('user leaving the status facet on all sees both', () => {
+    // Given the same pair
+    // When the facet is all
+    const visible = selectGroups(groups, { workspace: 'all', query: '', status: 'all' })
+    // Then both rows are listed
+    expect(visible[0].skills.map(item => item.name)).toEqual(['enabled-skill', 'disabled-skill'])
+  })
+})
+
+describe('selectGroups: mark facet', () => {
+  const groups = [
+    group('user-dsh', [
+      skill('editable-skill', 'plain'),
+      skill('linked-skill', 'linked out', { linked: true }),
+      skill('provider-skill', 'plugin file', { fileState: 'provider-file', path: undefined }),
+      skill('virtual-skill', 'no file', { fileState: 'virtual', path: undefined }),
+    ]),
+  ]
+
+  it('user ticking one mark sees only rows carrying it', () => {
+    // Given rows with different backing kinds
+    // When the user asks for symlinked rows only
+    const visible = selectGroups(groups, { workspace: 'all', query: '', marks: ['linked'] })
+    // Then only the linked row remains
+    expect(visible[0].skills.map(item => item.name)).toEqual(['linked-skill'])
+  })
+
+  it('user ticking two marks sees rows carrying either', () => {
+    // Given the same rows
+    // When the user asks for plugin-provided and fileless rows
+    const visible = selectGroups(groups, { workspace: 'all', query: '', marks: ['provider-file', 'no-file'] })
+    // Then both pathless kinds are listed, union rather than intersection
+    expect(visible[0].skills.map(item => item.name)).toEqual(['provider-skill', 'virtual-skill'])
+  })
+
+  it('user leaving the mark facet empty sees every row', () => {
+    // Given the same rows
+    // When no mark is selected
+    const visible = selectGroups(groups, { workspace: 'all', query: '', marks: [] })
+    // Then nothing is hidden
+    expect(visible[0].skills.map(item => item.name)).toEqual([
+      'editable-skill',
+      'linked-skill',
+      'provider-skill',
+      'virtual-skill',
+    ])
+  })
+})
+
+describe('selectGroups: facets combined', () => {
+  const groups = [
+    group('user-dsh', [
+      skill('alpha-on', 'alpha related'),
+      skill('alpha-off', 'alpha related', { modelInvocable: false }),
+    ]),
+    group('bundled', [skill('bundled-alpha', 'alpha related')]),
+  ]
+
+  it('user combining source, status and query sees only rows matching all three', () => {
+    // Given two user rows and one bundled row sharing a term
+    // When the user narrows to the user root, enabled only, searching the term
+    const visible = selectGroups(groups, { workspace: 'all', query: 'alpha', levels: ['user-dsh'], status: 'enabled' })
+    // Then exactly the one row satisfying every axis is left
+    expect(visible.map(item => item.key)).toEqual(['user-dsh'])
+    expect(visible[0].skills.map(item => item.name)).toEqual(['alpha-on'])
+  })
+
+  it('user narrowing with everything wide open still gets name hits first', () => {
+    // Given a row whose name matches and one where only the description does
+    const ranked = [group('user-dsh', [skill('plain', 'beta helper'), skill('beta-skill', 'unrelated')])]
+    // When the query is applied with no facet narrowing
+    const visible = selectGroups(ranked, { workspace: 'all', query: 'beta', levels: [], marks: [], status: 'all' })
+    // Then the name hit still sorts first
+    expect(visible[0].skills.map(item => item.name)).toEqual(['beta-skill', 'plain'])
   })
 })

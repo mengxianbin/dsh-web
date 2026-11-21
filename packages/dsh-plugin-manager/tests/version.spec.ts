@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { compareVersions, displayMinimumVersion, dshRequirementOf, meetsMinimumDsh, parseDshVersion } from '../src/core/version.ts'
+import { compareVersions, displayMinimumVersion, dshRequirementOf, parseDshVersion } from '../src/core/version.ts'
+
+// The range verdict moved to the host-only src/host/dsh-compat.ts so semver
+// never reaches the browser half; its boundaries are asserted in
+// dsh-compat.spec.ts.
 
 describe('parseDshVersion', () => {
   it('parses plain and prerelease versions, with v prefix and whitespace', () => {
@@ -42,32 +46,7 @@ describe('compareVersions', () => {
 
   it('returns undefined when either side is malformed', () => {
     expect(compareVersions('not-a-version', '1.0.0')).toBeUndefined()
-    expect(compareVersions('1.0.0', '1.0')).toBeUndefined()
-  })
-})
-
-describe('meetsMinimumDsh', () => {
-  it('accepts a host above the declared minimum across prerelease lines', () => {
-    expect(meetsMinimumDsh('0.1.1-rc.2', '>=0.1.0-rc.8')).toBe(true)
-    expect(meetsMinimumDsh('0.1.1-rc.2', '>=0.1.1-rc.1')).toBe(true)
-    expect(meetsMinimumDsh('0.1.0-rc.8', '>=0.1.0-rc.8')).toBe(true)
-  })
-
-  it('rejects a host below the declared minimum', () => {
-    expect(meetsMinimumDsh('0.1.0-rc.7', '>=0.1.0-rc.8')).toBe(false)
-    expect(meetsMinimumDsh('0.1.0-rc.8', '>=0.1.1-rc.1')).toBe(false)
-  })
-
-  it('means no constraint for unsupported range forms and malformed hosts', () => {
-    expect(meetsMinimumDsh('0.1.1-rc.2', '^0.1.0-rc.8')).toBeUndefined()
-    expect(meetsMinimumDsh('0.1.1-rc.2', '0.1.0-rc.8')).toBeUndefined()
-    expect(meetsMinimumDsh('0.1.1-rc.2', '')).toBeUndefined()
-    expect(meetsMinimumDsh('0.1.1-rc.2', '>= *')).toBeUndefined()
-    expect(meetsMinimumDsh('nope', '>=0.1.0-rc.8')).toBeUndefined()
-  })
-
-  it('accepts a v prefix and surrounding whitespace in the declared minimum', () => {
-    expect(meetsMinimumDsh('0.1.1-rc.2', '>= v0.1.0-rc.8')).toBe(true)
+    expect(compareVersions('1.0.0', '1.2')).toBeUndefined()
   })
 })
 
@@ -80,6 +59,12 @@ describe('dshRequirementOf', () => {
     expect(dshRequirementOf({ engines: { dsh: '>=0.1.0-rc.8' } })).toBe('>=0.1.0-rc.8')
     expect(dshRequirementOf({ dsh: { engines: { dsh: '>=0.1.1-rc.1' } }, engines: { dsh: '>=0.1.0-rc.8' } }))
       .toBe('>=0.1.1-rc.1')
+  })
+
+  it('reads a declared range in any node-semver form unchanged', () => {
+    const declared = '^0.1.1-rc.2 || ~0.1.2 || >=0.2.0-rc.2'
+    expect(dshRequirementOf({ engines: { dsh: declared } })).toBe(declared)
+    expect(dshRequirementOf({ peerDependencies: { '@deepseek-ai/dsh': declared } })).toBe(declared)
   })
 
   it('ignores missing or non-string metadata', () => {
@@ -97,7 +82,8 @@ describe('displayMinimumVersion', () => {
     expect(displayMinimumVersion('>= v0.1.0-rc.8')).toBe('0.1.0-rc.8')
   })
 
-  it('renders unsupported forms unchanged', () => {
+  it('renders a multi-form range unchanged rather than guessing a minimum', () => {
     expect(displayMinimumVersion('^0.1.0-rc.8')).toBe('^0.1.0-rc.8')
+    expect(displayMinimumVersion('~0.1.2 || >=0.2.0-rc.2')).toBe('~0.1.2 || >=0.2.0-rc.2')
   })
 })

@@ -13,7 +13,7 @@ Status: implemented
 `BranchChip` 不再使用 `getBoundingClientRect` 坐标计算、动画帧调度器与 `position: absolute`，而是在 `heroSeat` 激活时通过 React `createPortal` 直接 portal 到 `heroWorkspaceRow` 中。
 
 1. **DOM 目标解析**：`findHeroRow(anchor)` 解析匹配 `.heroWorkspaceRow` 的已连接元素（`outlet.previousElementSibling` 或 `composerStack` 内部）。
-2. **Portal 挂载**：当 `heroSeat` 处于激活状态且 `heroRow` 已解析时，`createPortal(chipNode, heroRow)` 将 chip 直接渲染至官方 `heroWorkspaceRow` flex 容器中。`conversation.input.dock` 中保留一个隐藏的零尺寸占位符。
+2. **Portal 挂载**：当 `heroSeat` 处于激活状态且 `heroRow` 已解析时，`createPortal(chipNode, heroRow)` 将 chip 直接渲染至官方 `heroWorkspaceRow` flex 容器中，并由 layout effect 使其始终位于行尾 options 组（`*`heroOptions``，以 `margin-left: auto` 顶到右边缘）之前，从而紧贴 agent-preset 座位右侧。`conversation.input.dock` 中保留一个隐藏的零尺寸占位符。
 3. **Flex 流布局**：`.anchorHero` 使用 `display: inline-flex; align-items: center;`，无需 `position: absolute;`。Chip 作为 `heroWorkspaceRow` 的原生 flex 子节点自然排列，继承官方 2px 间距、垂直居中与响应式流，无需坐标计算或 resize observer。
 4. **生命周期与清理**：当会话离开 hero 状态时（如发送消息或切换至活跃会话），`BranchChip` 卸载并干净移除 portal 节点。
 
@@ -25,6 +25,7 @@ Status: implemented
 ## Consequences
 
 - Git 分支 chip 在空白会话中与工作区 chip 和智能体预设 chip 完全对齐，具备精确的原生间距与排版。
+- chip 在该行子节点每次变更时重新排到行尾 options 组之前：React 会把 portal 子节点追加到最后，否则在行尾 options 组被顶到右侧的 shell 上，chip 会落在输入卡片右上角。
 - 消除了动画帧调度、`ResizeObserver` 循环与像素坐标计算。
 - `@linxin666/dsh-client-ui-git-graph` 客户端 bundle 已更新。
 

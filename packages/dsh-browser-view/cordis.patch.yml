@@ -1,0 +1,7 @@
+# bundle patch for the browser-view plugin: inserts its plugin row into the web
+# profile roster. Applied as a profile bundle layer (the `dsh.bundle.patch`
+# manifest field); install with
+# `dsh plugin --profile web add link:<this repo>/packages/dsh-browser-view`.
+- insert:
+    - id: ui-browser-view
+      name: '@linxin666/dsh-client-ui-browser-view'

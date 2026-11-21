@@ -1,0 +1,208 @@
+{
+  "$schema": "https://raw.githubusercontent.com/zhu1090093659/dsh-pet/main/contracts/pet-manifest-v2.schema.json",
+  "petManifestVersion": 2,
+  "id": "deep-chan",
+  "displayName": "deep酱",
+  "description": "像素风 Q 版鲸鱼女仆「deep酱」。八个状态各有逐帧画面：行走与跳跃为独立的逐帧姿势，其余状态由表情与小幅动作连续变化。",
+  "version": "1.0.0",
+  "author": "Daizhdd（形象由用户使用 AI 辅助生成；切帧 / 微动 / 打包：DSH agent）",
+  "license": "Personal-Use-Only",
+  "renderer": "sprite2d",
+  "sprite2d": {
+    "spritesheetPath": "spritesheet.webp",
+    "cell": {
+      "width": 256,
+      "height": 288
+    },
+    "columns": 8,
+    "atlasRows": 9,
+    "frames": [
+      6,
+      8,
+      8,
+      4,
+      5,
+      8,
+      6,
+      6,
+      6
+    ],
+    "tracks": {
+      "idle": {
+        "durations": [
+          520,
+          500,
+          560,
+          620,
+          520,
+          500
+        ]
+      },
+      "running-right": {
+        "durations": [
+          300,
+          300,
+          300,
+          300,
+          300,
+          300,
+          300,
+          400
+        ]
+      },
+      "running-left": {
+        "durations": [
+          300,
+          300,
+          300,
+          300,
+          300,
+          300,
+          300,
+          400
+        ]
+      },
+      "waving": {
+        "durations": [
+          420,
+          420,
+          420,
+          480
+        ]
+      },
+      "jumping": {
+        "durations": [
+          380,
+          360,
+          420,
+          400,
+          460
+        ]
+      },
+      "failed": {
+        "durations": [
+          560,
+          560,
+          600,
+          560,
+          600,
+          620,
+          560,
+          600
+        ]
+      },
+      "waiting": {
+        "durations": [
+          560,
+          560,
+          600,
+          560,
+          560,
+          620
+        ]
+      },
+      "running": {
+        "durations": [
+          320,
+          320,
+          320,
+          320,
+          320,
+          400
+        ]
+      },
+      "review": {
+        "durations": [
+          600,
+          600,
+          620,
+          600,
+          600,
+          640
+        ]
+      }
+    }
+  },
+  "sequences": {
+    "idle": [
+      "idle",
+      "waving",
+      "idle",
+      "waiting",
+      "jumping",
+      "idle"
+    ],
+    "waiting": [
+      "waiting",
+      "idle",
+      "waving",
+      "waiting",
+      "running-left",
+      "review"
+    ],
+    "thinking": [
+      "running",
+      "running-left",
+      "running",
+      "running-right",
+      "review",
+      "running"
+    ],
+    "tool": [
+      "running-right",
+      "running",
+      "running-left",
+      "running",
+      "running-right",
+      "jumping"
+    ],
+    "review": [
+      "review",
+      "waiting",
+      "review",
+      "running",
+      "waving",
+      "review"
+    ],
+    "done": [
+      "jumping",
+      "waving",
+      "jumping",
+      "waving",
+      "jumping",
+      "idle"
+    ],
+    "failed": [
+      "failed",
+      "waiting",
+      "failed",
+      "idle",
+      "waiting",
+      "failed"
+    ]
+  },
+  "remarks": {
+    "pet": [
+      "唔哇…被你摸到了",
+      "像素小女仆，随时待命",
+      "今天也要好好干活哦"
+    ],
+    "petCooldown": [
+      "让我缓一下啦…",
+      "不要一直摸头啦"
+    ],
+    "feed": [
+      "小鱼干！最喜欢了",
+      "唔…好吃",
+      "再来一条也不是不行"
+    ],
+    "feedCooldown": [
+      "刚吃过，肚子鼓鼓的",
+      "留着下次吧"
+    ],
+    "noTreats": [
+      "没有小鱼干了…",
+      "要攒够亲密度才有哦"
+    ]
+  }
+}

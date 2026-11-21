@@ -11,18 +11,32 @@
  * instance; this worker never terminates the pairing.
  */
 
-const ID_RE = /^[a-z0-9]{16}$/
-const SECRET_RE = /^[A-Za-z0-9_-]{43}$/
+/** The id/secret shape both relay paths authenticate (see relay-control.js). */
+export const ID_RE = /^[a-z0-9]{16}$/
+export const SECRET_RE = /^[A-Za-z0-9_-]{43}$/
 /** Registration writes must name a plugin-managed quick tunnel. */
 const TARGET_ORIGIN_SUFFIX = '.trycloudflare.com'
+/**
+ * The bridge markers shared with `relay-bridge.js`. A bridge answer that found
+ * no connector carries the first one, and the proxy path reads it as a
+ * same-request fallback; the other two name the transport that served a request
+ * in the response the phone sees.
+ */
+export const RELAY_BRIDGE_MARKER = 'x-relay-bridge'
+export const RELAY_BRIDGE_NO_CONNECTOR = 'no-connector'
+export const RELAY_TRANSPORT_HEADER = 'x-relay-transport'
+export const RELAY_FALLBACK_HEADER = 'x-relay-fallback'
+/** The marker the Worker's bridge door alone sets on a connector attach; the
+ * proxy path strips it, so a phone cannot present itself as a connector. */
+export const RELAY_BRIDGE_ATTACH_HEADER = 'x-relay-bridge-attach'
 /** Rate limits: registration refreshes are infrequent (per tunnel start). */
-const REGISTER_WINDOW_MS = 60 * 1000
-const REGISTER_MAX_PER_IP = 30
-const REGISTER_MAX_PER_ID = 6
+export const REGISTER_WINDOW_MS = 60 * 1000
+export const REGISTER_MAX_PER_IP = 30
+export const REGISTER_MAX_PER_ID = 6
 /** Rows not seen for this long are dropped by the cron GC. */
 const REGISTRATION_TTL_MS = 90 * 24 * 60 * 60 * 1000
 
-function json(data, status = 200, extra = {}) {
+export function json(data, status = 200, extra = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
@@ -33,12 +47,12 @@ function json(data, status = 200, extra = {}) {
   })
 }
 
-async function sha256Hex(text) {
+export async function sha256Hex(text) {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
-function timingSafeEqualStr(a, b) {
+export function timingSafeEqualStr(a, b) {
   if (a.length !== b.length) return false
   let diff = 0
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
@@ -192,6 +206,102 @@ const OFFLINE_HTML = [
 ].join('')
 
 /**
+ * Build assets under `/assets/` carry a content hash in the file name
+ * (`index-5SrrfWpU.js`, `langs/cpp-DIPi6g--.js`,
+ * `fonts/KaTeX_AMS-Regular-DRggAlZN.ttf`), so their bytes and their URL move
+ * together and a one-year max-age is safe.
+ *
+ * The tunneled instance serves them without any Cache-Control / ETag /
+ * Last-Modified, and this hop passed the origin's response through verbatim —
+ * which left the client with nothing to cache against: it re-fetched the whole
+ * shell on every load (measured 237502 B at 1.3-2.3 s TTFB through the relay,
+ * byte-identical each time). Caching hashed assets here is what makes a
+ * phone's second load cheap. Every other path keeps the origin's headers.
+ */
+const IMMUTABLE_ASSET_RE = /^\/assets\/(?:[\w.-]+\/)*[\w.-]+-[\w-]{8,}\.[A-Za-z0-9]+$/
+const IMMUTABLE_ASSET_CACHE = 'public, max-age=31536000, immutable'
+
+/** Whether one relay path names a content-hashed build asset. Deliberately
+ * narrow: an unhashed name under `/assets/` (a favicon, a manifest) keeps the
+ * origin's headers, because caching it for a year would be wrong. */
+export function isImmutableAssetPath(pathname) {
+  return IMMUTABLE_ASSET_RE.test(pathname)
+}
+
+/** Add immutable caching to a hashed build asset. Everything else — `/api/*`,
+ * HTML, unhashed names, WebSocket upgrades (101) and non-200 responses — is
+ * returned exactly as the origin sent it. */
+function withImmutableAssetCache(response, pathname, method) {
+  if (method !== 'GET' && method !== 'HEAD') return response
+  if (response.status !== 200) return response
+  if (!isImmutableAssetPath(pathname)) return response
+  const headers = new Headers(response.headers)
+  headers.set('cache-control', IMMUTABLE_ASSET_CACHE)
+  return new Response(response.body, { status: 200, statusText: response.statusText, headers })
+}
+
+/**
+ * Which transport serves one instance: `bridge` only when this deployment
+ * carries the object namespace and the instance's lease was flipped.
+ *
+ * The mode lives on the lease row, so it is read apart from the registry row
+ * the quick path needs -- and a failure here is `quick`, never an error. That
+ * direction matters at deploy time: a Worker shipped before the mode migration
+ * must keep serving the whole fleet on quick instead of answering 503.
+ * @returns `bridge` or `quick`.
+ */
+export async function bridgeModeOf(env, id) {
+  if (env.RELAY_BRIDGE === undefined) return 'quick'
+  try {
+    const lease = await env.DB.prepare('SELECT mode FROM relay_leases WHERE id = ?1').bind(id).first()
+    return lease && lease.mode === 'bridge' ? 'bridge' : 'quick'
+  } catch {
+    return 'quick'
+  }
+}
+
+/**
+ * Hand one request to the instance's object.
+ * @returns the object's response, or undefined when it holds no connector and
+ * the caller must fall back to quick inside this same request.
+ */
+async function fetchThroughBridge(request, env, id) {
+  // A downstream request must never look like a connector attach: only the
+  // bridge door may set that marker, so a forged one is dropped here.
+  const forwarded = request.headers.has(RELAY_BRIDGE_ATTACH_HEADER)
+    ? new Request(request, { headers: withoutAttachMarker(request.headers) })
+    : request
+  let response
+  try {
+    response = await env.RELAY_BRIDGE.get(env.RELAY_BRIDGE.idFromName(id)).fetch(forwarded)
+  } catch (error) {
+    console.warn(JSON.stringify({ relay: 'bridge-error', id, message: error instanceof Error ? error.message : String(error) }))
+    return undefined
+  }
+  if (response.status === 409 && response.headers.get(RELAY_BRIDGE_MARKER) === RELAY_BRIDGE_NO_CONNECTOR) {
+    console.warn(JSON.stringify({ relay: 'bridge-fallback', id, reason: RELAY_BRIDGE_NO_CONNECTOR }))
+    return undefined
+  }
+  return response
+}
+
+/** The same headers without the bridge attach marker. */
+function withoutAttachMarker(headers) {
+  const copy = new Headers(headers)
+  copy.delete(RELAY_BRIDGE_ATTACH_HEADER)
+  return copy
+}
+
+/** Mark a quick answer as the fallback of a bridge-mode request. A 101 is
+ * returned untouched: its socket cannot be carried by a rebuilt Response. */
+function withFallbackMark(response) {
+  if (response.status === 101) return response
+  const headers = new Headers(response.headers)
+  headers.set(RELAY_FALLBACK_HEADER, RELAY_BRIDGE_NO_CONNECTOR)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
+/**
  * Proxy one request for `<id>.dsh-market.com` to the registered target.
  * The pairing cookie and every application check stay on the tunneled
  * instance; this hop rewrites only the Host header so the origin sees the
@@ -215,6 +325,14 @@ export async function handleRelayProxy(request, env, id) {
       },
     })
   }
+  // Data-plane split. Quick instances never reach the object, and a bridge
+  // instance with no connector reaches the code below instead -- unchanged.
+  const transport = await bridgeModeOf(env, id)
+  if (transport === 'bridge') {
+    const bridged = await fetchThroughBridge(request, env, id)
+    if (bridged !== undefined) return bridged
+  }
+
   let target
   try {
     target = new URL(request.url)
@@ -242,7 +360,9 @@ export async function handleRelayProxy(request, env, id) {
     // client sends an Upgrade request and the body is null).
     ...(request.headers.get('upgrade') === 'websocket' ? {} : { duplex: 'half' }),
   })
-  return fetch(forwarded)
+  const response = await fetch(forwarded)
+  const shaped = withImmutableAssetCache(response, target.pathname, request.method)
+  return transport === 'bridge' ? withFallbackMark(shaped) : shaped
 }
 
 /** Dispatch for relay traffic: returns a Response, or undefined when the

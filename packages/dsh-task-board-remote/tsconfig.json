@@ -1,0 +1,21 @@
+{
+  // Self-contained compiler settings for a host-only package: the host half runs
+  // in the dsh process, and every type resolves from the @deepseek-ai/* npm SDK
+  // packages declared in devDependencies, never from a DSH source checkout.
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2024"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+}

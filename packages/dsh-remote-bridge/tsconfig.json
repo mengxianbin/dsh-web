@@ -1,0 +1,26 @@
+{
+  // Host/client combined program: the host half runs in the dsh process, the
+  // browser half in the Web GUI, and the two share src/core. A combined program
+  // is the shape dsh-remote-web-ui (the sibling surface) uses; the git-graph
+  // split exists for the sessions-store Context merge, which this package does
+  // not carry. SDK types resolve from the @deepseek-ai/* npm devDependencies.
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "incremental": true,
+    "tsBuildInfoFile": "lib/tsconfig.typecheck.tsbuildinfo",
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

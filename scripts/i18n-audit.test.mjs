@@ -10,6 +10,7 @@ import {
   diffKeySets,
   diffPlaceholders,
   deriveNamespace,
+  placeholderMismatchErrors,
   placeholdersOf,
   scanCjk,
   stripComments,
@@ -77,6 +78,17 @@ test('diffPlaceholders compares placeholder sets per shared key', () => {
   assert.equal(issues.length, 1)
   assert.deepEqual(issues[0].onlyA, ['max'])
   assert.deepEqual(issues[0].onlyB, [])
+})
+
+test('placeholderMismatchErrors names the key and both sides instead of crashing', () => {
+  const zh = { ok: '{count} 个', bad: '{count} 个 ≥ {max}' }
+  const en = { ok: '{count} items', bad: '{count} items' }
+  const lines = placeholderMismatchErrors('pkg', 'ns', diffPlaceholders(zh, en), 'en')
+  assert.equal(lines.length, 1)
+  assert.match(lines[0], /key "bad"/, 'the offending key must be named')
+  assert.match(lines[0], /zh-only: max/)
+  assert.match(lines[0], /en-only: none/, 'the compared side labels its own placeholders')
+  assert.ok(!lines[0].includes('undefined'), 'an undefined loop variable must never reach the message')
 })
 
 test('deriveNamespace resolves identifier via const table or entry declaration', () => {

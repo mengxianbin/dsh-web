@@ -17,17 +17,17 @@
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./lib/types/index.d.ts",
-      "default": "./lib/index.js"
-    },
+    "./locale/zh.json": "./locale/zh.json",
     "./client": {
       "types": "./lib/types/client/index.d.ts",
       "default": "./lib/client.js"
     },
-    "./src/*": "./src/*",
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
     "./locale/en.json": "./locale/en.json",
-    "./locale/zh.json": "./locale/zh.json",
+    "./src/*": "./src/*",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -100,5 +100,6 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/zhu1090093659/dsh-web.git"
-  }
+  },
+  "upstream": "0.4.13"
 }

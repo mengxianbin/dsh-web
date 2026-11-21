@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Squad glyph: three linked member nodes. The family traces its marks on a
+       512-unit grid, so the 24-unit line geometry (1.3 stroke) is scaled onto it;
+       the stroke keeps the family accent #4d6bfe. -->
+  <g transform="scale(21.333333)" fill="none" stroke="#4d6bfe" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
+    <circle cx="12" cy="4.8" r="2.2"/>
+    <circle cx="5.2" cy="18.4" r="2.2"/>
+    <circle cx="18.8" cy="18.4" r="2.2"/>
+    <path d="M 10.6 6.6 L 6.6 16.6"/>
+    <path d="M 13.4 6.6 L 17.4 16.6"/>
+    <path d="M 7.4 18.4 L 16.6 18.4"/>
+  </g>
+</svg>

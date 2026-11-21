@@ -46,16 +46,18 @@ function labelOf(entry: RegisteredEntry | undefined): unknown {
   return typeof entry?.label === 'function' ? (entry.label as () => string)() : undefined
 }
 
-const emptyScope = {
-  bind: () => ({
-    subscribe: () => () => {},
-    getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true }, base: {}, user: {}, revision: 1, mode: 'host' }),
-  }),
+const marketForm = {
+  subscribe: () => () => {},
+  getSnapshot: () => ({ status: 'ready', writable: true, value: { enabled: true }, base: {}, user: {}, revision: 1 }),
+  set: async () => true,
+  unset: async () => true,
+  mutate: async () => true,
 }
 
 function makeCtx() {
   const injected: string[] = []
   const registered: Array<Record<string, unknown>> = []
+  const requested = new Array<string>()
   const fakeCtx = {
     effect: (fn: () => unknown) => { fn(); return () => {} },
     locale: {
@@ -63,35 +65,127 @@ function makeCtx() {
       bind: () => (key: string) => key,
     },
     get: () => undefined,
-    settingsScope: emptyScope as never,
+    // cordis ctx.inject, as the optional official-face bridges use it: the
+    // callback gets this same context, and since this host publishes neither
+    // face both bridges settle to null. The injections are not counted, because
+    // the assertion below is about the settings.section slot injection.
+    inject: (_name: string, fn: (inner: unknown) => unknown) => { fn(fakeCtx); return () => {} },
+    configForms: {
+      get: (entryId: string) => { requested.push(entryId); return marketForm },
+      // The describe mirror names the profile rows this Host serves. It answers
+      // asynchronously in the real client, which is why the fallback rebinds;
+      // here it answers with the aggregate row the profile actually carries.
+      describe: () => ({
+        getSnapshot: () => ({
+          status: 'ready',
+          view: { namespaces: [{ ns: 'web-ui-market' }], writable: true, hasDocument: true },
+          error: null,
+        }),
+        subscribe: () => () => {},
+      }),
+    },
     slots: {
       inject: (name: string, fn: () => unknown) => { injected.push(name); fn(); return () => {} },
       register: (options: Record<string, unknown>) => { registered.push(options); return () => {} },
     },
   }
-  return { fakeCtx, injected, registered }
+  return { fakeCtx, injected, registered, requested }
 }
 
 describe('dsh-web-ui-market client store registration', () => {
-  it('registers the single dsh-web-ui-market section rendering the store card', () => {
+  it('user sees one dsh-web-ui-market settings section rendering the store card', () => {
+    // Given a plugin context whose settings.section injection and slot registry are observable
     const { fakeCtx, injected, registered } = makeCtx()
+    // When apply() runs
     apply(fakeCtx as never)
-
-    expect(injected).toEqual(['settings.section'])
+    // Then a standalone install keeps exactly one first-level store-card section
+    expect(injected).toEqual([])
+    expect(registered.filter((entry) => entry.name === 'settings.section')).toHaveLength(1)
 
     const section = registered.find((entry) => entry.name === 'settings.section' && entry.id === 'dsh-workshop') as RegisteredEntry | undefined
-    expect(section).toBeDefined()
-    expect(section?.children).toBeUndefined()
+    // The section declares the child slot asset-kind panels register into;
+    // the slot itself is empty until a contributor (the preset center) mounts.
+    expect(section?.children).toEqual({ 'dsh-workshop.panel': { kind: 'keyed', scope: 'root' } })
     expect(section?.order).toBe(150)
     expect(section?.locale).toBe('dsh-web-ui-market')
     expect(labelOf(section)).toBe('settings.title')
   })
 
-  it('no longer registers any tab slot entry', () => {
+  it('user gets a keyed Web Extensions child when the parent service exists', () => {
+    // Given a running Web Extensions parent service
     const { fakeCtx, registered } = makeCtx()
+    Object.assign(fakeCtx, {
+      get: (name: string) => name === 'webUiExtensions'
+        ? {
+          sectionId: 'web-ui-plugins',
+          label: () => 'Web Extensions',
+          open: () => true,
+          registerPage: (page: Record<string, unknown>) => {
+            const options = {
+              name: 'web-ui.extension',
+              key: page.key,
+              locale: page.locale,
+              children: page.children,
+              inject: page.inject,
+            }
+            registered.push(options)
+            return () => {
+              const index = registered.indexOf(options)
+              if (index >= 0) registered.splice(index, 1)
+            }
+          },
+        }
+        : undefined,
+    })
+    // When the Workshop applies
     apply(fakeCtx as never)
 
+    // Then it contributes only the keyed child with its existing asset-panel seat
+    const child = registered.find(entry => entry.name === 'web-ui.extension')
+    expect(child).toMatchObject({
+      key: 'dsh-workshop',
+      locale: 'dsh-web-ui-market',
+      children: { 'dsh-workshop.panel': { kind: 'keyed', scope: 'root' } },
+    })
+    expect(child).not.toHaveProperty('id')
+    expect(child).not.toHaveProperty('order')
+    expect(child).not.toHaveProperty('label')
+    expect(registered.some(entry => entry.name === 'settings.section')).toBe(false)
+  })
+
+  it('user finds no tab slot entry registered after the hub removal', () => {
+    // Given the same plugin context
+    const { fakeCtx, registered } = makeCtx()
+    // When apply() runs
+    apply(fakeCtx as never)
+    // Then no entry claims the retired dsh-market.tab slot
     expect(registered.some((entry) => entry.name === 'dsh-market.tab')).toBe(false)
+  })
+
+  it('user gets the settings entry bound through the injected configForms service', () => {
+    // Given a context exposing only the configForms service, whose mirror names
+    // the aggregate row this profile carries
+    const { fakeCtx, requested } = makeCtx()
+    // When apply() runs
+    apply(fakeCtx as never)
+    // Then the profile entry id the Host serves is the one bound, not the bare
+    // namespace (which is no entry id at all on an aggregate install, so every
+    // save answered "No configurable plugin entry")
+    expect(requested).toEqual(['web-ui-market'])
+  })
+
+  it('prefers the webUiSettings binder when the settings package is loaded', () => {
+    const bound = new Array<unknown>()
+    const { fakeCtx, requested } = makeCtx()
+    Object.assign(fakeCtx, {
+      get: (name: string) => name === 'webUiSettings'
+        ? { bind: (spec: unknown) => { bound.push(spec); return marketForm } }
+        : undefined,
+    })
+    apply(fakeCtx as never)
+
+    expect(bound).toEqual([{ namespace: 'dsh-web-ui-market' }])
+    expect(requested).toEqual([])
   })
 
   it('handles duplicate apply gracefully when locale.register or slots.register throws (Issue #1030)', () => {
@@ -118,7 +212,8 @@ describe('dsh-web-ui-market client store registration', () => {
         bind: () => (key: string) => key,
       },
       get: () => undefined,
-      settingsScope: emptyScope as never,
+      inject: (_name: string, fn: (inner: unknown) => unknown) => { fn(fakeCtx); return () => {} },
+      configForms: { get: () => marketForm },
       slots: {
         inject: (_name: string, fn: () => unknown) => { fn(); return () => {} },
         register: (options: Record<string, unknown>) => {

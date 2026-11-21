@@ -1,0 +1,52 @@
+# Agent Note: LiangShen guard thresholds on the factory path, and where the step-down stops
+
+Status: implemented
+
+Superseded by [the retirement note](../simplification/2026-10-17-liangshen-guard-retirement.md): the breaker these thresholds belonged to has been removed.
+
+## Problem
+
+Three confirmed defects in the LiangShen preset's runtime degeneration circuit breaker (`packages/dsh-liangshen/presets/liangshen/guard.mjs`), all recorded in the package's then-maintained known-issues list.
+
+**1. The adaptive thresholds and the sensitivity dial were dead on the factory path.** `resolveThresholds` gives an explicit fine-tuning value priority over both the effort-adaptive table and the sensitivity preset, while the plugin's Config declared `guardStallReasoningChars: 8000`, `guardGlobalStallCap: 4` and `guardEchoFailures: 3` as schema defaults, `resolveConfig` resolved them against `DEFAULT_CONFIG`, `applyPresetOverrides` wrote them into the declared preset's `guard` row unconditionally, and the shipped `agent.cordis.yml` carried the same three keys. Each layer alone was enough to pin the values; together they made the `effort` and `sensitivity` inputs to the breaker inert. Measured on the factory configuration: `effort` of max/high/low all resolved to 8000, and conservative/balanced/aggressive all resolved to 8000. A `low`-effort session therefore ran a floor 2.5x stricter than designed — the direction that raises the false-interruption rate, which the breaker's own stated principle ("a false interruption of real long thinking hurts more than a missed episode") forbids.
+
+**2. The step-down could fall below the effort sweet spot, and the echo signal got an action that does not fit it.** The ladder was `max -> high -> low`, so a session the user explicitly placed on `high` was stepped down to `low` — below the 60-80 range the official effort-cost curve identifies as recovering most accuracy. Both pieces of evidence behind the step-down (the r/DeepSeek 1whgo3e field report and that curve) support only "max is excessive"; neither supports going below the sweet spot. Separately, stall and echo shared one action although only stall is a symptom of an over-large reasoning budget: an echo is a call that has itself stopped working, and lowering the effort there weakens a model that is already stuck while the injected message is what asks it to change action.
+
+**3. STALL detection was structurally blind on redacted routes.** Both stall ladders measure reasoning-block character counts. A provider that persists a signed reasoning block with an empty string (the shape `tools/analyze-session.mjs` exists to account for) makes every count read zero, so both ladders can never fire and only the echo leg remains.
+
+## Decision
+
+**Guard fine-tuning fields are unset by default, and "unset" is what the shipped preset carries.** `Config` declares `guardStallReasoningChars`, `guardGlobalStallCap` and `guardEchoFailures` as `z.number().volatile()` with no `default`; `ResolvedConfig` and `DEFAULT_CONFIG` type them `number | undefined` and resolve them to `undefined`; `applyPresetOverrides` writes a guard key only when the value is not `undefined`; and the shipped `agent.cordis.yml` guard row declares `enabled` and `sensitivity` alone. The three fields are overrides that win when an operator sets them, and the effort table plus the sensitivity scale are the factory behavior.
+
+**The step-down ladder stops at the sweet spot.** `EFFORT_LADDER` is `['max', 'high']`: `stepDownEffort('max')` is `'high'` and `stepDownEffort('high')` is `undefined`, so no session is ever lowered below the range the official curve measures as recovering most accuracy.
+
+**Only a stall steps the effort down.** Firing the breaker always injects the breaker message; `state.stepDownLeft` is armed only when the verdict's signal is `'stall'`. An echo gets the message alone. The fire log names which action it took.
+
+**The echo message carries a retry-safety split.** The ECHO verdict's breaker message classifies the failing call by tool name (guard.mjs's `RETRY_SAFE_TOOLS` allowlist): a read-only or idempotent tool reports `effectState none` — nothing was left behind and corrected arguments may be retried; everything else (a shell command, a write, a batch that may have stopped halfway, an unrecognised tool) reports `effectState unknown` — the model must inspect the real state with read-only tools before deciding the next call and must not re-call as-is. Shell tools are deliberately absent from the allowlist (the same `bash` runs `ls` and `git commit`). `foldGuardSignal`'s echo verdict carries an extra `tool` field that serves only as message-classification evidence and never changes triggering; the stall message stays free of the split. The vocabulary is borrowed from dsh-ops' effectState error contract.
+
+**Ownership.** The ladder row of [the 2026-09-20 note's shape table](../../simplification/2026-09-20-liangshen-guard-triggered-reasoning-stepdown.md) ("current level one notch down, max -> high -> low") is superseded by this note; that note's other rows — the trigger-only timing, the automatic step-down as part of firing, the accepted one-off cache break, the unchanged settings card, and the `guard.mjs` carrier — stand, and it stays the owner of the mechanism this note only narrows.
+
+**A session with no reasoning text anywhere falls back to step counts.** The fold reports a session-level `blind` fact — reasoning blocks were observed and not one character of reasoning text was — and when it holds, consecutive output-free reasoning-block steps trip STALL at `blindStallCap` (defaulting to the slow-burn cap, so the sensitivity preset scales it identically). The blind ladder counts a step that carried a reasoning block and produced no output, regardless of size; a stream with no reasoning block at all is not blind, because the character ladders have simply not had their chance. On the first request where the fact holds, the guard warns once per agent that this session's stall detection is degraded to step counts.
+
+## Consequences
+
+- The settings surface's three numeric fields mean "leave empty to adapt": their hints say so in both languages, the card's placeholders read "adaptive", and clearing a field writes no key back into the guard row, so the adaptive table resumes.
+- The sensitivity dial now has an observable effect on the factory configuration: conservative resolves the max-effort floor to 12000, aggressive to 4000, and the slow-burn cap to 6 / 2.
+- A redacted-route session is covered by STALL instead of being left with the echo leg alone, at the cost of one warning line per agent and a measure that is coarser than characters — hence the fallback is capped by the same conservative step count as the slow-burn ladder rather than by anything tighter.
+- The step-down window still rides the `agent/request` waterfall for three requests inside a fired episode, and the guard remains a pure pass-through otherwise, so the prefix-cache and explicit-effort constraints of [the note that revived the mechanism](../../simplification/2026-09-20-liangshen-guard-triggered-reasoning-stepdown.md) still hold.
+
+## Testing
+
+- `packages/dsh-liangshen/tests/guard.test.ts` covers all three: `resolveThresholds` per effort and per sensitivity, the ladder's two ends (`max -> high`, `high` untouched), the blind and non-blind sessions on the same four-step stream, the blind streak's reset and cap, and the signal-to-action split driven through `apply` over a fake context (an echo injects the message and leaves a max-effort request untouched; a stall injects the message and steps `max -> high` for exactly the configured window; the degradation warning fires once per agent and never for a text-carrying session).
+- `src/index.test.ts` pins the three fields resolving to `undefined` from both an empty config and the schema, `src/composition.test.ts` pins the overlay leaving every guard key out while they are unset, and `src/announce.test.ts` pins the declared guard row carrying only what was actually set.
+- `pnpm --filter @linxin666/dsh-liangshen test` passes 366 tests across 21 files; `pnpm --filter @linxin666/dsh-liangshen typecheck` passes.
+- No live-session evidence: the change alters a preset row and a settings schema, so it takes effect for sessions declared after the plugin re-declares its preset. The running `dsh web` host was left untouched.
+
+## Alternatives considered
+
+- Keep the schema defaults and instead stop writing them into the preset row. Rejected: the settings card would still show 8000/4/3 as stored values, so "unset" would be unrepresentable in the UI and the operator could never see or restore the adaptive behavior; the schema is the only place that can express "no value".
+- Give the three fields `default(undefined)` or a sentinel (0, -1) meaning "adaptive". Rejected: a sentinel needs a decoder at every read site and makes an invalid value indistinguishable from a deliberate one; `undefined` is already the schema's own absent state and flows through `readField` unchanged.
+- Step `high` down to the middle of the 60-80 range instead of leaving it alone. Rejected: the numeric effort scale is not exposed on this route (the ladder is the named levels `max` / `high` / `low`), so there is no mid-range level to step to; leaving `high` alone is the conservative reading of evidence that only ever showed `max` to be excessive.
+- Drop the step-down entirely now that only one signal justifies it. Rejected: the r/DeepSeek field report is a live case of a stall recovering when the budget was lowered, and [the owning note](../../simplification/2026-09-20-liangshen-guard-triggered-reasoning-stepdown.md) deliberately revived the mechanism for exactly that shape; narrowing it to the signal it fits keeps the evidence and removes the misuse.
+- Warn that stall detection is unavailable on a redacted route instead of adding a fallback measure. Rejected: it leaves the session unprotected while the step count is a real, if coarser, measure of the same shape — and the request explicitly required a conservative fallback rather than an alarm.
+- Make the blind fallback fire on any consecutive output-free steps, regardless of whether a reasoning block was present. Rejected: it would count bare tool acknowledgements and empty turns, raising the false-positive rate on ordinary sessions — the opposite of the conservative direction this breaker is built on.

@@ -1,0 +1,1 @@
+import{sessionIdSchema as a}from"./sessions.schema-DRNwaBIv.js";import{s as e,o as s,a as r,l as o}from"./schemas-BJSHdSgR.js";import"./session-search-BOHnX8ad.js";import"./json-schema-processors-Cb3-slAN.js";const t=e().min(1),c=s({sessionId:a,approvalId:t,outcome:r([o("allowed-once"),o("rejected")])});export{t as approvalRequestIdSchema,c as approvalResponsePayloadSchema};

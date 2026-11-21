@@ -5,10 +5,13 @@
 
 import { afterEach, describe, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, existsSync, readFileSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, existsSync, readFileSync, readdirSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { brotliCompressSync } from 'node:zlib'
 import {
+  DEFAULT_INSTALL_RETRIES,
+  FETCH_TIMEOUT_MS,
   FILE_MAX_BYTES,
   MANIFEST_MAX_BYTES,
   MARKET_ORIGIN,
@@ -94,14 +97,23 @@ describe('installAsset', () => {
         },
       ],
     },
+    presets: {
+      items: [
+        {
+          id: 'demo-preset',
+          version: '1.2.0',
+          files: ['agent.cordis.yml', 'preset.yml', 'hook.mjs'],
+        },
+      ],
+    },
   }
 
   function mockFetch(overrides: Record<string, number> = {}): typeof fetch {
     return (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input)
-      const m = url.match(/\/manifest\/(skins|pets)\.json$/)
+      const m = url.match(/\/manifest\/(skins|pets|presets)\.json$/)
       if (m) {
-        return new Response(JSON.stringify(manifest[m[1] as 'skins' | 'pets']), { status: 200 })
+        return new Response(JSON.stringify(manifest[m[1] as 'skins' | 'pets' | 'presets']), { status: 200 })
       }
       const file = url.split('/').pop() ?? ''
       if (overrides[file] !== undefined) {
@@ -118,6 +130,35 @@ describe('installAsset', () => {
     expect(result.files).toBe(3)
     expect(result.dest).toBe(targetDir(home, 'skin', 'whale-song'))
     expect(readFileSync(join(home, 'skins', 'whale-song', 'skin.json'), 'utf8')).toBe('data-skin.json')
+    expect(readFileSync(join(home, 'skins', 'whale-song', 'assets', 'whale-art.webp'), 'utf8')).toBe('data-whale-art.webp')
+    // The rename target is the plain id: staging left nothing visible behind
+    expect(readdirSync(join(home, 'skins'))).toEqual(['whale-song'])
+  })
+
+  it('user installs a skin while the host fetch cannot decode compressed bodies', async () => {
+    const home = tmpHome()
+    // Given the alpha.2 host has imported npm undici, so its built-in fetch
+    // hands back compressed bytes with no content-encoding header; this mock
+    // mirrors that by answering raw brotli to any request that did not ask for
+    // identity.
+    // When the installer requests the manifest and every asset.
+    // Then the install succeeds, because each request carried
+    // accept-encoding: identity and the written bytes are the origin's.
+    const compressed = (text: string) => brotliCompressSync(Buffer.from(text))
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (new Headers(init?.headers).get('accept-encoding') !== 'identity') {
+        return new Response(compressed(url.endsWith('skins.json') ? JSON.stringify(manifest.skins) : 'data-compressed'), { status: 200 })
+      }
+      const m = url.match(/\/manifest\/(skins|pets|presets)\.json$/)
+      if (m) return new Response(JSON.stringify(manifest[m[1] as 'skins' | 'pets' | 'presets']), { status: 200 })
+      return new Response('data-' + (url.split('/').pop() ?? ''), { status: 200 })
+    }) as typeof fetch
+
+    const result = await installAsset('skin', 'whale-song', { dshHome: home, fetchImpl })
+
+    expect(result.ok).toBe(true)
+    expect(readFileSync(join(home, 'skins', 'whale-song', 'skin.css'), 'utf8')).toBe('data-skin.css')
     expect(readFileSync(join(home, 'skins', 'whale-song', 'assets', 'whale-art.webp'), 'utf8')).toBe('data-whale-art.webp')
   })
 
@@ -148,6 +189,25 @@ describe('installAsset', () => {
     expect(second.id).toBe('whale-song')
   })
 
+  it('installs a preset into the inert library and records the manifest version', async () => {
+    const home = tmpHome()
+    const result = await installAsset('preset', 'demo-preset', { dshHome: home, fetchImpl: mockFetch() })
+    expect(result.dest).toBe(targetDir(home, 'preset', 'demo-preset'))
+    expect(readFileSync(join(home, 'agent-presets', 'demo-preset', 'agent.cordis.yml'), 'utf8')).toBe('data-agent.cordis.yml')
+    // The discovery root the roster scans must stay untouched: a downloaded
+    // preset is inert until the user enables it.
+    expect(existsSync(join(home, '.agent-presets'))).toBe(false)
+    const provenance = JSON.parse(readFileSync(join(home, 'agent-presets', 'demo-preset', PROVENANCE_FILENAME), 'utf8'))
+    expect(provenance).toMatchObject({ kind: 'preset', id: 'demo-preset', assetVersion: '1.2.0' })
+  })
+
+  it('rejects a preset id outside the official directory rule', async () => {
+    const home = tmpHome()
+    expect(() => planDownload('preset', 'Demo_Preset', ['agent.cordis.yml'])).toThrow(/invalid asset id/)
+    await expect(installAsset('preset', 'Demo_Preset', { dshHome: home, fetchImpl: mockFetch() }))
+      .rejects.toMatchObject({ code: 'manifest' })
+  })
+
   it('refuses to overwrite without force and replaces with force', async () => {
     const home = tmpHome()
     const dest = targetDir(home, 'pet', 'whale-girl')
@@ -160,19 +220,53 @@ describe('installAsset', () => {
     expect(readFileSync(join(dest, 'pet.json'), 'utf8')).toBe('data-pet.json')
   })
 
-  it('cleans the temp dir and keeps nothing partial on download failure', async () => {
+  // Staging is a sibling of the destination, so a scanner that lists the kind
+  // directory meets it unless its name starts with a dot. A failed install
+  // must therefore leave no visible entry, and a staging directory the
+  // best-effort cleanup could not remove must still be dot-prefixed
+  // (issue #1952). The previous version of this test called
+  // require('node:fs') — which throws in an ES module — inside a try/catch
+  // that swallowed the error, so its assertion held without reading a
+  // directory at all.
+  it.each([
+    { kind: 'skin' as const, id: 'whale-song', file: 'whale-art.webp' },
+    { kind: 'pet' as const, id: 'whale-girl', file: 'spritesheet.webp' },
+    { kind: 'preset' as const, id: 'demo-preset', file: 'hook.mjs' },
+  ])('operator gets no visible $kind entry after a failed download', async ({ kind, id, file }) => {
+    // Given an asset whose last file answers 404
     const home = tmpHome()
-    await expect(
-      installAsset('skin', 'whale-song', { dshHome: home, fetchImpl: mockFetch({ 'whale-art.webp': 404 }) }),
-    ).rejects.toMatchObject({ code: 'download' })
-    const dest = targetDir(home, 'skin', 'whale-song')
+    const dest = targetDir(home, kind, id)
+    const parent = dirname(dest)
+    const inFlight: string[] = []
+    const base = mockFetch({ [file]: 404 })
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/' + file)) {
+        // The staging directory is created before the first download, so this
+        // is exactly what a scanner lists while the install is still running.
+        inFlight.push(...readdirSync(parent))
+      }
+      return base(input, init)
+    }) as typeof fetch
+
+    // When the install fails
+    await expect(installAsset(kind, id, { dshHome: home, fetchImpl }))
+      .rejects.toMatchObject({ code: 'download' })
+
+    // Then the entry a scanner could have met was a hidden sibling of the
+    // destination, which keeps the rename an atomic same-volume move
+    expect(inFlight).toHaveLength(1)
+    const staged = inFlight[0] ?? ''
+    expect(staged).toMatch(new RegExp('^\\.' + id + '\\.install-[0-9a-z]+-[0-9a-z]+$'))
+    expect(join(parent, staged)).not.toBe(dest)
+    expect(dirname(join(parent, staged))).toBe(parent)
+
+    // And no visible entry survives the failure, so a scanner lists nothing
+    const survivors = readdirSync(parent)
+    expect(survivors.filter((name) => !name.startsWith('.'))).toEqual([])
+    // ...and a staging directory the cleanup could not remove is still hidden
+    expect(survivors.filter((name) => name.startsWith('.'))).toEqual(survivors)
+    expect(survivors).not.toContain(id)
     expect(existsSync(dest)).toBe(false)
-    const leftovers = dirs.map((d) => {
-      try {
-        return require('node:fs').readdirSync(join(home, 'skins')).filter((n: string) => n.startsWith('whale-song'))
-      } catch { return [] }
-    }).flat()
-    expect(leftovers).toEqual([])
   })
 
   it('rejects unknown ids with manifest error', async () => {
@@ -206,6 +300,13 @@ describe('installAsset limits', () => {
     const fetchImpl = (async () => new Response(big, { status: 200 })) as typeof fetch
     await expect(installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, manifestMaxBytes: 1024 }))
       .rejects.toMatchObject({ code: 'manifest', message: expect.stringMatching(/exceeds/) })
+  })
+
+  it('pins an installer cap that clears the largest published pet asset', () => {
+    // jyn ships 1565 per-frame images; a cap at or below that makes an
+    // official market asset uninstallable for every user (issue #1578).
+    // scripts/market-build-cap.test.mjs holds the pipeline side of the gate.
+    expect(MAX_FILES_PER_ASSET).toBe(2000)
   })
 
   it('rejects an asset declaring more files than the cap', async () => {
@@ -247,6 +348,134 @@ describe('installAsset limits', () => {
     await expect(installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, fileMaxBytes: 1024 }))
       .rejects.toMatchObject({ code: 'download', message: expect.stringMatching(/exceeds/) })
     expect(existsSync(targetDir(home, 'skin', 'whale-song'))).toBe(false)
+  })
+
+  it('operator gets a per-attempt timeout long enough for the published manifest', () => {
+    // Given the installer's default budget
+    // When a caller configures nothing
+    // Then one attempt gets at least two minutes, because the manifest alone
+    // measured 68.5 s on a direct connection (issue #1941)
+    expect(FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000)
+    expect(DEFAULT_INSTALL_RETRIES).toBeGreaterThanOrEqual(2)
+  })
+
+  // A self-contained manifest for the limits block: the shared fixture lives
+  // in the sibling describe.
+  const skinsManifest = {
+    items: [{ id: 'whale-song', files: ['skin.json', 'skin.css', 'assets/whale-art.webp'] }],
+  }
+  const manifestUrl = MARKET_ORIGIN + '/manifest/skins.json'
+
+  it('operator gets the asset installed after one transient 503 on the manifest', async () => {
+    const home = tmpHome()
+    let manifestCalls = 0
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === manifestUrl) {
+        manifestCalls += 1
+        // Given the origin answers the first manifest request with 503
+        if (manifestCalls === 1) return new Response('busy', { status: 503 })
+        return new Response(JSON.stringify(skinsManifest), { status: 200 })
+      }
+      return new Response('data-' + (url.split('/').pop() ?? ''), { status: 200 })
+    }) as typeof fetch
+
+    // When the install runs
+    const result = await installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, retryDelayMs: 0 })
+
+    // Then the second attempt succeeds and the asset is written once
+    expect(result.ok).toBe(true)
+    expect(manifestCalls).toBe(2)
+    expect(existsSync(targetDir(home, 'skin', 'whale-song'))).toBe(true)
+  })
+
+  it('operator gets the asset installed after one transient 500 on a file', async () => {
+    // Given a manifest that answers and one file that fails once with 500
+    const home = tmpHome()
+    let fileCalls = 0
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === manifestUrl) return new Response(JSON.stringify(skinsManifest), { status: 200 })
+      if (url.endsWith('/skin.css')) {
+        fileCalls += 1
+        if (fileCalls === 1) return new Response('busy', { status: 500 })
+      }
+      return new Response('data-' + (url.split('/').pop() ?? ''), { status: 200 })
+    }) as typeof fetch
+
+    // When the install runs
+    const result = await installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, retryDelayMs: 0 })
+
+    // Then the retried file arrives and the asset is written once
+    expect(result.ok).toBe(true)
+    expect(fileCalls).toBe(2)
+  })
+
+  it('operator gets a download error without a retry when a file is missing', async () => {
+    const home = tmpHome()
+    let fileCalls = 0
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url === manifestUrl) return new Response(JSON.stringify(skinsManifest), { status: 200 })
+      if (url.endsWith('/skin.css')) {
+        fileCalls += 1
+        return new Response('nope', { status: 404 })
+      }
+      return new Response('data-' + (url.split('/').pop() ?? ''), { status: 200 })
+    }) as typeof fetch
+
+    // Given an asset request that answers 404
+    // When the install runs
+    // Then it fails as a download error without burning the retry budget
+    await expect(installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, retryDelayMs: 0 }))
+      .rejects.toMatchObject({ code: 'download', message: expect.stringMatching(/404/) })
+    expect(fileCalls).toBe(1)
+    expect(existsSync(targetDir(home, 'skin', 'whale-song'))).toBe(false)
+  })
+
+  it('operator gets an actionable blocked error when a Cloudflare challenge intercepts the install', async () => {
+    const home = tmpHome()
+    let calls = 0
+    const fetchImpl = (async () => {
+      calls += 1
+      return new Response('<!DOCTYPE html><title>Just a moment...</title>', {
+        status: 403,
+        headers: { 'cf-mitigated': 'challenge', 'content-type': 'text/html' },
+      })
+    }) as typeof fetch
+
+    // Given a proxy intercepting the manifest with a managed challenge
+    // When the install runs
+    // Then it fails as blocked, says what to do, and does not retry the challenge
+    await expect(installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, retryDelayMs: 0 }))
+      .rejects.toMatchObject({
+        code: 'blocked',
+        message: expect.stringMatching(/Cloudflare challenge.*switch network or disable the proxy/i),
+      })
+    expect(calls).toBe(1)
+    expect(existsSync(targetDir(home, 'skin', 'whale-song'))).toBe(false)
+  })
+
+  it('operator whose manifest fetch times out spends every configured attempt', async () => {
+    // Given a request that never answers
+    const home = tmpHome()
+    let calls = 0
+    const fetchImpl = ((_input: RequestInfo | URL, init?: RequestInit) => {
+      calls += 1
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal
+        if (signal === null || signal === undefined) return
+        if (signal.aborted) { reject(signal.reason); return }
+        signal.addEventListener('abort', () => reject(signal.reason))
+      })
+    }) as typeof fetch
+
+    // When the install runs with a budget of two retries
+    await expect(installAsset('skin', 'whale-song', { dshHome: home, fetchImpl, fetchTimeoutMs: 20, retryDelayMs: 0 }))
+      .rejects.toMatchObject({ code: 'manifest', message: expect.stringMatching(/timed out/) })
+
+    // Then all three attempts were spent before the install gave up
+    expect(calls).toBe(3)
   })
 
   it('times out a manifest fetch after the configured timeout', async () => {

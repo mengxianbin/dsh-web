@@ -17,6 +17,8 @@ Each browser generates a random UUID in localStorage once; payloads carry only t
 
 The mechanism contract lives in `docs/telemetry.md`; package README pairs link to it.
 
+Users keep the final say: the Web Plugins settings section carries one family-wide switch that writes the `dsh-web-ui-telemetry-opt-out` localStorage key, and the shared reporter returns before minting a visitor id, marking the day, or sending whenever that key is set or the browser's `navigator.doNotTrack` asks not to be tracked. Every wired package consumes the same reporter, so one switch covers the family; the default stays on.
+
 ## Alternatives considered
 
 - npm download counts: rejected, structurally inflated and unfixable.

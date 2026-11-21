@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+.agents/notes/implemented/architecture/2026-10-20-lan-forwarder-replaces-bind-block.md: 32382f21e77c529e9b70210cbbd8d1764e455b17
+.agents/notes/implemented/architecture/2026-10-20-lan-forwarder-replaces-bind-block.zh.md: 5b09a9e4cf5e3da54716511f30dde0040c4f4c2d

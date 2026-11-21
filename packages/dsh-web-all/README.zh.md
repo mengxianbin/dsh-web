@@ -1,19 +1,36 @@
-# @linxin666/dsh-web-all
+# dsh-web-all · DeepSeek Harness (DSH) Web GUI 官方插件全家桶聚合包
 
 [English](README.md) | 中文
 
-DSH Web UI 全家桶聚合插件：一键安装家族的全部功能插件（任务看板 / Git 图谱 / 宠物 / 移动端远程 / SSH / 模型能力 / 会话归档 / 皮肤 / 设置区 / 社区插件，完整清单以本包 `aggregate.yml` 为准），外加外部插件 `dsh-better-sidebar`（右侧面板）。compat 桥接层已并入本包（`src/client`），因此无需独立的 compat npm 包。
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-web-all?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/npm/dm/@linxin666/dsh-web-all?style=flat-square" alt="Downloads">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
 
-> 注（DSH 0.1.2-alpha.2）：`dsh-better-sidebar` 已随 0.18.0-alpha.0 回归聚合——alpha.2 官方移除了它依赖的 `@deepseek-ai/dsh-client-runtime` 面，故 2026-08-30 曾暂时排除，直到上游发布对齐 alpha.2 的构建（inject 名单已改用 `@deepseek-ai/dsh-client-modules`）。`@mlgbnb/dsh-archive-manager` 仍排除：其最新上游构建（1.0.7）仍 import 已移除面，保留会导致 `dsh web` 启动失败。
+<p align="center">
+  <strong>DeepSeek Harness（DSH）官方 Web GUI 与桌面客户端全家桶一键聚合包</strong><br>
+  <em>自动化任务看板 · 手机远程控制 · SSH 终端运维 · Git 图谱与 Worktree 隔离 · 会话归档 · 用量统计 · 主题皮肤</em>
+</p>
+
+DeepSeek Harness（DSH）Web UI 与官方桌面客户端全家桶聚合插件：一键安装家族的全部功能插件（任务看板 / Git 图谱 / 桌面宠物 / 移动端远程 / 远程桥接 / SSH 运维 / 会话归档 / 皮肤中心 / 设置区 / 社区插件，完整清单以本包 `aggregate.yml` 为准）。compat 桥接层已并入本包（`src/client`），因此无需独立的 compat npm 包。
+
+> 注（alpha 分支，2026-09-17）：本分支不内置任何外部插件。
 
 ## 是什么
 
-- **一次安装、全部到位**：其 dependencies 引入家族的全部子插件包（任务看板 / Git 图谱 / 宠物 / 移动端远程 / SSH / 模型能力 / 皮肤 / 设置区 / 社区插件 等，完整清单以 `aggregate.yml` 为准），外加外部 npm 插件 `dsh-better-sidebar`（默认右侧面板：文件资源管理器 / 编辑器 / 终端 / Git / 浏览器；alpha.2 挡位为 0.18.0-alpha.0）。`@mlgbnb/dsh-archive-manager`（社区归档管理：按项目分组、搜索筛选、预览对话、一键恢复与删除）在 alpha.2 挡位未内置——其上游构建仍 import 已移除的 `@deepseek-ai/dsh-client-runtime` 面。
+- **一次安装、全部到位**：其 dependencies 引入家族的全部子插件包（任务看板 / Git 图谱 / 宠物 / 移动端远程 / 远程桥接 / SSH / 皮肤 / 设置区 / 社区插件 等，完整清单以 `aggregate.yml` 为准），且本分支不内置任何外部 npm 插件。`@mlgbnb/dsh-archive-manager`（社区归档管理：按项目分组、搜索筛选、预览对话、一键恢复与删除）未内置——其上游构建仍 import 已移除的 `@deepseek-ai/dsh-client-runtime` 面。
 - **聚合载具**：`cordis.patch.yml` 汇总各子插件的 `insert` 行与外部插件行，经 dsh 插件 profile 机制挂载。外部 profile bundle 由生成器展开：其 patch 行变成可导入的聚合行，bundle 自身的 harness-row patch 原样保留；标记了 `"inactive": true` 的外部行会在产物之后统一追加 `disabled: true` 覆盖行，未主动启用前不会挂载。
-- **故障隔离（shell 壳）**：DSH loader 把全部 patch 行作为一个事务组挂载——任何一个插件 import 或启动失败都会回滚整组并中止 `dsh web`。因此聚合包让每个家族插件都挂在永不失败的 shell 模块（本包 main 入口）之后：行 `name` 指向按家族划分的子路径导出 `@linxin666/dsh-web-all/<family>`，行 `config` 携带真插件包名。子路径即官方插件列表（设置 → 插件列表）展示的名称——每行一个独立的 `web-all/<family>` 标题（与宿主自带 `web-app/startup` 行的多条目惯例一致），而全部子路径都解析到同一个共享 shell 再导出模块，隔离语义完全不变。坏插件现在只降级自身（记录日志，并可经仅限 loopback 的健康路由 `GET /api/dsh-web-all/degraded` 查询），其余插件照常挂载。外部行（家族之外的 npm 包）仍直接挂载；`dsh-i18n` 直挂（宿主半区为空）。
-- **按需开启行**：低频家族插件在聚合包中出厂默认关闭（目前是 SSH、describe-image、liangshen、skill-explorer、doctor，即 `aggregate.yml` 的 `inactive` 清单）。它们不加载、设置入口也不出现，需要时在 设置 → 插件 → 插件管理 中按行开启；独立包安装不受影响。聚合行还可携带与独立包默认值不同的播种配置（`patches` 清单），用户改动设置后以设置为准。
-- **逐行管理**：每个家族插件都可单独启停——设置 → 插件 → 插件管理 中本包行展开为子插件列表，逐行开关即时写入 profile 覆盖层；宿主半经 `GET /api/dsh-web-all/rows` 告知浏览器半哪些行活跃，被停用的行连设置入口一并消失（路由不可达时失败放行、全部照常挂载）。停用即不再加载，代码仍随全家桶更新；需要独立版本管理的插件可另行安装独立包（双挂载保护下独立安装优先）。
-- **右侧面板**：右侧面板固定为 `dsh-better-sidebar`，其偏好在 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 自身的设置区管理。
+- **家族行直挂真实包**：每个家族插件的行 `name` 就是它自己的 npm 包名，官方 `dsh-client-modules` 因此直接下发该包的浏览器半区——装哪个插件就只下载哪个插件的界面，不必为了一块面板承担一份整份副本（issue #1901：旧做法把 13 个家族界面内联进本包 `lib/client.js`，单文件 2.9 MB）。行 id 仍是 `web-ui-*`，老 profile 里的行级开关照样命中；行的 `disabled` 直接由 loader 决定该家族装不装，开关不再需要浏览器端二次门控。旧 profile 里记录的子路径行名（`@linxin666/dsh-web-all/<family>`）仍保留导出空壳，升级后照常解析。
+- **compat 是可选补丁层**：`web-ui-compat` 行现在只提供兼容补丁——给当前 shell 打上插件与皮肤依赖的 `data-pane` / `data-dsh-frame` 语义钩子、响应式契约与启动遮罩，不含任何家族插件代码。需要这些补丁时保持开启，不需要时可以在插件管理里按行关掉。
+- **插件列表里的自有图标**：本包内置 `icon.svg` 并在 `package.json` 顶层声明 `icon`——官方插件列表（设置 → 插件列表）读取的展示元信息字段，因此已安装卡片与详情页在明暗两种主题下都显示家族鲸鱼，而不是默认插画；家族每个包都带同一份素材，单独安装某一个也会显示。DSH 0.2.1 起子路径元信息经导出资源读取，因此聚合的每个家族行导出 `<family>/icon` 与本地化 `locale/*.json`，在 `web-all/<family>` 标题旁显示同一份家族图标。
+- **host-only 子插件**：Windows 私有 shell 插件（`dsh-win-bash`，行 `web-ui-win-bash`）不带浏览器半区，并把它自己的平台守卫一路带进聚合 patch，因此在任何非 Windows 宿主上该行都是 disabled、不产生任何开销。它的可用性还跟随梁神预设的声明：`liangshen` 行停用时，工具不注册并如实记录原因。
+- **按需开启行**：低频家族插件在聚合包中出厂默认关闭（目前是 SSH、skill-explorer，即 `aggregate.yml` 的 `inactive` 清单；liangshen 不在该清单内，梁神模式拨杆在新装环境即在位）。它们不加载、设置入口也不出现，需要时在 设置 → 插件 → 插件管理 中按行开启；独立包安装不受影响。聚合行还可携带与独立包默认值不同的播种配置（`patches` 清单），用户改动设置后以设置为准。
+- **逐行管理**：每个家族插件都可单独启停——设置 → 插件 → 插件管理 中本包行展开为子插件列表，逐行开关即时写入 profile 覆盖层。停用的行由 loader 直接跳过：它既不挂载，也不再向浏览器下发自己的界面。停用即不再加载，代码仍随全家桶更新；需要独立版本管理的插件可另行安装独立包（双挂载保护下独立安装优先）。
 
 ## 安装
 
@@ -26,13 +43,10 @@ dsh plugin --profile web add @linxin666/dsh-web-all@latest
 dsh web
 ```
 
-**DSH Desktop（桌面客户端）**：
-```sh
-dsh plugin --profile desktop add @linxin666/dsh-web-all@latest
-# 检查是否已挂载
-dsh --profile desktop --dump-config
-# 完全退出并重新启动 DSH Desktop 桌面应用
-```
+**官方桌面客户端（DeepSeek Harness Desktop）**：
+- 打开官方桌面客户端，进入“设置 → 插件”（或左侧导航栏的插件入口）
+- 在插件安装输入框中输入 `@linxin666/dsh-web-all` 并确认安装
+- 安装完成后完全退出并重新启动官方桌面客户端
 
 ### 从仓库安装（开发调试）
 
@@ -44,7 +58,7 @@ node scripts/link-profile.mjs
 dsh plugin --profile web add link:$(pwd)/packages/dsh-web-all
 ```
 
-安装后重启 `dsh web`（或 DSH Desktop 客户端）使插件生效。
+安装后重启 `dsh web`（或官方桌面客户端）使插件生效。
 
 ### 手工升级
 
@@ -67,6 +81,5 @@ dsh plugin --profile web add link:$(pwd)/packages/dsh-web-all
 ## 已知限制
 
 - 各子插件随本包一起激活；若只需要其中一部分，请直接安装对应子插件包。
-- 聚合行 id 统一带 `web-ui-` 命名空间，本包可与同名独立插件包共存：loader 不再拒绝重复 id，host 半区只注册一次（第二个来源为空操作），浏览器半区按包名去重。两个来源并存没有额外收益，建议只保留一个。插件来自本包时，profile 里按 id 写的配置行要改用 `web-ui-` 前缀（如 remote-web-ui 的 `autoTunnel` 配置行写成 `web-ui-remote-web-ui`）；独立安装时仍用插件原 id。
-- `dsh-better-sidebar@0.18.0-alpha.0` 是外部 npm 依赖（非本仓库出品），本包发版前必须先发布它（发布顺序见 `docs/publish-prep.md`）。
+- 聚合行 id 统一带 `web-ui-` 命名空间，本包可与同名独立插件包共存：loader 不再拒绝重复 id，host 半区只注册一次（第二个来源为空操作），浏览器半区按包名去重。两个来源并存没有额外收益，建议只保留一个。插件来自本包时，profile 里按 id 写的配置行要改用 `web-ui-` 前缀（如 remote-web-ui 的 `autoTunnel` 配置行写成 `web-ui-remote-web-ui`）；独立安装时仍用插件原 id。聚合行的配置里 `plugin` 是壳自己的键（该行加载哪个模块），插件自身字段与它平级；设置卡片写出的就是这一形态，手写覆盖必须保留 `plugin`，否则该行什么都不挂载。
 - 依赖的 `@deepseek-ai/*` SDK 版本已锁定，兼容性跟随本仓库的发版节奏。

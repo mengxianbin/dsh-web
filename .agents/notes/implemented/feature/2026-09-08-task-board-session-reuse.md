@@ -24,14 +24,19 @@ the existing one-session-per-execution contract.
   that session is present and idle in the last roster. An unknown roster
   (`session/list` unavailable) never reuses, because minting a fresh session
   is always safe while prompting into an unobserved session is not.
-- `TaskBoardHostService` caches the idle-session ids from its existing 5 s
-  roster poll and passes the candidate to `HostExecutionRunner.launch`.
+- `TaskBoardHostService.reuseSessionFor` reads a fresh roster for the launch
+  and passes the candidate to `HostExecutionRunner.launch`.
 - `HostExecutionRunner.launch(task, { reuseSessionId })` continues in that
   session: no `session/create`, no `session/rename` (the conversation keeps
   its title and history), the pinned permission and model are re-asserted
   through the shared `pinAndPrompt` helper so the task's execution contract
-  still holds, then the prompt is queued. Failures still surface as
-  `SessionLaunchError` carrying the reused session id.
+  still holds, then the prompt is queued. When the reused session is a cold
+  persisted row (present and idle in `session/list` but not yet in
+  `ctx.agents`), `resolveExecutionAgent` in `src/index.ts` wakes its live
+  Agent through `sessionController.resolveAgent(sessionId)` before
+  `ctx.commands.execute` runs `/permission` or `/goal` (issue #1861), matching
+  the activation path `session/selectModel` and `session/prompt` use. Failures
+  still surface as `SessionLaunchError` carrying the reused session id.
 - Wire/store: `create`/`update` accept a boolean, `null`/`false` clear it,
   any other type is rejected; the ledger shape check rejects a non-boolean row
   and the parser normalizes a persisted `false` back to absent.
@@ -47,6 +52,10 @@ the existing one-session-per-execution contract.
 - `tests/host-runner.spec.ts`: the reuse path reaches the gateway only as
   `agentPresets/list`, the permission command, and `session/prompt` on the
   existing session; a failing reuse prompt reports that session id.
+- `tests/host-apply.spec.ts`: `resolveExecutionAgent` returns a live Agent
+  directly, wakes a cold reused session through
+  `sessionController.resolveAgent` before `/permission`, and surfaces the
+  controller's failure reason when a cold session cannot be resumed.
 - `tests/protocol.spec.ts` and `tests/store.spec.ts`: wire acceptance and
   rejection, ledger normalization.
 - `tests/task-detail-edit.spec.tsx`: the toggle renders, opts in with
@@ -60,6 +69,14 @@ the existing one-session-per-execution contract.
   user is chatting in would receive the queued task prompt and the execution
   settle logic would race the user's own turn; requiring an idle roster entry
   keeps that impossible.
+- Require the reused session to already be in `ctx.agents` and fall back to a
+  fresh session when it is cold: rejected (issue #1861). After a DSH restart or
+  during an unattended cron trigger, the previous session is present and idle
+  in persistence (`session/list`) while no browser tab has called
+  `session/follow` to promote it into `ctx.agents`; falling back to a fresh
+  session would discard the conversation across every restart. Resuming the
+  cold session through `sessionController.resolveAgent` preserves the
+  conversation and reuses the official preset and model-selection restoration.
 - Reuse without re-asserting the pins: rejected. A task whose permission or
   model was edited after the first run would silently keep the old values,
   breaking the fail-closed execution contract the board documents.

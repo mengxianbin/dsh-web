@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { checkRuntimeImports } from './runtime-deps-check.mjs'
+import { checkRuntimeImports, importSpecifiers } from './runtime-deps-check.mjs'
 
 test('flags a runtime import of a devDependencies-only package (issue #70)', () => {
   const violations = checkRuntimeImports(
@@ -75,4 +75,53 @@ test('keeps flagging real imports next to comment prose', () => {
   const violations = checkRuntimeImports({ dependencies: {} }, { 'lib/index.js': source })
   assert.equal(violations.length, 1)
   assert.equal(violations[0].specifier, 'missing-dep')
+})
+
+test('detects side effects and both re-export forms', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("import 'side'; export { value } from 'named'; export * from 'all';"), ["side","named","all"])
+})
+
+test('detects commented and no-substitution template dynamic imports', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("import /* comment */ ('dynamic'); import(`template`);"), ["dynamic","template"])
+})
+
+test('detects imports inside template expressions', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("const value = `before ${import('nested')} after`;"), ["nested"])
+})
+
+test('ignores computed imports and import meta', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("import(name); import(`prefix-${name}`); const url = import.meta.url;"), [])
+})
+
+test('decodes specifiers before dependency classification', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("import a from 'pkg\\u002Fsub'; import b from '\\u002e\\u002Flocal.js';"), ["pkg/sub","./local.js"])
+})
+
+test('ignores regex decoys without losing the following import', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("const a = /from 'decoy'/; const b = /'/; import real from 'real';"), ["real"])
+})
+
+test('reads static and dynamic imports with attributes', () => {
+  // Given a module form supported by the shipped bundles, when scanned, then expose only known specifiers.
+  assert.deepEqual(importSpecifiers("import data from 'static-json' with { type: 'json' }; import('dynamic-json', { with: { type: 'json' } });"), ["static-json","dynamic-json"])
+})
+test('reports lexer-detectable malformed imports with their artifact path', () => {
+  // Given a truncated static import, when checked, then retain its owning filename in the error.
+  assert.throws(() => checkRuntimeImports({}, { 'lib/broken.js': "import { value from 'pkg'" }), /Parse error lib\/broken\.js:/)
+})
+
+test('applies builtin and relative exemptions after escape decoding', () => {
+  const source = "import a from '\\u002e\\u002Flocal.js'; import b from 'node\\u003apath';";
+  assert.deepEqual(checkRuntimeImports({ dependencies: {} }, { 'lib/index.js': source }), [])
+})
+
+test('rejects undeclared side-effect dependencies even when they are development dependencies', () => {
+  const violations = checkRuntimeImports({ devDependencies: { 'side-only': '*' } }, { 'lib/index.js': "import 'side-only';" })
+  assert.deepEqual(violations, [{ file: 'lib/index.js', specifier: 'side-only' }])
 })

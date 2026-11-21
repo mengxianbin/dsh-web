@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage } from 'node:http'
-import { isLoopbackAddress, isLoopbackHostname, isLoopbackRequest } from '../host/loopback.ts'
+import { isLoopbackAddress, isLoopbackHostname, isLoopbackRequest, isProxiedRequest } from '../host/loopback.ts'
 
 /** Minimal IncomingMessage stand-in: a socket address, a Host header, and optional extra headers. */
 function fakeRequest(
@@ -65,5 +65,54 @@ describe('isLoopbackRequest', () => {
 
   it('rejects an unparsable Host header', () => {
     expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:notaport'))).toBe(false)
+  })
+})
+
+/**
+ * A reverse proxy rewrites the Host to its own upstream literal and connects
+ * over loopback, so both halves of the fence describe the proxy rather than the
+ * client (Cloudflare Tunnel, frp, nginx). The forwarding header is what
+ * separates such a request from a real desktop one (issue #1906).
+ */
+describe('isLoopbackRequest behind a reverse proxy', () => {
+  it('keeps a direct desktop request loopback when no forwarding header is present', () => {
+    const request = fakeRequest('127.0.0.1', '127.0.0.1:3080')
+    expect(isProxiedRequest(request)).toBe(false)
+    expect(isLoopbackRequest(request)).toBe(true)
+  })
+
+  it('refuses a loopback socket and loopback Host that carry cf-connecting-ip', () => {
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'cf-connecting-ip': '203.0.113.7' }))).toBe(false)
+  })
+
+  it('refuses a loopback socket and loopback Host that carry x-forwarded-for', () => {
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'x-forwarded-for': '203.0.113.7' }))).toBe(false)
+  })
+
+  it('refuses a forwarded request whose forwarding header is present but empty', () => {
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'x-forwarded-for': '' }))).toBe(false)
+  })
+
+  it('keeps the browser same-origin markers authoritative for a direct request', () => {
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'sec-fetch-site': 'cross-site' }))).toBe(false)
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { origin: 'http://evil.example' }))).toBe(false)
+    expect(isLoopbackRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { origin: 'http://127.0.0.1:3080' }))).toBe(true)
+  })
+})
+
+describe('isProxiedRequest', () => {
+  it('reports either forwarding header as a proxy hop', () => {
+    expect(isProxiedRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'cf-connecting-ip': '203.0.113.7' }))).toBe(true)
+    expect(isProxiedRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'x-forwarded-for': '203.0.113.7' }))).toBe(true)
+  })
+
+  it('reports a request with neither forwarding header as direct', () => {
+    expect(isProxiedRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080'))).toBe(false)
+  })
+
+  it('does not treat a transport-only marker as a forwarding header', () => {
+    // x-forwarded-proto names the edge transport a tunnel terminates; it is not
+    // a client-forwarding header, so it does not decide the classification.
+    expect(isProxiedRequest(fakeRequest('127.0.0.1', '127.0.0.1:3080', { 'x-forwarded-proto': 'https' }))).toBe(false)
   })
 })

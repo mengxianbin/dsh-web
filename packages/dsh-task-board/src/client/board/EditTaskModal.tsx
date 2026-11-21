@@ -7,15 +7,17 @@
  */
 import { useState } from 'react'
 import type { BoardController } from '../../core/controller.ts'
-import type { TaskRecord } from '../../core/tasks.ts'
+import { collectKnownTags, type TaskRecord, type TaskTag } from '../../core/tasks.ts'
 import { t } from '../locales.ts'
-import { ModalShell, TaskContentFields } from './TaskForm.tsx'
+import { ModalShell, TaskContentFields, TaskTagFields, cleanTags } from './TaskForm.tsx'
+import type { OverlayPhase } from './overlay.tsx'
 
 /** Edit-task form overlay. */
-export function EditTaskModal({ controller, task, onClose }: { controller: BoardController; task: TaskRecord; onClose: () => void }) {
+export function EditTaskModal({ controller, task, onClose, phase }: { controller: BoardController; task: TaskRecord; onClose: () => void; phase?: OverlayPhase }) {
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
   const [prompt, setPrompt] = useState(task.prompt)
+  const [tags, setTags] = useState<TaskTag[]>(task.tags ?? [])
   const [error, setError] = useState<string | undefined>(undefined)
   const [pending, setPending] = useState(false)
 
@@ -27,7 +29,17 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
     setPending(true)
     // The Host confirms the mutation (and its fail-closed checks); only a
     // confirmed save closes the modal.
-    if (await controller.updateTask(task.id, { title, description, prompt })) {
+    // Labels ride the same patch as the content fields. A task that never
+    // carried one is not sent a clearing null: the wire stays minimal, and the
+    // no-tags path keeps producing exactly the patch it produced before.
+    const tagList = cleanTags(tags)
+    const patch = {
+      title,
+      description,
+      prompt,
+      ...(tagList.length > 0 ? { tags: tagList } : (task.tags === undefined ? {} : { tags: null })),
+    }
+    if (await controller.updateTask(task.id, patch)) {
       onClose()
       return
     }
@@ -44,6 +56,7 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
       submitLabel={t('edit.save')}
       onSubmit={() => { void submit() }}
       onClose={onClose}
+      phase={phase}
     >
       <TaskContentFields
         title={title}
@@ -53,6 +66,45 @@ export function EditTaskModal({ controller, task, onClose }: { controller: Board
         onDescriptionChange={setDescription}
         onPromptChange={setPrompt}
       />
+
+      <TaskTagFields tags={tags} knownTags={collectKnownTags(controller.getSnapshot().tasks)} onChange={setTags} />
     </ModalShell>
   )
 }
+
+/** Edit-tags modal: edit labels only, shown for tasks after first execution. */
+export function EditTagsModal({ controller, task, onClose, phase }: { controller: BoardController; task: TaskRecord; onClose: () => void; phase?: OverlayPhase }) {
+  const [tags, setTags] = useState<TaskTag[]>(task.tags ?? [])
+  const [error, setError] = useState<string | undefined>(undefined)
+  const [pending, setPending] = useState(false)
+
+  const submit = async (): Promise<void> => {
+    setPending(true)
+    const tagList = cleanTags(tags)
+    const patch = {
+      tags: tagList.length > 0 ? tagList : null,
+    }
+    if (await controller.updateTask(task.id, patch)) {
+      onClose()
+      return
+    }
+    setPending(false)
+    setError(controller.getSnapshot().transportError ?? t('new.required'))
+  }
+
+  return (
+    <ModalShell
+      ariaLabel={t('detail.editTags')}
+      title={t('detail.editTags')}
+      error={error}
+      pending={pending}
+      submitLabel={t('edit.save')}
+      onSubmit={() => { void submit() }}
+      onClose={onClose}
+      phase={phase}
+    >
+      <TaskTagFields tags={tags} knownTags={collectKnownTags(controller.getSnapshot().tasks)} onChange={setTags} />
+    </ModalShell>
+  )
+}
+

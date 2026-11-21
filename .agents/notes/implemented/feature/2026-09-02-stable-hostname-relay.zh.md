@@ -9,14 +9,15 @@ Status: implemented
 ## 决策
 
 - **dsh-market worker 增加中继注册表**：`PUT /api/relay/register` 把每个安装的 id 映射到实例当前的快速隧道地址；`POST /api/relay/unregister` 删除映射；通配子域名 `<id>.dsh-market.com` 向已注册目标反向代理（HTTP + WebSocket 透传；未知或过期 id 返回明确的双语离线页）。表 `relay_registrations` + `relay_rate_limit`（迁移 0007）；cron GC 清理过期行与旧限流窗口。
-- **插件在自动隧道运行时自动注册**（中继默认开启）：每个 profile 首次运行铸造 id + 256 位密钥（`$DSH_HOME/remote-web-ui-registry/<profile>.json`，0600），并经既有的隧道 phase 监听器在每次隧道启动时重新上报当前地址——失败按上限退避重试，`invalid-params` 失败会重新认领一次 id（注册表行丢失）。二维码/公网基址优先使用固定源；注册失败期间回退裸快速隧道地址。开关关闭时销毁注册器并注销该行；进程退出与模式切换保留两者。
+- **插件在自动隧道运行时自动注册**（中继默认开启）：每个 profile 首次运行铸造 id + 256 位密钥（`$DSH_HOME/remote-web-ui-registry/<profile>.json`，0600），并经既有的隧道 phase 监听器在每次隧道启动时重新上报当前地址——失败按上限退避重试，`invalid-params` 失败会重新认领一次 id（注册表行丢失）。二维码/公网基址优先使用固定源；注册失败期间回退裸快速隧道地址。与本机同网的手机随后由落地页移出该源：落地页探测对外广告的局域网字面量，无一应答时留在公网源（[2026-10-16-pairing-auto-lan-source.zh.md](2026-10-16-pairing-auto-lan-source.zh.md)）。开关关闭时销毁注册器并注销该行；进程退出与模式切换保留两者。
 - **配置与界面**：`relay`（默认 true）在设置卡片呈现为「固定域名中继」；配对快照新增 `relay` 状态帧，面板据其渲染注册中/失败提示。命名隧道模式保持不变（自带域名的替代路径）。
 - **滥用面**：密钥只存哈希（SHA-256）、目标限定 `*.trycloudflare.com`、注册按 IP 与 id 限流、行空闲 90 天 GC、所有中继响应 `noindex`。
+- **带内容哈希的构建产物在本跳被永久缓存。** 隧道后的实例对 `/assets/**` 不发任何 `Cache-Control`、`ETag` 或 `Last-Modified`，而原样透传让手机手里没有任何可缓存依据：每次加载都重下整个外壳——实测每请求 237502 B、经中继 TTFB 1.3–2.3 秒、字节每次都完全相同。代理现在只对 `GET`/`HEAD` 且路径为 `/assets/` 下带内容哈希的构建产物的 200 响应盖上 `public, max-age=31536000, immutable`；其余路径（`/api/*`、文档、未哈希名、WebSocket 升级、非 200）一律保留源站自己的响应头。
 - 让「纯字节转发代理」足够成立的结构性事实：手机从不面对 harness browser-auth——`/pair-app` 是插件精确路由，手机全部流量走门控 `/remote` 通道、由进程 inner 凭据回注到回环——所以中继只需搬运字节；Cookie 与 sessionStorage 按源隔离，而这个源永不变化。
 
 ## 测试
 
-- `scripts/market-relay.test.mjs`：id 提取、铸造/刷新的密钥哈希认证、非法目标/密钥拒绝、代理的 Host 重写、离线页、注销、按 id 限流、非中继流量隔离（8 个 node 测试）。
+- `scripts/market-relay.test.mjs`：id 提取、铸造/刷新的密钥哈希认证、非法目标/密钥拒绝、代理的 Host 重写、只对带哈希资源生效的永久缓存（含嵌套 chunk 路径与非 200）、离线页、注销、按 id 限流、非中继流量隔离（10 个 node 测试）。
 - `packages/dsh-remote-web-ui/tests/relay-registry.spec.ts`：身份文件构造/铸造/持久化/隔离、固定源形态、注册器 announce/刷新/退避/重新认领/销毁/注销（12 个 vitest 用例）。
 - 插件全套 333 用例通过；`i18n:check`、`docs:check` 与包类型检查通过。线上验证（wrangler dev 注册 → 反代 → 配对往返；随后真实重启 + 手机验证）是交付门槛。
 
@@ -34,6 +35,7 @@ Status: implemented
 - 手机重启默认无感；代价是多一跳由包作者运营的边缘（已在 README 安全模型披露——与终结快速隧道 TLS 的是同一条边缘）。
 - 部署需要通配主机名绑定齐全，中继才能生效：zone 路由（见下）加上持有通配 DNS 记录的 `*.dsh-market.com` Workers 自定义域；两者齐备前插件退化为今天的裸快速隧道行为。
 - 一台主机上的多个 profile 各自拥有身份与子域名；限流与 TTL 约束滥用；代理唯一的存储成本是每请求一次 D1 读。
+- 永久缓存只在客户端生效：边缘对这些响应仍返回 `cf-cache-status: DYNAMIC`，所以设备首次加载仍要付完整隧道成本，收益从第二次开始。要让边缘也缓存，需要 `ctx.waitUntil` 加 Cache API，此处有意不做。
 
 ## 生产事故（2026-09-02 晚间）：路由模式只匹配了根路径
 

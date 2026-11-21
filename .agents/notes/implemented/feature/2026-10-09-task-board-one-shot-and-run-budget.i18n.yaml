@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-09-task-board-one-shot-and-run-budget.md: 9b7d68f162ccd22c715aacae0cb83f2d50b6a183
+2026-10-09-task-board-one-shot-and-run-budget.zh.md: e2f1b1e529cd00af5c1142ff4dd4be8f22f8df5f

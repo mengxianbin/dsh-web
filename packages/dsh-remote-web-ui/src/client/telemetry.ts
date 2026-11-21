@@ -7,8 +7,12 @@
  * The payload carries no conversation data and no identifiers beyond a random
  * UUID generated in localStorage; the server hashes it with a deployment salt
  * before storage and never persists IP addresses. Sends are fire-and-forget:
- * failures stay silent and simply retry on a later mount or day. The system
- * is documented in docs/telemetry.md.
+ * failures stay silent and simply retry on a later mount or day. Frames where
+ * storage is unavailable report nothing.
+ *
+ * The family-wide opt-out and the browser's Do Not Track signal both suppress
+ * the heartbeat; the Web Plugins settings switch writes the same localStorage
+ * key. The system is documented in docs/telemetry.md.
  */
 
 export type TelemetryChannel = 'market' | 'npm' | 'unknown'
@@ -21,6 +25,9 @@ export interface TelemetryItem {
   /** Install channel when determinable (market = Workshop install). */
   channel?: TelemetryChannel
 }
+
+/** localStorage key carrying the family-wide telemetry opt-out ('1' = off). */
+export const TELEMETRY_OPT_OUT_KEY = 'dsh-web-ui-telemetry-opt-out'
 
 const VISITOR_KEY = 'dsh-web-ui-telemetry-visitor'
 const DAY_KEY_PREFIX = 'dsh-web-ui-telemetry-day:'
@@ -39,6 +46,41 @@ function bakedVersion(): string | undefined {
   } catch {
     return undefined
   }
+}
+
+/** Whether the user switched the family-wide opt-out on (reads storage only). */
+export function isTelemetryOptedOut(): boolean {
+  try {
+    return localStorage.getItem(TELEMETRY_OPT_OUT_KEY) === '1'
+  } catch {
+    // Storage unavailable: there is no stored opt-out to honour.
+    return false
+  }
+}
+
+/** Turn the family-wide opt-out on or off (writing '1' / removing the key); never throws. */
+export function setTelemetryOptedOut(optedOut: boolean): void {
+  try {
+    if (optedOut) localStorage.setItem(TELEMETRY_OPT_OUT_KEY, '1')
+    else localStorage.removeItem(TELEMETRY_OPT_OUT_KEY)
+  } catch {
+    // Storage unavailable: the preference cannot be persisted on this machine.
+  }
+}
+
+/** Whether the browser itself asks not to be tracked; a failed read means no signal. */
+function doNotTrackRequested(): boolean {
+  try {
+    // '1' per the DNT header spec, 'yes' from older Firefox builds.
+    return navigator.doNotTrack === '1' || navigator.doNotTrack === 'yes'
+  } catch {
+    return false
+  }
+}
+
+/** Whether a heartbeat must be suppressed right now: opt-out stored, or the browser asks not to be tracked. */
+export function isTelemetrySuppressed(): boolean {
+  return isTelemetryOptedOut() || doNotTrackRequested()
 }
 
 /** Read or lazily create the anonymous visitor id; null when storage is unavailable. */
@@ -74,6 +116,9 @@ function pruneDayKeys(today: string): void {
  */
 export function reportDailyHeartbeat(items: readonly TelemetryItem[]): void {
   try {
+    // First guard: a stored opt-out or the browser's Do Not Track stops every
+    // read below from minting an id, marking the day, or reaching the network.
+    if (isTelemetrySuppressed()) return
     if (items.length === 0) return
     const today = new Date().toISOString().slice(0, 10)
     // Automation contexts (CDP-driven QA browsers, fresh isolated profiles)

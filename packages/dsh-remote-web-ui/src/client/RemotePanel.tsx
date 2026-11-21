@@ -1,13 +1,17 @@
 /**
  * The mobile remote-control panel body: status card (state text + badge),
- * the QR code, the open-on-phone hint with the link text, and the three
- * actions (stop / refresh / copy). Pure presentation — all state and
+ * the QR code, the open-on-phone hint with the link text, and the two
+ * actions (stop / refresh / copy). The advertised network is not a choice:
+ * the QR names the public base and the landing page decides at connect time
+ * whether to move to a LAN origin (lan-source.ts), so the panel only states
+ * which source the current link carries. Pure presentation — all state and
  * actions arrive through props from the entry's behavior component.
  */
 import clsx from 'clsx'
+import { memo, useState, type FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import {
-  IconCloseOutline16, IconCopyOutline16, IconRefreshOutline16, IconStopFill16,
+  IconCloseOutlineRegular, IconCopyOutlineRegular, IconRefreshOutlineRegular, IconStopFillRegular,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PairingPhase } from '../pairing.ts'
@@ -19,8 +23,17 @@ import {
   type RelayStatusFrame,
   type TunnelStatusFrame,
 } from './pair-api.ts'
-import { deviceNameFromUserAgent } from './device-name.ts'
+import { deviceDisplayName, deviceNameFromUserAgent, duplicateDeviceGroups } from './device-name.ts'
 import css from './remote.module.css'
+
+/**
+ * The QR symbol, memoized on the link: the panel re-renders on every SSE state
+ * frame (a paired phone heartbeats every 10s), and qrcode.react rebuilds the
+ * SVG path and element tree on each render.
+ */
+const PairQrCode = memo(function PairQrCode({ url, className }: { url: string; className: string }) {
+  return <QRCodeSVG value={url} size={184} level="M" marginSize={1} className={className} />
+})
 
 /** The panel's view state, owned by the entry component. */
 export type PanelState =
@@ -37,10 +50,6 @@ export type PanelState =
       onlineCount: number
       /** Authorized devices for the roster under the QR card. */
       devices: DeviceFrame[]
-      /** The LAN literal the current QR was built from. */
-      address: string
-      /** Every constructible LAN literal (interface order). */
-      lanAddresses: string[]
       /** The active pairing token itself (useful in Docker/reverse proxy topologies). */
       token?: string
       /** Whether this QR is built on the configured public (tunneled) base. */
@@ -66,12 +75,171 @@ export interface RemotePanelProps {
   onRefresh(): void
   onCopy(url: string): void
   onCopyToken?(token: string): void
-  /** Re-mint the QR against a different LAN address. */
-  onPickAddress(address: string): void
-  /** Re-mint the QR against the configured public (tunneled) base. */
-  onPickPublic(): void
   /** Revoke one paired device. */
   onRevoke(deviceId: string): void
+  /** Set or clear one device's label; false when the host refused it. */
+  onRename(deviceId: string, name: string): Promise<boolean>
+  /** Collapse a same-User-Agent group; false when the host refused it. */
+  onMerge(deviceIds: string[]): Promise<boolean>
+}
+
+/**
+ * The authorized-device roster: a rename editor per row, the unpair action, and
+ * one merge affordance per same-User-Agent group. Editing state is view state
+ * local to this component (nothing here survives a remount); every mutation
+ * goes through the entry's host-backed props.
+ */
+function DeviceRoster({
+  t,
+  devices,
+  onRevoke,
+  onRename,
+  onMerge,
+}: {
+  t: TranslateNS<'remote'>
+  devices: DeviceFrame[]
+  onRevoke(deviceId: string): void
+  onRename(deviceId: string, name: string): Promise<boolean>
+  onMerge(deviceIds: string[]): Promise<boolean>
+}) {
+  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [renameFailed, setRenameFailed] = useState(false)
+  const [mergeFailedFor, setMergeFailedFor] = useState<string | undefined>(undefined)
+  const groupsByFirst = new Map<string, DeviceFrame[]>()
+  for (const group of duplicateDeviceGroups(devices)) groupsByFirst.set(group[0]!.id, group)
+
+  const submitRename = async (event: FormEvent<HTMLFormElement>, deviceId: string): Promise<void> => {
+    event.preventDefault()
+    if (editing === null) return
+    setSaving(true)
+    setRenameFailed(false)
+    try {
+      const stored = await onRename(deviceId, editing.draft)
+      if (stored) {
+        setEditing(null)
+        return
+      }
+      setRenameFailed(true)
+    } catch {
+      setRenameFailed(true)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const merge = async (groupKey: string, deviceIds: string[]): Promise<void> => {
+    setMergeFailedFor(undefined)
+    try {
+      const merged = await onMerge(deviceIds)
+      if (!merged) setMergeFailedFor(groupKey)
+    } catch {
+      setMergeFailedFor(groupKey)
+    }
+  }
+
+  return (
+    <ul className={css.deviceList}>
+      {devices.map((device) => {
+        const group = groupsByFirst.get(device.id)
+        const groupKey = device.userAgent ?? device.id
+        const isEditing = editing?.id === device.id
+        return (
+          <li key={device.id} className={css.deviceEntry}>
+            <div className={css.deviceRow}>
+              <div className={css.deviceMeta}>
+                {isEditing ? (
+                  <form
+                    className={css.deviceNameForm}
+                    onSubmit={(event) => { void submitRename(event, device.id) }}
+                  >
+                    <input
+                      className={css.deviceNameInput}
+                      value={editing.draft}
+                      aria-label={t('devices.rename.label')}
+                      placeholder={deviceNameFromUserAgent(device.userAgent) ?? t('devices.unknown')}
+                      maxLength={64}
+                      autoFocus
+                      disabled={saving}
+                      onChange={(event) => { setEditing({ id: device.id, draft: event.target.value }) }}
+                      onKeyDown={(event) => { if (event.key === 'Escape') setEditing(null) }}
+                    />
+                    <button type="submit" className={css.deviceRename} disabled={saving}>
+                      {t('devices.rename.save')}
+                    </button>
+                    <button
+                      type="button"
+                      className={css.deviceRename}
+                      disabled={saving}
+                      onClick={() => { setEditing(null) }}
+                    >
+                      {t('devices.rename.cancel')}
+                    </button>
+                  </form>
+                ) : (
+                  <span
+                    className={css.deviceName}
+                    title={deviceDisplayName(device, t('devices.unknown'))}
+                  >
+                    {deviceDisplayName(device, t('devices.unknown'))}
+                  </span>
+                )}
+                <span className={clsx(css.devicePresence, device.online ? css.deviceOnline : css.deviceOffline)}>
+                  {device.online ? t('devices.online') : t('devices.offline')}
+                </span>
+                <span className={css.deviceSeen}>
+                  {t('devices.lastSeen', { time: formatLastSeen(device.lastSeenAt) })}
+                </span>
+                {isEditing && renameFailed && (
+                  <span className={css.deviceError} role="alert">{t('devices.rename.failed')}</span>
+                )}
+              </div>
+              <div className={css.deviceActions}>
+                {!isEditing && (
+                  <button
+                    type="button"
+                    className={css.deviceRename}
+                    onClick={() => {
+                      setRenameFailed(false)
+                      setEditing({ id: device.id, draft: device.name ?? '' })
+                    }}
+                  >
+                    {t('devices.rename')}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className={css.deviceRevoke}
+                  aria-label={t('devices.revoke.label')}
+                  onClick={() => { onRevoke(device.id) }}
+                >
+                  {t('devices.revoke')}
+                </button>
+              </div>
+            </div>
+            {group !== undefined && (
+              <div className={css.deviceDuplicate}>
+                <span className={css.deviceDuplicateText}>
+                  {t('devices.duplicates', { n: group.length })}
+                </span>
+                <button
+                  type="button"
+                  className={css.deviceMerge}
+                  title={t('devices.merge.hint')}
+                  onClick={() => { void merge(groupKey, group.map(row => row.id)) }}
+                >
+                  {t('devices.merge')}
+                </button>
+              </div>
+            )}
+            {mergeFailedFor === groupKey && (
+              <span className={css.deviceError} role="alert">{t('devices.merge.failed')}</span>
+            )}
+          </li>
+        )
+      })}
+    </ul>
+  )
 }
 
 /** Badge text + tone per phase (ready states only). */
@@ -103,9 +271,9 @@ export function RemotePanel({
   onRefresh,
   onCopy,
   onCopyToken,
-  onPickAddress,
-  onPickPublic,
   onRevoke,
+  onRename,
+  onMerge,
 }: RemotePanelProps) {
   return (
     <div className={css.panel} role="dialog" aria-modal="true" aria-label={t('title')}>
@@ -115,7 +283,7 @@ export function RemotePanel({
           <p className={css.subtitle}>{t('subtitle')}</p>
         </div>
         <button type="button" className={css.close} aria-label={t('close.label')} onClick={onClose}>
-          <IconCloseOutline16 size={14} />
+          <IconCloseOutlineRegular size={14} />
         </button>
       </div>
 
@@ -155,7 +323,7 @@ export function RemotePanel({
               </span>
             </div>
             <div className={css.qrWrap} data-testid="remote-qr">
-              <QRCodeSVG value={state.url} size={184} level="M" marginSize={1} className={css.qr} />
+              <PairQrCode url={state.url} className={css.qr} />
             </div>
             {state.expired
               ? <p className={css.expired}>{t('pair.expired')}</p>
@@ -170,7 +338,7 @@ export function RemotePanel({
                 <code className={css.link} title={state.url}>{state.url}</code>
               </div>
               <button type="button" className={css.copyLink} onClick={() => onCopy(state.url)}>
-                <IconCopyOutline16 size={14} />
+                <IconCopyOutlineRegular size={14} />
                 {copied ? t('action.copied') : t('action.copyLink')}
               </button>
             </div>
@@ -185,7 +353,7 @@ export function RemotePanel({
                   className={css.copyLink}
                   onClick={() => onCopyToken ? onCopyToken(state.token!) : onCopy(state.token!)}
                 >
-                  <IconCopyOutline16 size={14} />
+                  <IconCopyOutlineRegular size={14} />
                   {copiedToken ? t('action.copiedToken') : t('action.copyToken')}
                 </button>
               </div>
@@ -211,46 +379,19 @@ export function RemotePanel({
             </p>
           )}
 
-          {(state.publicBaseUrl !== undefined || state.lanAddresses.length > 1) && (
-            <fieldset className={css.addresses}>
-              <legend>{t('address.label')}</legend>
-              {state.publicBaseUrl !== undefined && (
-                <label key="public" className={css.address}>
-                  <input
-                    type="radio"
-                    name="lan-address"
-                    aria-label={t('address.public')}
-                    checked={state.public}
-                    onChange={onPickPublic}
-                  />
-                  <span>{t('address.public')}</span>
-                  <code className={css.addressValue}>{state.publicBaseUrl}</code>
-                </label>
-              )}
-              {state.lanAddresses.map(address => (
-                <label key={address} className={css.address}>
-                  <input
-                    type="radio"
-                    name="lan-address"
-                    aria-label={address}
-                    checked={!state.public && address === state.address}
-                    onChange={() => onPickAddress(address)}
-                  />
-                  <span>{t('address.lan')}</span>
-                  <code className={css.addressValue}>{address}</code>
-                </label>
-              ))}
-              <p className={css.addressHint}>{t('address.hint')}</p>
-            </fieldset>
+          {(state.publicBaseUrl !== undefined || !state.public) && (
+            <p className={css.addressHint}>
+              {state.public ? t('address.auto') : t('address.pinnedLan')}
+            </p>
           )}
 
           <div className={css.actions}>
             <button type="button" className={css.action} onClick={onStop}>
-              <IconStopFill16 size={14} />
+              <IconStopFillRegular size={14} />
               {t('action.stop')}
             </button>
             <button type="button" className={css.action} onClick={onRefresh}>
-              <IconRefreshOutline16 size={14} />
+              <IconRefreshOutlineRegular size={14} />
               {t('action.refresh')}
             </button>
           </div>
@@ -260,31 +401,13 @@ export function RemotePanel({
             {state.devices.length === 0 ? (
               <p className={css.devicesEmpty}>{t('devices.empty')}</p>
             ) : (
-              <ul className={css.deviceList}>
-                {state.devices.map(device => (
-                  <li key={device.id} className={css.deviceRow}>
-                    <div className={css.deviceMeta}>
-                      <span className={css.deviceName}>
-                        {deviceNameFromUserAgent(device.userAgent) ?? t('devices.unknown')}
-                      </span>
-                      <span className={clsx(css.devicePresence, device.online ? css.deviceOnline : css.deviceOffline)}>
-                        {device.online ? t('devices.online') : t('devices.offline')}
-                      </span>
-                      <span className={css.deviceSeen}>
-                        {t('devices.lastSeen', { time: formatLastSeen(device.lastSeenAt) })}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      className={css.deviceRevoke}
-                      aria-label={t('devices.revoke.label')}
-                      onClick={() => { onRevoke(device.id) }}
-                    >
-                      {t('devices.revoke')}
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <DeviceRoster
+                t={t}
+                devices={state.devices}
+                onRevoke={onRevoke}
+                onRename={onRename}
+                onMerge={onMerge}
+              />
             )}
           </section>
         </>

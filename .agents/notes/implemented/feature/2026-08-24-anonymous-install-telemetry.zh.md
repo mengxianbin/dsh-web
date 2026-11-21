@@ -17,6 +17,8 @@ dsh-web 通过两类匿名事件统计使用规模，存储在现有 dsh-market.
 
 机制契约见 `docs/telemetry.md`；各包 README 配对文件链接到该文档。
 
+最终决定权在用户手里：「Web 插件」设置分区提供一个全家桶开关，写入 localStorage 的 `dsh-web-ui-telemetry-opt-out` 键；只要该键存在，或浏览器 `navigator.doNotTrack` 表示拒绝跟踪，共享报告器就在生成访客 ID、写日标记与发送之前直接返回。所有已接入包共用同一个报告器，因此一个开关覆盖全家桶；默认保持开启。
+
 ## Alternatives considered
 
 - npm 下载量：否决，结构性虚高且不可修正。

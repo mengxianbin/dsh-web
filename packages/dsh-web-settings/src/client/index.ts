@@ -1,61 +1,50 @@
 /**
- * Web UI plugin group, browser half. Registers the `web-ui-plugins`
- * dictionaries and one first-level settings section that renders the family
- * plugin cards (task-board, remote-web-ui, describe-image)
- * directly under a static heading. The section declares the
- * `web-ui.plugin.item` child slot; the dsh-web family plugins register
- * their per-plugin cards there. Skin Center, Community Plugins and Desktop
- * Pet are sibling plugins that register their own first-level sections.
+ * Web Extensions settings parent. The stable web-ui-plugins first-level entry
+ * hosts keyed secondary TABs for the family cards and optional satellite pages.
+ * The web-ui-plugins TAB still owns web-ui.plugin.item, so existing family card
+ * registrations and their migration lifecycle stay unchanged.
  */
 
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
-// Type-only: pulls the renderer-owned ctx.slots Context merge.
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-// Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-// Type-only: pulls the settings-surface SlotMap merge (the 'settings.section'
-// entry) and the ctx.settingsScope Context merge.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import { WebUiSettingsBinder } from './compat-settings-scope.ts'
+import { WebExtensionsSection } from './WebExtensionsSection.tsx'
 import { WebUIPluginsSection } from './WebUIPluginsCard.tsx'
 import { en, zh, type WebUIPluginsKey } from './locales.ts'
 import { reportDailyHeartbeat } from './telemetry.ts'
+import { WEB_EXTENSIONS_SECTION_ID, WEB_EXTENSIONS_SLOT, WebUiExtensions } from './web-ui-extensions.ts'
 
 export type { WebUIPluginsSectionProps } from './WebUIPluginsCard.tsx'
+export type { WebExtensionsSectionProps } from './WebExtensionsSection.tsx'
+export { WEB_EXTENSIONS_SECTION_ID, WEB_EXTENSIONS_SLOT, WebUiExtensions } from './web-ui-extensions.ts'
+export type { WebUiExtensionsFace } from './web-ui-extensions.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** Web UI plugin group card copy. */
     'web-ui-plugins': WebUIPluginsKey
   }
 
   interface SlotMap {
-    /**
-     * The child slot one family plugin card registers into, declared by the
-     * group section. Shape mirrors `settings.plugin.item` so the family
-     * plugins can reuse their existing card implementations.
-     */
     'web-ui.plugin.item': { kind: 'list'; scope: 'root'; owner: SettingsPluginItemOwnerProps }
+    /** One keyed settings page per installed Web extension. */
+    'web-ui.extension': { kind: 'keyed'; scope: 'root'; owner: SettingsExtensionOwnerProps }
   }
 }
 
-/** Owner share of a plugin card (the group card supplies nothing). */
 export interface SettingsPluginItemOwnerProps {
-  /** Marker field: card owner props are intentionally empty. */
   children?: never
 }
 
-/** Required services. */
-export const inject = ['slots', 'locale', 'connection', 'settingsScope', 'remote']
+/** The parent forwards the native settings-section owner props to each TAB. */
+export interface SettingsExtensionOwnerProps {
+  close: () => void
+}
 
-/**
- * Register the Web UI plugin group as a first-level settings section: its own
- * nav item hosts the family plugin cards in the section body.
- * @param ctx - client root context.
- */
+export const inject = ['slots', 'locale', 'connection', 'configForms', 'remote']
+
 export function apply(ctx: ClientContext): void {
-  // Anonymous install heartbeat (docs/telemetry.md): one beat per browser per
-  // UTC day, package name only, silent failure.
   reportDailyHeartbeat([{ name: '@linxin666/dsh-client-ui-web-ui-settings' }])
 
   ctx.effect(() => {
@@ -66,23 +55,32 @@ export function apply(ctx: ClientContext): void {
     }
   }, 'web-ui-settings: dictionaries')
 
-  // The rc.6 compatibility binder: family plugins read ctx.get('webUiSettings')
-  // and fall back to the official settings scope on hosts that expose their
-  // namespaces natively.
   new WebUiSettingsBinder(ctx)
+  const extensions = new WebUiExtensions(ctx)
 
   ctx.slots.inject('settings.section', () => {
     try {
       return ctx.slots.register({
         name: 'settings.section',
-        id: 'web-ui-plugins',
+        id: WEB_EXTENSIONS_SECTION_ID,
         order: 110,
-        label: () => ctx.locale.bind('web-ui-plugins')('title'),
+        label: () => extensions.label(),
         locale: 'web-ui-plugins',
-        children: { 'web-ui.plugin.item': { kind: 'list', scope: 'root' } },
-      }, WebUIPluginsSection)
+        children: { [WEB_EXTENSIONS_SLOT]: { kind: 'keyed', scope: 'root' } },
+        inject: () => ({ extensions }),
+      }, WebExtensionsSection)
     } catch {
       return () => {}
     }
   })
+
+  ctx.effect(() => extensions.registerPage({
+    key: WEB_EXTENSIONS_SECTION_ID,
+    order: 100,
+    locale: 'web-ui-plugins',
+    label: () => ctx.locale.bind('web-ui-plugins')('title'),
+    inject: () => ({}),
+    component: WebUIPluginsSection,
+    children: { 'web-ui.plugin.item': { kind: 'list', scope: 'root' } },
+  }), 'web-ui-settings: Web Plugins page')
 }

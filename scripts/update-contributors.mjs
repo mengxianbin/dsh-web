@@ -29,7 +29,7 @@ const END = '<!-- CONTRIBUTORS:END -->'
  * Contributors whose only merged PRs were documentation-only. The GitHub
  * /contributors endpoint counts every commit on main regardless of type, so
  * doc-only PR authors would still show up there; the repository rejects
- * documentation-only PRs (see .github/workflows/reject-docs-pr.yml), so these
+ * documentation-only PRs (see .github/workflows/reject-docs-pr.yml; 临时开放期内该拦截暂停), so these
  * logins are excluded from the rendered list. Add a login here (with the
  * merged PR numbers) when another doc-only PR lands.
  */

@@ -14,6 +14,18 @@ dsh Web GUI 的远程 SSH 运维插件：Host 进程内的持久 ssh2 连接池 
   对话记录；传输 / 执行消耗**真实远程资源**，Agent 使用前先确认。
 - `ssh_upload` / `ssh_download` 以宿主进程权限直接读写本机任意路径（不经
   bash 沙箱）；所有 `/api/dsh-ssh/*` 路由仅限 loopback，隧道只监听 `127.0.0.1`。
+- `proxyCommand` 是由宿主进程以其权限执行的 shell 命令（与 `ssh(1)` 执行同一行的
+  信任模型）：只来自用户 0600 配置文件；agent 工具只暴露是否配置、不暴露命令原文，
+  agent 也不能创建 / 修改主机；POSIX 按进程组回收子进程，Windows 只杀 shell
+  （已知限制）。
+- Agent 转发（`forwardAgent`）按主机选择性启用、默认关闭：启用后远端可以**以本机身份**
+  用本机密钥完成认证，这类信任只能由用户在 GUI 里逐台给出。本地端点（主机配置的 agent
+  路径 → `SSH_AUTH_SOCK` → Windows 原生 OpenSSH 命名管道）必须解析出结果，解析不出就
+  **报错掉线**，不能悄悄不转发；服务端拒绝该请求时必须把服务端错误原样抛出，禁止降级成
+  未转发的会话。README「安全模型」是这条的用户侧表述。
+- `agentPath` **不是机密**（它是地址串，不是凭据）：留空表示自动检测，任何情况下都要照常
+  提交。主机表单里只有密码与私钥路径走「编辑时留空即保留旧值」的规则——把 agent 路径也
+  当 secret 会让 PATCH 丢掉整个 `auth` 块，静默保留旧的认证方式（#1910）。
 
 ## Agent 工具面
 
@@ -21,6 +33,53 @@ dsh Web GUI 的远程 SSH 运维插件：Host 进程内的持久 ssh2 连接池 
   `ssh_tunnel` / `ssh_cluster`，GUI 与 Agent 共享同一份主机配置。
 - Agent 只能用**用户在 GUI 配置过**（或从 `~/.ssh/config` 导入）的主机；别名
   未配置时先告知用户去 GUI 配置，不得臆造。
+
+## 面板与终端会话
+
+- client 半区经官方槽位注册**原生中栏面板**：`native-panel.tsx` 往 shell 自己的
+  面板列表（`sidebar.panellist`）贡献一行、往布局的 keyed `main` 槽贡献页面，
+  并驱动 `ctx.layout.selectPanel`——与任务看板、技能中心同形，行盒 / 标签 /
+  高亮 / 折叠轨道归 shell，本包不再 DOM 接管中栏。
+- 页签、hosts 页的「连接」请求与**终端会话 id** 存在 `panel/controller.ts`：
+  布局只在面板被选中时挂载页面，组件本地 state 会在切面板时丢失。
+- **PTY 会话归 Host**（`src/engine/terminal-sessions.ts`）：会话按 id 存活，
+  视图卸载只 detach、重新挂载按 id reattach 并回放滚动缓冲；只有显式
+  `close` 帧、远端退出后的宽限期到期或空闲回收才结束会话。路由层只做
+  loopback 围栏与 socket 接线，会话表随路由注销一并 dispose。
+- **终端多标签（#1950）**：标签与其状态（alias / host session id / status / 待答
+  2FA / 关闭失败）都存 `panel/controller.ts`，视图只保留**一个 xterm**，切 tab 是
+  重绑这一个终端而不是叠终端。切走已 ready 的标签只 detach，切回按 sessionId
+  attach 回放。
+- **ready 之前不得 detach**：此时没有 sessionId 可回连，丢掉 socket 等于把 Host
+  上的 connecting 会话晾成无人认领的孤儿 PTY（参考实现在这里的缺陷）。连接交给
+  controller 的 `adoptTerminalLink`，拿到 id 后按意图 detach 或 close；
+  `reclaimTerminalLink` 让切回的标签复用同一条连接，不重复开 PTY。
+- **意图在 ready 时现读**：`adoptTerminalLink` 的 onReady 必须从当时的登记项读取
+  intent，不能沿用认领闭包里的值；关闭仍在连接的标签时 `closeTerminalTab` 把意图
+  改成 close（而不是丢弃登记项），否则 ready 之后仍会 detach，留下无主 PTY。
+  视图里 tab 已不存在且未 ready 的 socket 同样以 close 兜底。
+- **认领期间不丢输出**：adopt 期间 `onOutput` 写入该标签保留画面，取回 socket 时先
+  画出来再继续写入；每次绑定（新开 / 切回 / exited 重绘）都要先按"这块屏当前属于别的
+  标签"清屏，否则会串台。
+- **2FA 答案按标签隔离**：挑战与答案（`authPrompt` / `authAnswers`）都存标签记录，
+  后台挑战不得清当前输入，提交只发当前标签自己的答案；视图不持有答案状态。
+- **远端 exit 只清 sessionId**：标签、位置与最后一屏输出保留，不得删标签，也不得
+  让 placeholder 盖住画面；只有"没有任何标签"时终端区才显示 placeholder。
+- **关闭后台标签**走 `api.closeTerminalSession`：短暂 attach 后发 `close` 帧，
+  不新增 HTTP 路由。判定是"会话是否已不在运行"：帧落到已 OPEN 的 socket，或 Host 回
+  `exit`（未知 id 回 `terminal session expired`）都算已关闭；socket 报错、打开前
+  关闭、或在有界等待（默认 5s）内无结论则算未证明，保留标签与 sessionId 并报
+  `closeError`，不得谎称已关闭。同一标签同时只允许一次关闭尝试（in-flight 防重）；
+  恢复语义是"重试"或"把该标签切到前台用其自身 socket 关闭"，陈旧 `closeError` 在
+  ready / exit / fail 时清除，绝不因为关不掉就静默移除标签。
+- **终端 socket 走外壳公布的 Host**（`src/client/api.ts` 的 `terminalSocketUrl`）：
+  应用交付的页面（桌面版 `dsh-app://app/`）不能在自己的 scheme 上升级 socket，
+  但外壳已经通过官方钩子 `__DSH_TRANSPORT__.streamBaseUrl` 公布它拥有的 Host
+  authority 并改写该 Host 的握手，因此在这种页面上改拨该地址（仅当它是可解析、
+  无 userinfo、authority 非空的 http(s) origin）。网页始终按自身 origin 解析——
+  远程通道会把 `ownsHost` 授予已配对的局域网页面，那类页面必须继续留在门控通道里。
+  宿主侧围栏不变，socket 仍走 loopback。决策与被取代的旧方案见
+  `.agents/notes/implemented/bug-fix/2026-10-02-ssh-terminal-dials-shell-owned-host.md`。
 
 ## 提交前检查
 

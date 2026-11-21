@@ -3,8 +3,8 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
-  canMoveManually, createTask, EXECUTION_HISTORY_LIMIT, executionLabel, retainRecentExecutions,
-  settleExecution, startExecution, withSchedule, withStatus,
+  canMoveManually, canMoveTask, createTask, EXECUTION_HISTORY_LIMIT, executionLabel, retainRecentExecutions,
+  settleExecution, startExecution, withSchedule, withStatus, type TaskRecord,
 } from '../src/core/tasks.ts'
 
 const NOW = 1_700_000_000_000
@@ -71,12 +71,42 @@ describe('createTask', () => {
 })
 
 describe('status transitions', () => {
-  it('manual moves are allowed only to backlog/todo', () => {
+  it('operator can move a card to any column it does not already show', () => {
+    // Given a card in any status and a candidate target column
+    // When the operator picks the target
+    // Then every other column is a legal target, the running column included
     expect(canMoveManually('todo', 'backlog')).toBe(true)
     expect(canMoveManually('failed', 'todo')).toBe(true)
     expect(canMoveManually('done', 'backlog')).toBe(true)
-    expect(canMoveManually('todo', 'running')).toBe(false)
-    expect(canMoveManually('backlog', 'done')).toBe(false)
+    expect(canMoveManually('backlog', 'done')).toBe(true)
+    expect(canMoveManually('todo', 'failed')).toBe(true)
+    expect(canMoveManually('done', 'failed')).toBe(true)
+    expect(canMoveManually('todo', 'running')).toBe(true)
+    expect(canMoveManually('running', 'done')).toBe(true)
+    // The column the card already shows is not a move
+    expect(canMoveManually('running', 'running')).toBe(false)
+    expect(canMoveManually('todo', 'todo')).toBe(false)
+  })
+
+  it('operator cannot move an executing or archived card, and can move one parked in running', () => {
+    // Given a card with an open execution, a card parked in running by hand,
+    // and an archived card
+    const executing: TaskRecord = {
+      ...sampleTask(),
+      status: 'running',
+      executions: [{
+        id: 'e1', sessionId: undefined, startedAt: NOW, endedAt: undefined, result: undefined, error: undefined,
+      }],
+    }
+    const parked: TaskRecord = { ...sampleTask(), status: 'running' }
+    const archived: TaskRecord = { ...parked, archivedAt: NOW }
+
+    // When the board asks whether each may be moved
+    // Then only the executing and the archived card are locked
+    expect(canMoveTask(executing, 'todo')).toBe(false)
+    expect(canMoveTask(parked, 'todo')).toBe(true)
+    expect(canMoveTask(parked, 'done')).toBe(true)
+    expect(canMoveTask(archived, 'todo')).toBe(false)
   })
 
   it('withStatus bumps updatedAt and swaps the status', () => {
@@ -215,7 +245,7 @@ describe('withSchedule', () => {
   it('creates a schedule rule on a task without one and bumps updatedAt', () => {
     const task = sampleTask()
     const scheduled = withSchedule(task, { enabled: true, cron: '0 9 * * *', nextRunAt: NOW + 100 }, NOW + 1)
-    expect(scheduled.schedule).toEqual({ enabled: true, cron: '0 9 * * *', nextRunAt: NOW + 100, lastTriggeredAt: undefined })
+    expect(scheduled.schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: NOW + 100, lastTriggeredAt: undefined, runCount: 0 })
     expect(scheduled.updatedAt).toBe(NOW + 1)
     expect(task.schedule).toBeUndefined() // original untouched
   })
@@ -227,7 +257,7 @@ describe('withSchedule', () => {
       NOW,
     )
     const rolled = withSchedule(task, { nextRunAt: NOW + 200 }, NOW + 2)
-    expect(rolled.schedule).toEqual({ enabled: true, cron: '0 9 * * *', nextRunAt: NOW + 200, lastTriggeredAt: NOW })
+    expect(rolled.schedule).toEqual({ enabled: true, mode: 'cron', cron: '0 9 * * *', nextRunAt: NOW + 200, lastTriggeredAt: NOW, runCount: 0 })
   })
 
   it('keeps executions and other task fields intact', () => {
@@ -247,5 +277,16 @@ describe('withSchedule', () => {
     expect(cleared.schedule?.enabled).toBe(true)
     expect(cleared.schedule?.cron).toBe('0 9 * * *')
     expect(cleared.schedule?.nextRunAt).toBeUndefined()
+  })
+})
+
+describe('goal run opt-in', () => {
+  it('user leaving the option alone gets one plain turn and only an explicit true is stored', () => {
+    // Given cards created without the option, with it true, and with it false
+    // When the created records are read
+    // Then absent is the canonical off-state and only the opt-in is persisted
+    expect(sampleTask().goalRun).toBeUndefined()
+    expect(createTask({ title: 'x', description: '', prompt: '', goalRun: true }, NOW, 'task-on').goalRun).toBe(true)
+    expect(createTask({ title: 'x', description: '', prompt: '', goalRun: false }, NOW, 'task-off').goalRun).toBeUndefined()
   })
 })

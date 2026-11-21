@@ -10,4 +10,4 @@ import { clientBundle } from '../../shared/tsdown.client.ts'
  * removed in 0.4.0 — the official UI is adapted in place, so this config
  * mirrors tsdown.config.ts exactly.)
  */
-export default clientBundle('@linxin666/dsh-remote-web-ui', ['src/index.ts', 'src/invariant.ts'])
+export default clientBundle('@linxin666/dsh-remote-web-ui', ['src/index.ts'])

@@ -62,4 +62,34 @@ describe('isPairedOrLoopbackAllowed', () => {
       cookie: 'dsh_pair=dev-1',
     }))).toBe(true)
   })
+
+  it('refuses instead of throwing when the property lookup throws (un-injected cordis service)', () => {
+    // cordis answers a property read of an un-injected service by throwing; the
+    // fence must treat that as "no pairing service", never leak it to the route
+    // handler where it becomes an empty-body 400 (#1942).
+    const ctx = Object.defineProperty({}, 'remoteWebUiPairing', {
+      get(): never {
+        throw new Error('cannot get property "remoteWebUiPairing" without inject')
+      },
+    })
+    expect(isPairedOrLoopbackAllowed(ctx as never, request({
+      remoteAddress: '192.168.1.20',
+      host: 'dsh.example:443',
+      cookie: 'dsh_pair=dev-1',
+    }))).toBe(false)
+  })
+
+  it('never reads the throwing property when ctx.get already answered', () => {
+    const get = vi.fn(() => undefined)
+    const ctx = Object.defineProperty({ get }, 'remoteWebUiPairing', {
+      get(): never {
+        throw new Error('cannot get property "remoteWebUiPairing" without inject')
+      },
+    })
+    expect(isPairedOrLoopbackAllowed(ctx as never, request({
+      remoteAddress: '192.168.1.20',
+      host: 'dsh.example:443',
+    }))).toBe(false)
+    expect(get).toHaveBeenCalledWith('remoteWebUiPairing', false)
+  })
 })

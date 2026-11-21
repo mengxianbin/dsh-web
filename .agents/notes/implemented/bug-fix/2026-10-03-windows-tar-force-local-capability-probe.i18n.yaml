@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+2026-10-03-windows-tar-force-local-capability-probe.md: 19e4b2688f4205bc6e3efd539b2d9f5ad9e6b5be
+2026-10-03-windows-tar-force-local-capability-probe.zh.md: 75f952293c98a4aec11504193af811e71874f7d8

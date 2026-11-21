@@ -1,0 +1,327 @@
+/* Browser view: the right-sidebar chip's contents and the tab body. Design
+   tokens only (no literal colors) so the surface
+   follows the active skin. The shell owns the column, the chip's box and the
+   switch between tabs; only what this plugin draws is styled here.
+
+   The body's geometry mirrors the shipped browser tab (its Browser.module.css):
+   38px toolbar with 28x28 tool buttons and --dsw-radius-sm, a 28px address
+   field on bg-layer-1, then the frame. The column is narrow (roughly
+   300-500px), so nothing here carries a fixed width: the address field takes
+   the remaining toolbar width, the tab chips scroll sideways, and the frame
+   scales to the width it is given. */
+
+/* -- Chip contents --
+
+   The chip box belongs to the shell, so this block sizes only the mark and the
+   text it puts inside that box. */
+
+.tabTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.tabTitleMark {
+  flex: none;
+  width: 13px;
+  height: 13px;
+}
+
+.tabTitleText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* -- Tab body --
+
+   Fills the content area the sidebar hands over and scrolls inside itself: the
+   column never grows a scrollbar because of this tab, and no box here is
+   positioned against the viewport. */
+
+.root {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  overflow: hidden;
+}
+
+/* -- Toolbar --
+
+   One row of chrome, the same height and padding as the shipped browser tab's
+   toolbar: [address .............] [state] [refresh]. */
+
+.toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+  align-items: center;
+  box-sizing: border-box;
+  height: 38px;
+  padding: 5px 6px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.tool {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--dsw-alias-label-secondary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .tool:hover:not(:disabled) {
+    color: var(--dsw-alias-label-primary);
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.tool:disabled {
+  color: var(--dsw-alias-label-quaternary);
+  cursor: default;
+}
+
+.tool:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-bg-base), 0 0 0 4px var(--dsw-alias-brand-primary);
+}
+
+/* The address display: read-only, since navigation belongs to the agent's
+   tools. It truncates, keeps the full address on the title attribute, and its
+   text stays selectable - the body selects all of it on click - so the address
+   is one ordinary copy gesture away without a second control. */
+
+.addressBox {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.address {
+  width: 100%;
+  height: 28px;
+  box-sizing: border-box;
+  padding: 0 9px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  font: var(--dsw-font-xxs-12);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-sm);
+}
+
+.address::placeholder {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.address:focus {
+  outline: 1px solid var(--dsw-alias-state-business-primary);
+  outline-offset: -1px;
+}
+
+/* Connection state: the primitives StateDot carries the phase, the text says
+   it in words. The dot brings its own component stylesheet, so nothing here
+   paints it. */
+.status {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--dsw-alias-label-tertiary);
+  font: var(--dsw-font-xxxs-11);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.statusText {
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* -- Controlled-browser chips --
+
+   The agent may hold several pages open in its browser; these chips switch
+   which one is streamed. They are drawn only when there is a choice to make,
+   so a single-page tab keeps exactly the shipped browser tab's structure. */
+
+.tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  overflow-x: auto;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l3);
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  flex: none;
+  max-width: 150px;
+  height: 24px;
+  padding: 0 8px;
+  overflow: hidden;
+  color: var(--dsw-alias-label-secondary);
+  font: var(--dsw-font-xxxs-11);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  background: transparent;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+@media (hover: hover) {
+  .tab:hover {
+    color: var(--dsw-alias-label-primary);
+    background: var(--dsw-alias-interactive-bg-hover);
+  }
+}
+
+.tabActive {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-active);
+}
+
+.tab:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--dsw-alias-bg-base), 0 0 0 4px var(--dsw-alias-brand-primary);
+}
+
+/* -- Frame stage --
+
+   The tab's one scrolling region: a frame taller than the column scrolls here
+   instead of pushing the trace off screen. An auto margin on the children
+   centres them without the clipped-top failure that centring a flex container
+   with overflow produces. */
+
+.content {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--dsw-alias-bg-base);
+}
+
+.frame {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: auto;
+  object-fit: contain;
+}
+
+.empty,
+.error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin: auto;
+  padding: 20px 16px;
+  text-align: center;
+}
+
+.emptyTitle,
+.errorTitle {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.emptyHint,
+.errorBody {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.errorTitle {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.errorCode {
+  color: var(--dsw-alias-label-tertiary);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+/* -- Footer trace -- */
+
+.trace {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-height: 84px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border-top: 0.5px solid var(--dsw-alias-border-l3);
+}
+
+.traceList {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.traceIdle {
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.traceRow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.traceTool {
+  flex: none;
+  color: var(--dsw-alias-brand-primary);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+}
+
+.traceSummary {
+  min-width: 0;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

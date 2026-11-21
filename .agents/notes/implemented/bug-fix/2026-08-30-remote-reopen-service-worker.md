@@ -24,11 +24,11 @@ The app shell now registers a **reopen service worker** served by the plugin:
 - Worker behavior: intercepts **GET navigations to `/` only**. Network-first: re-fetch `/pair-app` with same-origin credentials — a live pairing gets the current shell and its `lastSeenAt` refreshed (every reopen extends the session); a refused response passes the original navigation through (once the plugin is gone, the harness answers honestly); a network failure falls back to the cached shell (`dsh-remote-shell-v1` in CacheStorage), so a brief offline open still boots the app. Install warms the cache; activate prunes foreign caches and claims clients.
 - `pairingFailurePage` (served at `/` by the worker when the pairing no longer passes) now covers both entries — dead link at `/pair-accept`, expired session at `/` — and states that re-pairing restores access.
 - `DEFAULT_IDLE_EXPIRE_MS` 7 → 30 days: the worker's presence refresh means the window runs out only through genuine disuse, and 30 days matches the browser-credential lifetimes the surrounding flow was built around. `idleExpireMs` config already exists for per-deployment override.
-- Secure contexts only: plain-HTTP LAN origins never register the worker (no service workers off https/localhost); a LAN reopen means scanning a fresh QR. Documented in both READMEs as a known limitation.
+- Service workers exist only on secure contexts, so the worker owns `/` wherever it registers. A plain-HTTP LAN origin cannot have one, and the capture script keeps the plugin-owned landing path in the address bar there instead: [Plain-HTTP LAN reopens stayed on a path no device credential can answer](2026-10-15-remote-plain-http-lan-reopen-path.md).
 
 ## Alternatives considered
 
-- **Keep the address bar on a plugin-owned path** (drop the replaceState to `/`). Rejected: the replaceState exists to leave the official SPA at its canonical root, and leaving `/pair-app?device=` in the address bar persists the live device credential into browser history and sync backups — a worse trade than the worker, with an untested SPA-path compatibility pass on top.
+- **Keep the address bar on a plugin-owned path** (drop the replaceState to `/`). Rejected: the replaceState exists to leave the official SPA at its canonical root, and leaving `/pair-app?device=` in the address bar persists the live device credential into browser history and sync backups — a worse trade than the worker, with an untested SPA-path compatibility pass on top. The credential-free form of that path later became the reopen target on origins where this worker cannot exist; see [the plain-HTTP reopen note](2026-10-15-remote-plain-http-lan-reopen-path.md) for why it needed no compatibility pass.
 - **Mint a harness browser-auth cookie for the paired phone** (the plugin can redeem a launch token for any authority). Rejected on architecture: with that cookie the official SPA calls `/api` directly, passes the connection fence, and bypasses the pairing gate — on this cohort nothing emits `api/gate`, so 停止 would stop cutting devices off. This is precisely what the cookieless design avoids.
 - **Intercept deep SPA paths too**, not just `/`. Rejected: the SPA always lives at `/` (replaceState), so deep-path entries do not occur in practice; surgical interception keeps the blast radius on the official UI minimal.
 - **Document "re-scan when it breaks" only.** Rejected: reopening from the phone is the feature's main mobile path; a deterministic 401 on every tab restore is a defect, not a limitation.
@@ -37,7 +37,7 @@ The app shell now registers a **reopen service worker** served by the plugin:
 
 - Tunnel (https) phones reopen straight into the app while the pairing lives; revocation still bites because the worker's network-first check hits `/pair-app` — a revoked device sees the bilingual re-scan page served at `/`.
 - Each reopen adds two small same-origin requests (the worker update check and the `/pair-app` shell refresh), both fenced and rate-limit-free by design.
-- Plain-HTTP LAN reopens still hit the harness 401 and need a re-scan (cheap in-network); documented.
+- A plain-HTTP LAN reopen comes back through the device-gated landing instead of the harness 401 (see the [plain-HTTP reopen note](2026-10-15-remote-plain-http-lan-reopen-path.md)). A secure origin whose browser refuses the worker registration is unchanged and still falls back to the harness gate, which is documented as a known limitation in both READMEs.
 - If the plugin is disabled or removed, the stale worker passes navigations through to the harness — the same dead end as before, no new failure mode.
 - The 30-day idle default applies to new deployments and existing ones alike (the constant feeds the schema default); deployments pinning `idleExpireMs` in the profile patch are unaffected.
 
@@ -45,4 +45,5 @@ The app shell now registers a **reopen service worker** served by the plugin:
 
 - `tests/routes.spec.ts`: `/pair-app.sw.js` served with `text/javascript`, `no-store`, `service-worker-allowed: /`; foreign authority 403; absent without an index provider; the patched shell registers the worker; failure-page wording assertions updated.
 - `tests/app-sw.spec.ts` (new): decision matrix over a mocked worker scope — handler registration, non-navigate/non-root requests ignored, network-first serve and cache refresh, refusal pass-through, offline cache fallback, empty-cache pass-through, foreign-cache pruning, root-level script path.
+- `tests/app-shell-capture.spec.ts`: the capture script's origin-dependent reopen target (added with the plain-HTTP reopen path).
 - Package suite 306 tests green; repository `pnpm typecheck`, `pnpm test`, `pnpm docs:check` pass; package `tsdown` build clean.

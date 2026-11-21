@@ -1,20 +1,19 @@
 /**
- * The sidebar remote-control seat: the update trigger plus the phone-icon
- * trigger beside the settings button, and the pairing panel modal. Owns the
- * panel behavior — token minting on open, the status SSE subscription,
- * stop/refresh/copy — and renders the pure {@link RemotePanel} body. The
- * update seat (the dsh-web self-update flow) rides the same footer row,
- * rendered by {@link UpdateEntry}. Component-local state per the client
- * stack rules: nothing here survives remounts or crosses entries.
+ * The sidebar remote-control seat: the phone-icon trigger beside the
+ * settings button, and the pairing panel modal. Owns the panel behavior —
+ * token minting on open, the status SSE subscription, stop/refresh/copy — and
+ * renders the pure {@link RemotePanel} body. The family self-update seat is
+ * its own plugin (dsh-update) and no longer rides this row. Component-local
+ * state per the client stack rules: nothing here survives remounts or crosses
+ * entries.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
 import type { PairingPhase } from '../pairing.ts'
 import { RemotePanel, type PanelState } from './RemotePanel.tsx'
-import { copyText, issuePair, revokePair, stopPair, type DeviceFrame, type IssueResponse, type PairStateFrame, type RelayStatusFrame, type TunnelStatusFrame } from './pair-api.ts'
+import { copyText, issuePair, mergePairDevices, renamePair, revokePair, stopPair, type DeviceFrame, type IssueResponse, type PairStateFrame, type RelayStatusFrame, type TunnelStatusFrame } from './pair-api.ts'
 import { PhoneIcon } from './PhoneIcon.tsx'
-import { UpdateEntry } from './UpdateEntry.tsx'
 import css from './remote.module.css'
 
 /** Entry props: the sidebar column state and the standard locale seat. */
@@ -74,10 +73,10 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
     eventSource.current = undefined
   }, [])
 
-  const mint = useCallback(async (address?: string): Promise<PanelState> => {
+  const mint = useCallback(async (): Promise<PanelState> => {
     let result: IssueResponse
     try {
-      result = await issuePair(address)
+      result = await issuePair()
     } catch {
       // Fetch/network failure: show an explicit state instead of silently
       // leaving the panel on its initial banner.
@@ -105,10 +104,6 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
       // Whether this QR is built on the configured public (tunneled) base.
       public: publicBaseUrl !== undefined && result.url.startsWith(publicBaseUrl),
       ...(publicBaseUrl !== undefined ? { publicBaseUrl } : {}),
-      // The issued URL names the requested (or default first) literal; the
-      // public link has no LAN literal, so no radio row is selected then.
-      address: address ?? result.lanAddresses[0] ?? '',
-      lanAddresses: result.lanAddresses,
     }
   }, [])
 
@@ -128,7 +123,7 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
     // unreachable origins are fenced out of the events endpoint, so opening
     // it there would just start a doomed reconnect loop.
     if (next.kind !== 'ready' && next.kind !== 'lan-required') return
-    const source = new EventSource('/api/pair/events')
+    const source = new EventSource('api/pair/events')
     eventSource.current = source
     source.onmessage = (event) => {
       try {
@@ -181,31 +176,64 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
   useEffect(() => closeEventSource, [closeEventSource])
 
   const handleStop = useCallback(() => {
-    // A failed stop request is harmless: the optimistic phase flip below
-    // keeps the UI honest, and the status stream confirms the stopped phase.
-    void stopPair().catch(() => {})
-    // Optimistic fallback; the status stream confirms with the stopped phase.
-    setState(previous => previous.kind === 'ready' ? { ...previous, phase: 'stopped' as PairingPhase, devices: [] } : previous)
+    // The phase flip lands only once the server accepted the stop. A refused
+    // stop changes nothing server-side and the service emits no state change
+    // (notify dedupes identical snapshots), so an optimistic flip would stick
+    // and claim a revocation that never happened.
+    void stopPair().then(() => {
+      setState(previous => previous.kind === 'ready' ? { ...previous, phase: 'stopped' as PairingPhase, devices: [] } : previous)
+    }).catch(() => {})
   }, [])
 
   const handleRevoke = useCallback((deviceId: string) => {
-    void revokePair(deviceId).catch(() => {})
-    setState(previous => previous.kind === 'ready'
-      ? { ...previous, devices: previous.devices.filter(device => device.id !== deviceId) }
-      : previous)
+    // Same rule as stop: a refused unpair must leave the row, or the panel
+    // claims a still-live session is gone.
+    void revokePair(deviceId).then(() => {
+      setState(previous => previous.kind === 'ready'
+        ? { ...previous, devices: previous.devices.filter(device => device.id !== deviceId) }
+        : previous)
+    }).catch(() => {})
+  }, [])
+
+  const handleRename = useCallback(async (deviceId: string, name: string): Promise<boolean> => {
+    try {
+      if (!await renamePair(deviceId, name)) return false
+      // Mirror the stored label immediately; the next SSE frame carries the
+      // host-sanitized value and remains authoritative.
+      const stored = name.trim() === '' ? undefined : name
+      setState(previous => previous.kind === 'ready'
+        ? {
+            ...previous,
+            devices: previous.devices.map(device => device.id === deviceId
+              ? { ...device, name: stored }
+              : device),
+          }
+        : previous)
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const handleMerge = useCallback(async (deviceIds: string[]): Promise<boolean> => {
+    try {
+      const kept = await mergePairDevices(deviceIds)
+      if (kept === undefined) return false
+      // The survivor keeps its own row; the dropped ids leave immediately,
+      // and the host's next frame follows with any inherited name.
+      setState(previous => previous.kind === 'ready'
+        ? {
+            ...previous,
+            devices: previous.devices.filter(device => device.id === kept || !deviceIds.includes(device.id)),
+          }
+        : previous)
+      return true
+    } catch {
+      return false
+    }
   }, [])
 
   const handleRefresh = useCallback(() => {
-    void mint().then(setState)
-  }, [mint])
-
-  /** Re-mint against another LAN literal (multi-homed machines). */
-  const handlePickAddress = useCallback((address: string) => {
-    void mint(address).then(setState)
-  }, [mint])
-
-  /** Re-mint against the configured public (tunneled) base. */
-  const handlePickPublic = useCallback(() => {
     void mint().then(setState)
   }, [mint])
 
@@ -228,7 +256,6 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
   return (
     <>
       <div className={css.entryRow} data-rail={wide ? undefined : 'rail'}>
-        <UpdateEntry wide={wide} t={t} />
         <TooltipAnchor wide={wide} label={t('entry.label')} onClick={openPanel} expanded={open} />
       </div>
       {open && createPortal((
@@ -244,9 +271,9 @@ export function RemoteEntry({ wide, t }: RemoteEntryProps) {
             onRefresh={handleRefresh}
             onCopy={handleCopy}
             onCopyToken={handleCopyToken}
-            onPickAddress={handlePickAddress}
-            onPickPublic={handlePickPublic}
             onRevoke={handleRevoke}
+            onRename={handleRename}
+            onMerge={handleMerge}
           />
         </div>
       ), document.body)}
@@ -261,6 +288,7 @@ function TooltipAnchor({ wide, label, onClick, expanded }: { wide: boolean; labe
       type="button"
       className={css.trigger}
       data-wide={wide ? 'wide' : 'rail'}
+      data-testid="remote-trigger"
       aria-label={label}
       aria-expanded={expanded}
       title={label}

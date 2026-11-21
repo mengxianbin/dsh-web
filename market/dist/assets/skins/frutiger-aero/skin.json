@@ -1,0 +1,47 @@
+{
+  "$schema": "https://schemas.linxin666.org/dsh-skin/v2.json",
+  "skinManifestVersion": 2,
+  "id": "frutiger-aero",
+  "name": "冰蓝气泡玻璃",
+  "nameEn": "Frutiger Aero Glass",
+  "version": "1.1.0",
+  "author": "lohipo",
+  "license": "MIT",
+  "licenseUrl": "https://opensource.org/licenses/MIT",
+  "attribution": "皮肤代码与全部美术资产均为原创：背景壁纸由代码程序化生成，气泡为纯 CSS 径向渐变，不含任何第三方图像，也不含任何人物形象。气泡外观的径向 alpha 剖面参考 khang-nd/bubbles（MIT），仅使用数值，未复制资产。",
+  "tagline": "冰蓝玻璃 · 气泡上浮 · 晴天与夜海的两种蓝",
+  "description": "Frutiger Aero 风格皮肤：原创的蓝天白云草地壁纸垫在冰蓝半透明玻璃面板之下，背景里六枚气泡持续上浮。整窗只在顶边留一道连续高光，而不是给每个面板各描一圈边。全部 --dsw-alias-* 与 --aion-* token 重映射为冷色体系：浅色是正午晴空，深色是入夜后的冷蓝海面。正文与次要文字的对比度按真实合成底色核算，两套配色均满足 WCAG AA。",
+  "tags": [
+    "frutiger-aero",
+    "冰蓝",
+    "玻璃",
+    "气泡",
+    "天空",
+    "草地",
+    "半透明",
+    "css-only",
+    "dual-theme"
+  ],
+  "accent": "#3FB8E8",
+  "order": 1,
+  "preview": {
+    "light": "preview/light.jpg",
+    "dark": "preview/dark.jpg"
+  },
+  "contributes": {
+    "stylesheet": "skin.css",
+    "patches": "patches.css",
+    "backgroundMedia": {
+      "light": {
+        "type": "image",
+        "src": "assets/aero-sky.webp",
+        "scrim": "linear-gradient(180deg, rgba(246,251,255,0.12) 0%, rgba(240,249,255,0.18) 46%, rgba(232,246,255,0.26) 100%)"
+      },
+      "dark": {
+        "type": "image",
+        "src": "assets/aero-sky.webp",
+        "scrim": "linear-gradient(180deg, rgba(8,22,40,0.62) 0%, rgba(10,26,46,0.68) 46%, rgba(12,30,52,0.74) 100%)"
+      }
+    }
+  }
+}

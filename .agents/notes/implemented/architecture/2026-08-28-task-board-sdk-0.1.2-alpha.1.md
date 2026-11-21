@@ -24,6 +24,8 @@ Adding a workspace list RPC loses because the approved Host workspace API has no
 
 Session create, rename, prompt, list, and page calls are dispatched as `{ namespace, method, args: { request } }`; `agentPresets/list` uses an empty args object and returns the direct roster.
 
+The 0.2.1 cohort makes `peer` mandatory on every gateway request (`InvokeRemoteRequest`). The runner names an in-process owner peer on each invoke and stream: `principal: { kind: 'owner' }` states that the call is host-local code driving the local user's own Host (the gateway answers owner peers directly instead of running a remote-access decision), and `interactions: 'none'` keeps the peer off the forwarded-event endpoints it never uses. `createOwnerPeer(ctx)` mints the peer on the plugin fiber and aborts it when the fiber disposes; a runner constructed without one (unit tests around fake gateways) binds a peer to a fresh root context instead.
+
 Workspace validation is local to the Host registry, whose rows use `id`; browser workspace rows continue to use `workspaceId`.
 
 The package-local generated settings-form copy is adapted directly because this migration is intentionally scoped away from `shared/`; it must not be regenerated from the old shared source as part of this change.

@@ -14,7 +14,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { SshEngine } from '../src/engine.ts'
 import { HostStore } from '../src/store.ts'
 import type { HostPayload } from '../src/protocol.ts'
-import { TEST_PASSWORD, TEST_USER, TestSshServer } from './helpers/ssh-server.ts'
+import { TEST_PASSWORD, TEST_USER, TestSshServer, onCommandStarted } from './helpers/ssh-server.ts'
 import { TestSshd } from './helpers/sshd.ts'
 
 let server: TestSshServer
@@ -179,6 +179,49 @@ describe('exec', () => {
     expect(Date.now() - started).toBeLessThan(5_000)
   })
 
+
+  it('operator who aborts a running command sees it cancelled, not replayed', async () => {
+    // Given a command the shim never answers, with the caller armed to cancel it
+    addHost('exec-abort')
+    const controller = new AbortController()
+    onCommandStarted((command) => {
+      // When the remote channel is open, cancel the call the way a tool call is cancelled
+      if (command === 'hang') controller.abort()
+    })
+    try {
+      const started = Date.now()
+      const result = await engine.exec('exec-abort', 'hang', 30_000, controller.signal)
+
+      // Then it settles as a cancellation, not as a timeout or a broken connection
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('cancelled by the caller')
+      expect(result.timedOut).toBe(false)
+      // And it settles on the abort rather than the 30s budget or a retry cycle
+      expect(Date.now() - started).toBeLessThan(10_000)
+    } finally {
+      onCommandStarted(undefined)
+    }
+  })
+
+  it('operator passing an already-aborted signal sees no command run at all', async () => {
+    // Given a signal that was cancelled before the call
+    addHost('exec-preabort')
+    const controller = new AbortController()
+    controller.abort()
+    const seen: string[] = []
+    onCommandStarted((command) => { seen.push(command) })
+    try {
+      // When the call runs against that signal
+      const result = await engine.exec('exec-preabort', 'hang', 30_000, controller.signal)
+
+      // Then it reports a cancellation
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('cancelled by the caller')
+    } finally {
+      onCommandStarted(undefined)
+    }
+  })
+
   it('fails cleanly for unknown aliases', async () => {
     await expect(engine.exec('nope', 'true')).rejects.toThrow(/not found/)
   })
@@ -223,6 +266,16 @@ describe('connection pool', () => {
     expect(server.connectCount).toBe(before + 1)
   }, 10_000)
 
+  it('operator applies a settings edit to the connection ceiling of later connections', () => {
+    // Given an engine whose options are read when a connection is built
+    // When the loader commits a new connectTimeoutMs without a remount
+    engine.setConnectTimeout(45_000)
+
+    // Then connections opened afterwards read the new ceiling
+    expect(engine.opts.connectTimeoutMs).toBe(45_000)
+    engine.setConnectTimeout(5_000)
+  })
+
   it('dropAlias closes the pooled connection so the next exec reconnects', async () => {
     addHost('pool-drop')
     await engine.exec('pool-drop', 'true')
@@ -233,6 +286,35 @@ describe('connection pool', () => {
     expect(result.success).toBe(true)
     expect(server.connectCount).toBe(before + 1)
   })
+})
+
+describe('proxyCommand transport', () => {
+  /**
+   * A ProxyCommand that bridges its stdio to the embedded test server through
+   * a node one-liner, so the whole exec path runs over a real subprocess
+   * transport instead of a direct TCP connection (issue #1448).
+   */
+  function bridgeCommand(): string {
+    const script = "const net=require('net');const s=net.connect(" + String(server.port)
+      + ",'127.0.0.1');s.pipe(process.stdout);process.stdin.pipe(s)"
+    return '"' + process.execPath + '" -e "' + script + '"'
+  }
+
+  it('runs exec over a ProxyCommand and drops it with the pooled connection', async () => {
+    // A deliberately unreachable HostName: OpenSSH semantics say a
+    // ProxyCommand replaces the direct TCP connection entirely.
+    addHost('via-proxy', { host: '10.255.255.1', proxyCommand: bridgeCommand() })
+    const result = await engine.exec('via-proxy', 'echo hello')
+    expect(result.success).toBe(true)
+    expect(result.stdout.trim()).toBe('hello')
+    engine.dropAlias('via-proxy')
+    expect(engine.pool.has('via-proxy')).toBe(false)
+  }, 15_000)
+
+  it('surfaces a failing ProxyCommand instead of waiting for the handshake timeout', async () => {
+    addHost('proxy-broken', { proxyCommand: 'definitely-not-a-real-binary-xyz' })
+    await expect(engine.exec('proxy-broken', 'true')).rejects.toThrow(/ProxyCommand/)
+  }, 15_000)
 })
 
 describe('key auth', () => {

@@ -1,0 +1,113 @@
+# Endfield Baker / 终末地 · BAKER — 素材来源与权利说明 / Asset provenance and rights
+
+核查日期 / Reviewed: 2026-10-14
+
+## 中文
+
+### 贡献者政策立场与责任声明
+
+本皮肤为非官方、个人非营利的同人界面工程。贡献者依据 GRYPHLINE《明日方舟：终末地》二创与发布相关活动指南关于非营利二次创作的规定，主张本项目的发布属于该指南允许的同人创作范围，并明确承担本贡献的版权与合规责任。素材的实际来源与加工方式已逐项披露，如权利人提出有依据的异议，将及时核查，并采取更正、移除或停止分发等措施。
+
+### 作品、用途与工程许可
+
+本皮肤是 Yuji6278 制作的《明日方舟：终末地》（Arknights: Endfield）BAKER 风格非官方、个人非营利同人界面工程。相关游戏知识产权归上海鹰角网络科技有限公司（Shanghai Hypergryph Network Technology Co., Ltd.）及相应权利人；本项目不代表官方，不与游戏厂商、源站或本仓库存在合作或背书关系。贡献者承担本贡献的版权与合规责任；如权利人提出有实证依据的异议，贡献者将核查并更正或移除相关内容。
+
+贡献者的制作包括 DSH 界面布局、配色、CSS 组合、交互状态及双端适配；这不意味着其中每项图片都是原创。仅贡献者有权许可的新增贡献适用本目录 LICENSE 的 CC BY-NC-SA 4.0；第三方图像、游戏知识产权及基底代码不因此被重新许可。基底 blue-fantasy 按既有署名归 powerdog996 / DreamSkin 社区，保留其原许可证要求。仓库根 LICENSE 标明 BSD-3-Clause、Copyright (c) 2026 zhu1090093659；本次所查基底目录未见独立许可证，有限本地历史不足以确认该根许可证对全部继承基底的适用范围，不另指定或推定 MIT/CC 许可。
+
+### 共同来源、获取记录与权利范围
+
+S：直接来源网站 https://chat.peilika.beer/ 。制作记录保存了源站源码/CSS 摘录及原料，记录位置为制作工作区 design/design-notes.md 27–49、design/reference/site-assets/ 和 design/reference/site-peilika-cards.css；这些记录不随本皮肤分发。以下 12 个站点装饰成品（10 PNG、2 SVG）来自 11 份原料，并非独立重绘或 AI 生成。逐文件列出的原料名已留存；具体资产下载 URL、下载命令及时间未核实，不虚构这些信息。
+
+U：用户提供的 BAKER 页面截图，制作工作区保存为 design/reference/baker-ui.png；这是截图裁切加工来源，不声称由贡献者绘制或已验证从某个 URL 下载。首次截图出处、原始附件 URL 及原作者许可未确认。
+
+T：按用户明确要求从参考截图“图 10”取得白色气泡并抠图，design/design-notes.md 249 有记录。精确原始截图文件、首次出处、裁切坐标、抠图阈值及现行脚本未对应，不编造位置或坐标。
+
+V（第三方素材权利范围）：源站声明由用户引用，称终末地相关角色形象、世界观、剧情、图片资源等知识产权归上海鹰角网络科技有限公司，工具仅供爱好者学习交流、严禁商业用途。此为源站归属与用途声明，不是授予本皮肤打包再分发的授权，也不排除站主或其他作者的独立权利。下列 S/U/T 素材中的既有权利归相应权利人，贡献者不以 CC 许可授予这些第三方权利；逐素材原作者及再分发许可尚未确认。
+
+G（脚本绘制权利范围）：没有外部图片像素输入的几何背景，贡献者仅对自己有权许可的绘制贡献适用上述 CC；不授予游戏名称、标识或其他第三方权利，也不据此声称整个素材包自绘。
+
+### assets/ 逐文件清单（当前投稿共 16 项）
+
+| 文件 | 来源与获取 | 实际加工 | 权利范围及证据界限 |
+|---|---|---|---|
+| baker-card-btn-arrow.png | S；card-btn-arrow.webp 原料留存 | WebP 转 PNG，alpha ×0.4 | V；原料与制作记录存在，未重现成品 |
+| baker-card-btn-circle.png | S；card-btn-circle.webp 原料留存 | WebP 转 PNG，alpha ×0.4 | V；原料与制作记录存在，未重现成品 |
+| baker-card-corner.png | S；card-corner.webp 原料留存 | WebP 转 PNG，alpha ×0.4 | V；原料与制作记录存在，未重现成品 |
+| baker-card-faint.png | S；card-faint.webp 原料留存 | WebP 转 PNG，alpha ×0.02 | V；原料与制作记录存在，未重现成品 |
+| baker-card-texture.png | S；card-texture.webp 原料留存 | WebP 转 PNG，alpha ×0.5 | V；原料与制作记录存在，未重现成品 |
+| baker-card-underline.png | S；card-underline.webp 原料留存 | WebP 转 PNG，alpha ×0.4 | V；原料与制作记录存在，未重现成品 |
+| baker-sub-arrow.png | S；sub-arrow.webp 原料留存 | WebP 转 PNG，brightness ×0.11、alpha ×0.15 | V；原料与制作记录存在，未重现成品 |
+| baker-sub-badge.png | S；sub-badge.webp 原料留存 | WebP 转 PNG，brightness ×0.11 | V；原料与制作记录存在，未重现成品 |
+| baker-sub-faint.png | S；sub-faint.webp 原料留存 | WebP 转 PNG，alpha ×0.02 | V；原料与制作记录存在，未重现成品 |
+| baker-sub-wing.png | S；sub-wing.webp 原料留存 | WebP 转 PNG，brightness ×0.11、水平镜像 | V；原料与制作记录存在，未重现成品 |
+| baker-sub-icon.svg | S；sub-icon.svg 原料留存 | 白色替换为 #e1e1e1，group id 同步替色 | V；确定性文本变换与成品全文匹配，非重绘 |
+| baker-sub-icon-dark.svg | S；同一 sub-icon.svg 原料 | 白色替换为 #1c1c1c，group id 同步替色 | V；确定性文本变换与成品全文匹配，非重绘 |
+| baker-chat.jpg | U；用户截图 | 裁切 (1240,300,1000,620)，mean 47.5、对比拉伸 ×3.4、JPEG quality 90 | V；workspace/mkassets.ps1、mktex2.ps1 加工可重现成品 |
+| baker-header.png | U；用户截图与裁后备份 | 记录裁切 (1835,139,504,70)；remapgray.ps1 以 RGB(50,58,58) 为中心，半径 18/60 向 RGB(27,29,28) 加权映射 | V；裁后备份到成品可重现，原截图到备份未复跑；不是“彩色像素完全不变” |
+| endfield-dark.jpg | 制作工作区 design/build/make-backdrop.ps1；BAKER 风格配色参考 | 脚本几何绘制渐变、网格、辉光、斜纹、取景标及暗角，无外部图片像素输入 | G；脚本内存重现与当前成品 SHA256 完全一致 |
+| new-session.png | T；用户指定参考截图“图 10” | 按亮度抠出白色气泡为透明 PNG，33×26 | V；有加工描述，精确原图链与成品重现未闭合；非自绘 |
+
+本清单仅覆盖投稿 assets/ 的 16 项，不包含未投稿的自用 endfield-light.jpg。所检查的分发图未见可辨识具名游戏角色；顶栏含匿名人形剪影，不猜测角色名。作品与权利人已在上文具名；这项观察不构成绝对无角色或权利无涉的保证。加工重现仅证明制作链，不证明授权。
+
+### 非营利二创公开政策依据与适用界限
+
+参考 GRYPHLINE 官方 2026-02-03《明日方舟：終末地》二創與發布相關活動指南（发布方 Gryph Frontier PTE. LTD. 及关联公司）：https://endfield.gryphline.com/zh-tw/news/4497 。指南支持符合条件的个人或不具法人资格团体，在非营利粉丝活动范围内制作、展示、发行及公开二创，原则上无需事前联系；收费不得超过实际制作成本，法人或超范围活动须事先洽询。
+
+本项目以非官方、个人非营利的 BAKER 风格界面重构为用途依据，而非以“免费”替代权利核查。指南同时要求尊重作品/角色、第三方合法权益及相关人员，禁止冒充官方或造成官方商品/企划误认，并禁止“直接複製、擷取本公司官方素材，缺乏明顯創作性的內容”，以及其他违法、侵权或不适当内容。指南可更新，最终解释与适用判断归发布方；应阅读完整指南，而不是把这里的摘要当无条件许可。
+
+指南未逐一授权本清单，也未具体确认这些源站素材或软件包 UI 切片的适用性。整体工程的创作劳动与每项提取、裁切、换色素材的分发依据分别说明；本清单不声称整体劳动自动使每项图符合指南，也不仅因使用图标而断言整个工程不属二创。源站独立权利、截图原作者及具体再分发许可仍待确认；非商业声明、署名与本 NOTICE 均不构成官方逐素材授权或有权分发保证。
+
+## English
+
+### Contributor policy position and responsibility statement
+
+This skin is an unofficial, personal, non-profit fan interface project. Based on the provisions for non-profit fan creations in GRYPHLINE’s Arknights: Endfield Fan Content and Streaming Guidelines, the contributor maintains that publication of this project falls within the fan-creation scope permitted by those guidelines and expressly assumes copyright and compliance responsibility for this contribution. The actual sources and processing methods of the assets have been disclosed individually. If a rights holder raises a substantiated objection, it will be promptly investigated, and measures such as correction, removal or cessation of distribution will be taken.
+
+### Work, purpose and engineering license
+
+This is an unofficial, personal, non-profit fan interface project by Yuji6278 in the BAKER style of Arknights: Endfield (《明日方舟：终末地》). Related game intellectual property belongs to Shanghai Hypergryph Network Technology Co., Ltd. (上海鹰角网络科技有限公司) and the respective rights holders. This project does not represent the official game and has no affiliation, partnership or endorsement from the game company, source website or this repository. The contributor assumes copyright and compliance responsibility for this contribution and will investigate and correct or remove the relevant content if a rights holder raises an evidence-supported objection.
+
+The contributor's work includes DSH layout, palette, CSS composition, interaction states and web/desktop adaptation; this does not make every image original. CC BY-NC-SA 4.0 in this directory's LICENSE applies only to new contributions the contributor has the right to license. It does not relicense third-party images, game IP or inherited base code. The blue-fantasy base is credited in existing documentation to powerdog996 / the DreamSkin community and remains subject to its original license requirements. The repository root LICENSE states BSD-3-Clause, Copyright (c) 2026 zhu1090093659. No separate license was found in the inspected base directory, and the bounded local history does not establish that the root license covers all inherited base material; no MIT/CC license is assigned or presumed for it.
+
+### Shared sources, acquisition records and rights scope
+
+S: Direct source website https://chat.peilika.beer/ . Production records preserve source code/CSS extracts and raw materials at design/design-notes.md 27–49, design/reference/site-assets/ and design/reference/site-peilika-cards.css in the production workspace; these records are not distributed with this skin. The 12 website-decoration outputs below (10 PNGs and 2 SVGs) derive from 11 raw materials, not independent redrawing or AI generation. The named raw materials were retained; exact asset download URLs, commands and dates have not been verified and are not invented here.
+
+U: A user-provided BAKER page screenshot retained as design/reference/baker-ui.png in the production workspace. These outputs are cropped/processed screenshots, not claimed as contributor-drawn or verified downloads from a particular URL. The first screenshot source, original attachment URL and original author's permission remain unconfirmed.
+
+T: At the user's explicit request, the white speech bubble was taken and isolated from reference screenshot “image 10”, as recorded at design/design-notes.md 249. The exact original screenshot file, first source, crop coordinates, extraction threshold and current script have not been identified; no position or coordinates are invented.
+
+V (third-party asset rights scope): The user quoted the source site's statement attributing Endfield-related characters, worldbuilding, story and images to Shanghai Hypergryph Network Technology Co., Ltd., limiting the tool to fan learning/exchange and prohibiting commercial use. This is the site's ownership/purpose statement, not permission to redistribute these assets in this skin, and does not exclude independent rights of the site owner or other authors. Existing rights in S/U/T assets remain with their respective holders and are not granted by the contributor's CC license. Individual original authors and redistribution permission remain unconfirmed.
+
+G (script-drawn rights scope): This geometric background uses no external image pixels. The above CC license applies only to drawing contributions the contributor has the right to license; it grants no game-name, mark or other third-party rights and does not imply that the whole asset package is self-drawn.
+
+### Per-file assets/ inventory (16 submitted items)
+
+| File | Source and acquisition | Actual processing | Rights scope and evidence limit |
+|---|---|---|---|
+| baker-card-btn-arrow.png | S; retained card-btn-arrow.webp | WebP to PNG; alpha ×0.4 | V; raw material and production record retained; output not reproduced |
+| baker-card-btn-circle.png | S; retained card-btn-circle.webp | WebP to PNG; alpha ×0.4 | V; raw material and production record retained; output not reproduced |
+| baker-card-corner.png | S; retained card-corner.webp | WebP to PNG; alpha ×0.4 | V; raw material and production record retained; output not reproduced |
+| baker-card-faint.png | S; retained card-faint.webp | WebP to PNG; alpha ×0.02 | V; raw material and production record retained; output not reproduced |
+| baker-card-texture.png | S; retained card-texture.webp | WebP to PNG; alpha ×0.5 | V; raw material and production record retained; output not reproduced |
+| baker-card-underline.png | S; retained card-underline.webp | WebP to PNG; alpha ×0.4 | V; raw material and production record retained; output not reproduced |
+| baker-sub-arrow.png | S; retained sub-arrow.webp | WebP to PNG; brightness ×0.11, alpha ×0.15 | V; raw material and production record retained; output not reproduced |
+| baker-sub-badge.png | S; retained sub-badge.webp | WebP to PNG; brightness ×0.11 | V; raw material and production record retained; output not reproduced |
+| baker-sub-faint.png | S; retained sub-faint.webp | WebP to PNG; alpha ×0.02 | V; raw material and production record retained; output not reproduced |
+| baker-sub-wing.png | S; retained sub-wing.webp | WebP to PNG; brightness ×0.11, horizontal mirror | V; raw material and production record retained; output not reproduced |
+| baker-sub-icon.svg | S; retained sub-icon.svg | White replaced with #e1e1e1, including group id | V; deterministic text transformation matches the entire output; not redrawn |
+| baker-sub-icon-dark.svg | S; same raw sub-icon.svg | White replaced with #1c1c1c, including group id | V; deterministic text transformation matches the entire output; not redrawn |
+| baker-chat.jpg | U; user screenshot | Crop (1240,300,1000,620); mean 47.5, contrast stretch ×3.4, JPEG quality 90 | V; workspace/mkassets.ps1 and mktex2.ps1 processing reproduces the output |
+| baker-header.png | U; user screenshot and post-crop backup | Recorded crop (1835,139,504,70); remapgray.ps1 weighted mapping centered on RGB(50,58,58), radii 18/60, toward RGB(27,29,28) | V; post-crop backup to output reproduced, original screenshot to backup not rerun; not a guarantee of unchanged colored pixels |
+| endfield-dark.jpg | Production workspace design/build/make-backdrop.ps1; BAKER-style palette reference | Script-drawn gradients, grid, glow, diagonal stripes, framing marks and vignette; no external image pixels | G; in-memory script reproduction exactly matches current output SHA256 |
+| new-session.png | T; user-selected reference screenshot “image 10” | Brightness extraction of white speech bubble to transparent PNG, 33×26 | V; processing description retained, exact original-image chain and output reproduction incomplete; not self-drawn |
+
+This inventory covers only the 16 submitted assets/ items, not the unsubmitted personal-use endfield-light.jpg. No identifiable named game character was observed in the inspected distributed images. The header contains anonymous human-shaped silhouettes; no character names are guessed. The work and rights holder are named above; this observation is not an absolute guarantee of no characters or rights involvement. Reproduced processing proves a production chain, not authorization.
+
+### Public non-profit fan-content policy basis and applicability limits
+
+Reference: GRYPHLINE's official guidelines dated 2026-02-03, published by Gryph Frontier PTE. LTD. and its affiliates: https://endfield.gryphline.com/zh-tw/news/4497 . The guidelines support creation, display, distribution and publication of fan works by individuals or unincorporated groups within qualifying non-profit fan activities, generally without prior contact. Charges must not exceed actual production costs; incorporated groups or out-of-scope activities require prior consultation.
+
+The project's stated purpose is unofficial, personal, non-profit BAKER-style interface reconstruction; being free is not a substitute for rights verification. The guidelines also require respect for the work/characters, third-party lawful rights and relevant people. They prohibit impersonating official content or causing confusion with official products/projects, and content that directly copies or extracts official materials without evident creativity, as well as other unlawful, infringing or inappropriate content. The guidelines may change; interpretation and applicability judgments rest with the publisher. Read the complete guidelines rather than treating this summary as unconditional permission.
+
+The guidelines do not individually authorize this inventory or specifically establish their applicability to these website assets or packaged UI slices. The overall engineering work and each extracted, cropped or recolored asset's distribution basis are addressed separately: this inventory does not claim that overall creative labor automatically qualifies every image, nor that using an icon alone disqualifies the entire project as a fan work. Independent website rights, screenshot authorship and specific redistribution permission remain unconfirmed. Non-commercial use, attribution and this NOTICE are not official per-asset authorization or a guarantee of redistribution rights.

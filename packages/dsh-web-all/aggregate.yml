@@ -15,70 +15,232 @@
 patchFrom:
   - ../dsh-web-settings
   - ../dsh-plugin-manager
-  - ../dsh-community-plugins
   - ../dsh-market
   - ../dsh-task-board
+  # dsh-task-board-github 必须紧跟看板之后：它是看板的外部提供方扩展
+  # （GitHub Issues 同步），聚合展开的行序就是浏览器半区与宿主半区的装载
+  # 顺序，扩展向看板的提供方席位登记之前看板必须先就位。
+  - ../dsh-task-board-github
+  # dsh-agents 紧跟在看板这一对之后：它也是「定义 + 真实会话执行」的家族面，用户在同
+  # 一处找它们。这只是阅读上的归类，没有装载顺序依赖——它只用官方服务（宿主半区
+  # systemPrompt / typertGateway / webServer，浏览器半区 locale / renderer / sidebar /
+  # slots），自己的侧栏行与主区页面经 slots.inject 声明（行 order 30），不占任何家族
+  # 行的席位，因此前后挪动不会改变谁先就位。
+  - ../dsh-agents
   - ../dsh-git-graph
   - ../dsh-remote-web-ui
-  - ../dsh-pet
+  # dsh-update 紧邻 remote-web-ui：两者共用侧栏 footer action 席位，
+  # 自更新行跟在远程访问行之后，观感顺序稳定。
+  - ../dsh-update
+  # dsh-remote-bridge 排在远程访问面（remote-web-ui + update）之后：它是家族的第二条
+  # 远程面（原生手机端的协议 v1 通道），但 inject 只要官方的 typertGateway / webServer
+  # （浏览器半区 inject 官方的 locale / renderer / sidebar），不依赖任何家族行的席位
+  # 或服务，所以不插进 update 与 remote-web-ui 之间拆散那对共享侧栏 footer 席位的
+  # 相邻关系。行 id 派生为 web-ui-remote-bridge、行 name 就是真实包名
+  # （#1901 之后家族行直挂真实包），与官方行名册和独立安装行 id（remote-bridge）
+  # 都不相交，因此不需要 familyIds 覆盖。
+  - ../dsh-remote-bridge
+  # dsh-task-board-remote 紧跟远程桥：它的宿主半区把看板的 board.v1 能力面绑到桥的
+  # remoteBridge 扩展缝上，还要拿到看板插件（dsh-task-board）的 taskBoard 服务。
+  # 两条接缝先就位更稳——行自身会等这两个服务，先挂载只是少一次等待，不是硬依赖，
+  # 所以不往前挪，也不拆散 update 与 remote-web-ui 那对共享侧栏 footer 席位的相邻关系。
+  # 行 id 派生为 web-ui-task-board-remote、行 name 就是真实包名（#1901 之后家族行直挂
+  # 真实包），与官方行名册和独立安装行 id（task-board-remote）都不相交，因此不需要
+  # familyIds 覆盖。
+  - ../dsh-task-board-remote
   - ../dsh-ssh
-  - ../dsh-tool-describe-image
   - ../dsh-liangshen
   - ../dsh-skill-explorer
-  - ../dsh-doctor
   - ../dsh-usage
   - ../dsh-session-archive
-  - ../dsh-model-capabilities
-  - ../skins/skin-center
+  - ../dsh-message-edit
+  # dsh-win-bash 是 host-only 包（无 src/client/），排在 dsh-liangshen 之后：
+  # 它的 win_bash 可用性跟随梁神预设的声明状态，门控在挂载后异步求值。
+  - ../dsh-win-bash
   # dsh-i18n 语言包无宿主行为、无时序依赖，放列表末尾：注册 ru 语言与全部
   # 家族插件命名空间的 ru 字典（见 packages/dsh-i18n）。
   - ../dsh-i18n
+  # dsh-browser-view 排在最末：它自己不提供任何家族席位，只往 shell.overlay 与
+  # 会话头动作列表追加两个可叠加条目，因此与任何已加载插件的顺序都无依赖。
+  - ../dsh-browser-view
 self:
   - web-ui-compat
 deps:
   - ../dsh-plugin-manager
-  - ../dsh-community-plugins
   - ../dsh-market
   - ../dsh-task-board
+  # 排在 ../dsh-task-board 之后：扩展依赖看板的提供方契约，deps 顺序与
+  # patchFrom 顺序保持一致便于对照。
+  - ../dsh-task-board-github
+  # 与 patchFrom 同序：dsh-agents 的行紧跟看板这一对之后（理由见上）。
+  - ../dsh-agents
   - ../dsh-git-graph
-  - ../dsh-pet
   - ../dsh-remote-web-ui
+  - ../dsh-update
+  # 与 patchFrom 同序：桥的行紧跟在远程访问面之后，两份清单可逐行对照。
+  - ../dsh-remote-bridge
+  # 与 patchFrom 同序：看板的远程能力面行紧跟在桥之后（它绑桥的扩展缝）。
+  - ../dsh-task-board-remote
   - ../dsh-ssh
-  - ../dsh-tool-describe-image
   - ../dsh-liangshen
   - ../dsh-skill-explorer
-  - ../dsh-doctor
   - ../dsh-usage
   - ../dsh-session-archive
-  - ../dsh-model-capabilities
+  - ../dsh-message-edit
+  - ../dsh-win-bash
   - ../dsh-web-settings
-  - ../skins/skin-center
   - ../dsh-i18n
-# 外部 npm 插件：dsh-better-sidebar 接管右侧面板位置。行名从 profile 顶层
-# 解析（hoisted 布局下由 web-ui-all 的 dependencies 提升），dependencies 里
-# 需有 "dsh-better-sidebar"（见 package.json，生成器保留非 workspace 依赖）。
-# 行排在 patchFrom 之后：web-ui-settings 行在前，家族设置组先于 better-sidebar
-# 应用。旧 aionui-panel 已彻底移除（2026-08-28），右侧面板固定由
-# dsh-better-sidebar 提供，无需行级 config patch。
-# 2026-08-30 曾因 alpha.2 移除 `@deepseek-ai/dsh-client-runtime` 面把本行
-# 与 dsh-archive-manager 一并排除（见协调升级 note）；better-sidebar 于
-# 2026-08-31 以 0.18.0-alpha.0（peer 对齐 alpha.2、inject 改用
-# dsh-client-modules）回归；2026-09-04 随 rc.1 cohort 升至 0.18.0 正式版
-# （2026-09-03 发布，peer 全面声明 ^0.1.2-rc.1）。@mlgbnb/dsh-archive-manager 仍排除：其 latest
-# 1.0.7 仍 import 已移除面，上游发布 alpha.2 兼容版后按同法恢复。
+  - ../dsh-browser-view
+
+# 独立仓库卫星（npm 外部行）：皮肤中心、宠物、社区插件索引迁出本单一仓库后由各自
+# 仓库独立发版，这里只按 registry 版本内置。行 id 与 patchFrom 时期逐字一致
+# （web-ui-* 命名空间不变），老 profile 无需迁移；remote-web-ui 仍排在 pet 之前
+# （patchFrom 行整体先于外部行渲染）。
+# 依赖版本由 packages/dsh-web-all/package.json 手写并随生成器保留。
+# 代价：外部行不带聚合包的 fault-isolation shell，且客户端不再内联进本包 lib
+# （改由卫星自带的 loader entry 挂载）。
+# preset-center 排在 patchFrom 行之后：创意工坊卡片（本仓 dsh-market 行）先声明
+# dsh-workshop.panel 子槽位，预设面板再注册进该槽位（见 dsh-presets 仓）。
+# 家族行 id 覆盖（#1794）：子包独立安装行 id 与聚合家族行 id 解耦。
+# dsh-plugin-manager 的独立行必须避开官方 @deepseek-ai/dsh-web-app 的
+# ui-plugin-manager（loader 同 id 后来者胜且不报错，官方插件页行被静默丢弃，
+# 侧栏「插件」入口随之消失）；派生规则会把新的独立行 id 一并改名，从而移动
+# 已发布的聚合行 id 与家族子路径导出。覆盖把两者拆开：独立行改名，聚合行
+# web-ui-plugin-manager 与子路径 plugin-manager 逐字不变，老 profile 无需迁移。
+# 值必须在本聚合的 web-ui-* id 空间内，且必须指向本聚合真实挂载的行。
+# dsh-win-bash：子包的行 id 带包前缀（dsh-win-bash，自身 AGENTS.md 钉死），
+# 直接派生会得到 web-ui-dsh-win-bash 与子路径 dsh-win-bash，而家族子路径统一
+# 是不带 dsh- 前缀的短名（ssh / usage / liangshen）。覆盖后聚合行与子路径取
+# 短名 win-bash，且从第一版就锁定，省掉日后迁移。
+familyIds:
+  # dsh-agents：子包的行 id 带包前缀（dsh-agents，子包自己的 cordis.patch.yml 钉死，
+  # 独立安装要占自己的全局 id），派生规则会得到 web-ui-dsh-agents；家族行 id 统一用
+  # 不带 dsh- 前缀的短名，这里从第一版就锁成 web-ui-agents，省掉日后迁移（与
+  # win-bash 同理）。该家族是 #1901 之后新增的行，没有 tombstones 子路径需要跟着它。
+  dsh-agents: web-ui-agents
+  dsh-win-bash: web-ui-win-bash
+  ui-plugin-manager-update-check: web-ui-plugin-manager
+
+# 家族行备注（shellNotes）：官方插件页里每个 web-all/<sub> 成员行标题下方的灰色说明行。
+# 单行 JSON flow mapping：id 是家族子路径（web-all/<sub> 的 <sub>），zh/en/ru 是各语言备注。
+# 生成器把它写成 shell-metadata/<sub>/locale/<lang>.json 的 meta.description——与行标题同
+# 一条官方通道（宿主 readPluginMeta 读 <specifier>/locale/<lang>.json）；patch 行不承载任何
+# 展示文本，所以不要往 cordis.patch.yml 手写说明。ru 随本聚合挂载的 dsh-i18n 语言包生效：
+# 宿主枚举整个 locale 目录，语言文件存在即被读取，无需固定语言集。
+# zh 每条不超过 20 个汉字：说明行在标题下只占一行，超长会折行；不要复述包名。
+# 覆盖全集：本聚合导出的每个家族子路径（含 tombstones 空壳）都必须有一条，缺行、未知 id
+# 或重复 id 都会让生成器报错（fail closed）。已迁出的四个卫星家族沿用各自的产品描述，老
+# profile 仍会挂载这些空壳行。
+shellNotes:
+  - {"id":"git-graph","zh":"查看提交图谱与分支历史","en":"Browse the Git commit graph and branch history.","ru":"Просмотр графа коммитов и истории веток."}
+  - {"id":"liangshen","zh":"新会话首页的梁神模式开关","en":"The Liangshen mode switch on the new-session home.","ru":"Переключатель режима «Ляншэнь» на главной новой сессии."}
+  - {"id":"market","zh":"按需安装皮肤宠物与预设的商店","en":"Install skins, pets, and presets on demand from one store.","ru":"Установка скинов, питомцев и пресетов из одного магазина."}
+  - {"id":"plugin-manager","zh":"逐行开关已装插件的管理页","en":"One page listing installed plugins with per-row switches.","ru":"Страница установленных плагинов с переключателем для каждой строки."}
+  - {"id":"remote-web-ui","zh":"用配对码从手机或远程浏览器访问","en":"Reach this GUI from a phone or browser with a pairing code.","ru":"Доступ к интерфейсу с телефона или браузера по коду сопряжения."}
+  - {"id":"session-archive","zh":"归档并批量清理旧会话","en":"Archive old sessions and clean them up in bulk.","ru":"Архивирование и массовая очистка старых сессий."}
+  - {"id":"settings","zh":"家族统一的设置页与分组","en":"The family's shared settings pages and groups.","ru":"Общие страницы настроек семейства и их группы."}
+  - {"id":"skill-explorer","zh":"检索并浏览已安装的技能","en":"Search and browse the skills installed here.","ru":"Поиск и просмотр установленных навыков."}
+  - {"id":"ssh","zh":"在远程主机上执行命令与传文件","en":"Run commands and copy files on remote hosts.","ru":"Выполнение команд и передача файлов на удалённых хостах."}
+  - {"id":"task-board","zh":"看板里拖拽管理任务与子任务","en":"Manage tasks and subtasks by dragging them across columns.","ru":"Задачи и подзадачи, перетаскиваемые между колонками."}
+  - {"id":"task-board-github","zh":"把 GitHub 议题同步进看板","en":"Sync GitHub issues into the board.","ru":"Синхронизация задач GitHub с доской."}
+  - {"id":"update","zh":"检查并升级已装扩展的新版本","en":"Check for and install newer releases of the bundle.","ru":"Проверка и установка новых версий сборки."}
+  - {"id":"usage","zh":"查看令牌与会话用量统计","en":"Token and session usage statistics.","ru":"Статистика использования токенов и сессий."}
+  - {"id":"win-bash","zh":"Windows 上为梁神预设启用 bash","en":"Bash tool support for the Liangshen preset on Windows.","ru":"Поддержка bash для пресета «Ляншэнь» в Windows."}
+  - {"id":"community-plugins","zh":"浏览社区插件与一键安装","en":"Browse community plugins and install them in one click.","ru":"Просмотр плагинов сообщества и установка в один клик."}
+  - {"id":"pet","zh":"桌面上的互动宠物","en":"An interactive pet on the desktop.","ru":"Интерактивный питомец на рабочем столе."}
+  - {"id":"preset-center","zh":"浏览并启用社区预设","en":"Browse and enable community presets.","ru":"Просмотр и включение пресетов сообщества."}
+  - {"id":"skin-center","zh":"切换皮肤与壁纸的皮肤中心","en":"Switch skins and wallpapers from one center.","ru":"Смена скинов и обоев в одном центре."}
+  - {"id":"desktop-launcher","zh":"已移除的桌面启动入口","en":"Removed desktop launcher entry.","ru":"Удалённый запуск с рабочего стола."}
+  - {"id":"dsh-perf","zh":"已移除的性能监控面板","en":"Removed performance panel.","ru":"Удалённая панель производительности."}
+  - {"id":"describe-image","zh":"已移除的图片描述工具","en":"Removed image description tool.","ru":"Удалённый инструмент описания изображений."}
+  - {"id":"doctor","zh":"已移除的环境体检工具","en":"Removed environment health check.","ru":"Удалённая проверка окружения."}
+  - {"id":"model-capabilities","zh":"已移除的模型能力配置","en":"Removed model capability settings.","ru":"Удалённые настройки возможностей моделей."}
 rows:
-  - {"id": "better-sidebar", "name": "dsh-better-sidebar"}
+  - {"id": "community-plugins", "name": "@linxin666/dsh-client-ui-community-plugins"}
+  - {"id": "pet", "name": "@linxin666/dsh-pet"}
+  - {"id": "preset-center", "name": "@linxin666/dsh-client-ui-preset-center"}
+  - {"id": "skin-center", "name": "@linxin666/dsh-client-ui-skin-center"}
+
+# 外部 npm 插件段：alpha 分支（2026-09-17 决策）不内置 dsh-better-sidebar。
+# 该插件 0.19.1 的全部 @deepseek-ai/dsh-* peer 声明为 ^0.1.5-rc.1，按 semver
+# 不覆盖本分支的 0.2.1-rc.3 cohort（预发布版本只匹配同 [major,minor,patch]
+# 元的区间），因此 alpha 实验环境不再挂载这个右侧面板插件：聚合包不依赖它、
+# profile 里也不出现它的行。需要右侧面板时按需安装
+# （dsh plugin --profile <name> add dsh-better-sidebar@latest）。
+# dev 分支保持内置 0.19.1，alpha 每次从 dev rebase 后需重新移除本段。
+# 历史沿革（dev 侧仍适用）：2026-08-30 曾因 alpha.2 移除
+# `@deepseek-ai/dsh-client-runtime` 面把本行与 dsh-archive-manager 一并排除；
+# 2026-08-31 以 0.18.0-alpha.0 回归（inject 改用 dsh-client-modules）；
+# 2026-09-04 随 rc.1 cohort 升至 0.18.0 正式版；2026-09-10 升至 0.19.0
+# （inject 含 optional 的 dsh-client-ui-sidebar-right 面）；2026-09-11 升至
+# 0.19.1。
+# @mlgbnb/dsh-archive-manager 仍然排除：其 latest 1.0.7 仍 import 已移除面。
 # 出厂默认关闭的可选行（2026-09-09 产品决策）：工具/探索类家族插件对新装用户
 # 不加载（设置入口也不出现），在 设置 → 插件 → 插件管理 的聚合子行里逐个开启；
 # 开启即写入用户层 disabled:false 覆盖（优先于本默认），停用回写 disabled:true。
 # 锁定的核心行（compat/settings/plugin-manager）不可列入本清单。
+# liangshen 不列入本清单（2026-10-10 决策）：梁神模式是新会话首页的常驻模式开关，
+# 默认启动才让新装用户看到它；理由与取舍见 Agent Note
+# .agents/notes/implemented/architecture/2026-10-10-liangshen-row-enabled-by-default.md。
 inactive:
   - web-ui-ssh
-  - web-ui-describe-image
-  - web-ui-liangshen
   - web-ui-skill-explorer
-  - web-ui-doctor
+# 归档设置入口（2026-10-27 共存决策）：dsh-session-archive 以自己的 section id
+# dsh-session-archive 与 order 25 注册，紧邻官方 archived-sessions 入口而不占用它。
+# 设置外壳对每条注册各渲染一个导航项、不合并同 id 的 section，并按「同一 id + 同一
+# priority（缺省 0）」拒绝重复注册，order 只决定排序；占用官方 id 会与任何同样注册该
+# id 的归档插件相撞，选什么 order 都避不开（一条注册抛错，或一条入口静默消失）。
+# 自有 id 让多个归档插件各有一条入口，单插件安装仍只有一条。
+# >=0.2.1-rc.2 的官方 dsh-web-app 不再挂载 ui-settings-unarchive-sessions 行，所以
+# 这里没有 retire 目标：对不存在的行写 disabled 覆盖只会让 loader 每次启动都报
+# "patch: entry ... not found"。加回 retire 目标前必须先在当前 cohort 上用
+# dsh --profile <name> --dump-config 确认该外部行存在。
 # 兼容退役子插件导出：避免老用户 profile 残留旧条目时 Node.js 抛出 ERR_PACKAGE_PATH_NOT_EXPORTED
+# 2026-09-23：describe-image 与 doctor 两个插件自家族移除，同样保留空壳导出。
 tombstones:
   - desktop-launcher
   - dsh-perf
+  - describe-image
+  - doctor
+  - model-capabilities
+  # 迁出为独立仓库的家族子路径：行已改为 npm 外部行（直挂真实包名），但旧 profile
+  # 里记录的行名仍是 @linxin666/dsh-web-all/<family>。保留这些 shell 子路径导出
+  # 让那些 profile 仍可 import，不抛 ERR_PACKAGE_PATH_NOT_EXPORTED。
+  - pet
+  - preset-center
+  - skin-center
+  - community-plugins
+  # issue #1901：仓库内家族行改为直挂真实包名（加载器据此下发各自的浏览器半区，
+  # 不再由本包 compat 客户端内联整份副本）。旧 profile 记录的行名仍是这些 shell
+  # 子路径，必须继续可解析，否则那条老行会让整组 boot 抛
+  # ERR_PACKAGE_PATH_NOT_EXPORTED。tombstones 只保留 shell 导出，不再产出条目。
+  - settings
+  - plugin-manager
+  - market
+  - task-board
+  - task-board-github
+  - git-graph
+  - remote-web-ui
+  - update
+  - ssh
+  - liangshen
+  - skill-explorer
+  - usage
+  - session-archive
+  - win-bash
+
+# 退役插件登记（retiredPlugins）：每个已退役家族的真实包名，单行 JSON flow mapping（与
+# rows: / shellNotes: 同风格）。这是唯一事实源：生成器把它写进
+# packages/dsh-web-all/src/retired-plugins.generated.ts（RETIRED_FAMILIES / RETIRED_PLUGINS），
+# 壳 src/shell.ts 由生成模块派生，不再手写包名清单。
+# 语义：老 profile 里残留的家族行，其 name 仍是子路径 @linxin666/dsh-web-all/<family>（靠
+# tombstones 段保证仍可解析），壳从该行的 config.plugin 读到已退役的真实包名后按静默 no-op
+# 处理（不 import、不记 degraded），一次正常退役不会在健康面板里变成「插件坏了」。
+# 约束（生成器 fail closed）：family 必须已在 tombstones 段里（子路径导出要为老 profile 保留），
+# 且不得同时出现在 deps 里（退役插件不能又是本包依赖）。新增退役家族时两段一起改。
+retiredPlugins:
+  - {"family":"desktop-launcher","plugin":"@linxin666/dsh-desktop-launcher"}
+  - {"family":"dsh-perf","plugin":"@linxin666/dsh-perf"}
+  - {"family":"describe-image","plugin":"@linxin666/dsh-tool-describe-image"}
+  - {"family":"doctor","plugin":"@linxin666/dsh-doctor"}
+  - {"family":"model-capabilities","plugin":"@linxin666/dsh-client-ui-model-capabilities"}

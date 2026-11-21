@@ -1,0 +1,1 @@
+import{s as i,b as t}from"./index-Bk4_60Ah.js";import"./git-C7-v8VFW.js";const n="ui-onboarding",o=t.object({welcomeNoticeVersion:t.string()});function a(e){e.inject(["settings"],s=>{s.settings.register(i(n),o)})}export{a as apply};

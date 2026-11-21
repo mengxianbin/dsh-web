@@ -1,0 +1,5 @@
+# Bilingual-pair consistency record (docs/i18n.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with git hash-object.
+.agents/notes/implemented/feature/2026-09-10-whale-yuan-voucher-token-bank.md: 67219962cd2122bc4836653a89f0074af2862609
+.agents/notes/implemented/feature/2026-09-10-whale-yuan-voucher-token-bank.zh.md: 7e9a4b33c5c5897d490abb88f9b6a2b676697939

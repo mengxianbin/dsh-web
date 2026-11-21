@@ -1,0 +1,1 @@
+import{b as t}from"./index-Bk4_60Ah.js";import"./git-C7-v8VFW.js";const r="tool-presentation",m=["tools"],a=t.object({mode:t.union(["native","code","both"]).required()});function c(o,e){if(e.mode==="native"){o.tools.presentAs("native");return}o.inject(["codeRuntime"],n=>{n.tools.presentAs(e.mode)})}export{a as Config,c as apply,m as inject,r as name};

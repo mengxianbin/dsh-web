@@ -9,11 +9,15 @@
  * channel later); tests run against the in-memory backend and a jsdom
  * localStorage backend.
  */
-import { isValidCron } from './schedule.ts'
-import { isTaskPermission, isTaskStatus, normalizeTargetId, type ScheduleRule, type TaskFreeze, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isValidCron, isValidTimeZone } from './schedule.ts'
+import { SCHEDULE_STOP_REASONS, isTaskPermission, isTaskStatus, normalizeTags, normalizeTargetId, type ScheduleRule, type ScheduleStopReason, type TaskFreeze, type TaskRecord, type TaskPermission, type TaskStatus } from './tasks.ts'
+import { isExecutionOutcome } from './subtask.ts'
+import { normalizeExecutionSummary } from './execution-summary.ts'
 import type { TaskHandover } from './handover.ts'
 import { sanitizeFreezeSnapshot } from './freeze-snapshot.ts'
 import { sanitizeHandover } from './handover.ts'
+import { normalizeTaskIntegrations } from './extension.ts'
+import { normalizeVerification } from './verification.ts'
 
 /** Persistence seam for the task ledger. */
 export interface TaskStore {
@@ -62,10 +66,16 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
   if (typeof record.prompt !== 'string') return false
   if (typeof record.createdAt !== 'number') return false
   if (typeof record.updatedAt !== 'number') return false
+  if (record.parentId !== undefined && typeof record.parentId !== 'string') return false
   if (record.workspaceId !== undefined && typeof record.workspaceId !== 'string') return false
   if (record.mode !== undefined && typeof record.mode !== 'string') return false
+  if (record.reasoningEffort !== undefined && typeof record.reasoningEffort !== 'string') return false
   if (record.permission !== undefined && typeof record.permission !== 'string') return false
+  if (record.integrations !== undefined && (typeof record.integrations !== 'object' || record.integrations === null || Array.isArray(record.integrations))) return false
+  if (record.hidden !== undefined && typeof record.hidden !== 'boolean') return false
   if (record.reuseSession !== undefined && typeof record.reuseSession !== 'boolean') return false
+  if (record.goalRun !== undefined && typeof record.goalRun !== 'boolean') return false
+  if (record.skipVerification !== undefined && typeof record.skipVerification !== 'boolean') return false
   if (!Array.isArray(record.executions)) return false
   for (const execution of record.executions) {
     if (typeof execution !== 'object' || execution === null) return false
@@ -79,6 +89,13 @@ function isTaskRecordShape(value: unknown): value is Omit<TaskRecord, 'status'> 
     if (entry.initiatedBy !== undefined && typeof entry.initiatedBy !== 'string') return false
     if (entry.frozenBy !== undefined && typeof entry.frozenBy !== 'string') return false
     if (entry.frozenAt !== undefined && typeof entry.frozenAt !== 'number') return false
+    // An external-outcome marker is optional in BOTH directions: a ledger
+    // written before the field existed carries none, and a non-boolean value
+    // is dropped by the repair below rather than trusted as provenance.
+    if (entry.external !== undefined && typeof entry.external !== 'boolean') return false
+    // The acceptance block is repaired like every other optional field: an
+    // unusable one is dropped, which can only make the board MORE strict.
+    if (entry.verification !== undefined && normalizeVerification(entry.verification) === undefined) return false
   }
   return true
 }
@@ -93,24 +110,73 @@ function normalizeStatus(status: unknown): TaskStatus {
   return isTaskStatus(status) ? status : 'todo'
 }
 
+/** A persisted ms timestamp, kept only when it is a usable finite number. */
+function optionalInstant(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+/** A persisted positive-integer run cap, or undefined for unlimited/repair. */
+function optionalRunCap(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 ? value : undefined
+}
+
+/** A persisted stop reason, kept only when it names a reason this build knows. */
+function optionalStopReason(value: unknown): ScheduleStopReason | undefined {
+  return typeof value === 'string' && SCHEDULE_STOP_REASONS.includes(value as ScheduleStopReason)
+    ? value as ScheduleStopReason
+    : undefined
+}
+
 /**
- * Repair a persisted schedule rule: drop rules without a usable cron string,
- * coerce booleans/numbers, and leave `nextRunAt`/`lastTriggeredAt` undefined
- * when missing (a fresh recompute or the next tick fixes them).
+ * Repair a persisted schedule rule. Both modes are repaired field by field and
+ * a rule that carries no usable plan is dropped (the task row survives):
+ * a recurring rule without a well-formed 5-field cron, or a one-shot without a
+ * finite planned instant. A rule written before `mode` existed is a cron rule.
  */
 function normalizeSchedule(schedule: unknown): ScheduleRule | undefined {
   if (typeof schedule !== 'object' || schedule === null) return undefined
   const rule = schedule as Record<string, unknown>
+  // A stored zone survives only when this runtime can resolve it; an unusable
+  // name is dropped (the rule then follows the Host zone) instead of being
+  // kept to fail every later resolve.
+  const timeZone = typeof rule.timeZone === 'string' && isValidTimeZone(rule.timeZone) ? rule.timeZone : undefined
+  const runCountValue = rule.runCount
+  const runCount = typeof runCountValue === 'number' && Number.isInteger(runCountValue) && runCountValue >= 0
+    ? runCountValue
+    : 0
+  const endedAt = optionalInstant(rule.endedAt)
+  const endedReason = optionalStopReason(rule.endedReason)
+  const skippedAt = optionalInstant(rule.skippedAt)
+  const skippedReason = optionalStopReason(rule.skippedReason)
+  const common = {
+    enabled: rule.enabled === true,
+    ...(timeZone === undefined ? {} : { timeZone }),
+    nextRunAt: optionalInstant(rule.nextRunAt),
+    lastTriggeredAt: optionalInstant(rule.lastTriggeredAt),
+    runCount,
+    ...(endedAt === undefined ? {} : { endedAt }),
+    ...(endedReason === undefined ? {} : { endedReason }),
+    ...(skippedAt === undefined ? {} : { skippedAt }),
+    ...(skippedReason === undefined ? {} : { skippedReason }),
+  }
+  if (rule.mode === 'once') {
+    const at = optionalInstant(rule.at)
+    // A one-shot with no instant can never fire; drop it rather than keep a
+    // rule the scheduler would have to interpret.
+    if (at === undefined) return undefined
+    return { ...common, mode: 'once', at }
+  }
   // Reject (drop) a schedule whose cron is not a well-formed 5-field
   // expression: a malformed rule would otherwise linger as a never-firing
   // schedule instead of being dropped for later repair.
   if (typeof rule.cron !== 'string') return undefined
   if (rule.cron.trim() === '' || !isValidCron(rule.cron)) return undefined
+  const maxRuns = optionalRunCap(rule.maxRuns)
   return {
-    enabled: rule.enabled === true,
+    ...common,
+    mode: 'cron',
     cron: rule.cron,
-    nextRunAt: typeof rule.nextRunAt === 'number' ? rule.nextRunAt : undefined,
-    lastTriggeredAt: typeof rule.lastTriggeredAt === 'number' ? rule.lastTriggeredAt : undefined,
+    ...(maxRuns === undefined ? {} : { maxRuns }),
   }
 }
 
@@ -179,17 +245,53 @@ export function parseLedger(raw: string | null): TaskRecord[] {
     // clear a malformed persisted rule rather than leave it in the row.
     const task: TaskRecord = { ...row, status: normalizeStatus(row.status) }
     task.schedule = normalizeSchedule(row.schedule)
+    // The lineage link is repaired like every other optional field: a blank or
+    // non-string parent id clears the link instead of dropping the row. Whether
+    // the link is structurally sound (parent exists, no cycle) is decided where
+    // the whole list is known (HostTaskLedger.parseHostTasks).
+    task.parentId = normalizeTargetId(row.parentId)
+    // Cascade bookkeeping on execution records is repaired field by field too,
+    // so a hand-edited ledger degrades a run group instead of the whole task.
+    task.executions = task.executions.map(execution => ({
+      ...execution,
+      runGroupId: normalizeTargetId(execution.runGroupId),
+      ownResult: isExecutionOutcome(execution.ownResult) ? execution.ownResult : undefined,
+      ownError: typeof execution.ownError === 'string' ? execution.ownError : undefined,
+      // A summary a reader does not recognize (an older document has none) is
+      // simply absent; a malformed one is dropped without costing the run.
+      summary: normalizeExecutionSummary(execution.summary),
+      // A malformed acceptance block is dropped rather than dropping the
+      // execution record: the board then treats that run as unverified.
+      verification: normalizeVerification(execution.verification),
+      external: execution.external === true ? true : undefined,
+    }))
     // Execution targets are normalized like the schedule: blank strings
     // clear the pin and unknown permission strings from a future version
     // fall back to the session default instead of dropping the row.
     task.workspaceId = normalizeTargetId(row.workspaceId)
     task.mode = normalizeTargetId(row.mode)
+    // The effort is repaired like the other execution-target strings: blank text
+    // from a hand-edited document clears the pin instead of dropping the row,
+    // and the card then runs at its model's own default level.
+    task.reasoningEffort = normalizeTargetId(row.reasoningEffort)
     task.archivedAt = typeof row.archivedAt === 'number' && Number.isFinite(row.archivedAt) ? row.archivedAt : undefined
     task.permission = isTaskPermission(row.permission) ? row.permission as TaskPermission : undefined
     task.reuseSession = row.reuseSession === true ? true : undefined
+    // The goal opt-in is stored only when it is ON: absent means the default
+    // (one plain turn per run), so a hand-edited false normalizes back to it.
+    task.goalRun = row.goalRun === true ? true : undefined
+    // The acceptance opt-out is stored only when it is ON: absent inherits the
+    // board-wide switch, so a hand-edited false normalizes back to inherit.
+    task.skipVerification = row.skipVerification === true ? true : undefined
     task.freeze = normalizeFreeze(row.freeze)
     task.handover = normalizeHandover(row.handover)
+    // Tags are repaired field by field like the schedule: a malformed entry is
+    // dropped, and a list that repairs to nothing clears the field instead of
+    // dropping the task row.
+    task.tags = normalizeTags(row.tags)
     task.permissionConfirmedAt = typeof row.permissionConfirmedAt === 'number' && Number.isFinite(row.permissionConfirmedAt) ? row.permissionConfirmedAt : undefined
+    task.integrations = normalizeTaskIntegrations(row.integrations)
+    task.hidden = row.hidden === true ? true : undefined
     tasks.push(task)
   }
   return tasks

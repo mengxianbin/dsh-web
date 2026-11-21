@@ -438,6 +438,10 @@ export class ArchiveService {
   }
 
   // ------------------------------------------------------------------
+  // Observed-archive backfill
+  // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
   // Sources and protection
   // ------------------------------------------------------------------
 
@@ -1283,7 +1287,7 @@ export class ArchiveService {
     // stamp first, ledger fallback — archive-at-host-time-1114), so these
     // candidates are the ones the next real cycle will compute.
     const deleteSeeds = this.config.autoDeleteEnabled
-      ? autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
+      ? autoDeleteSeedCandidates(seedRows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
       : []
     const plan = planDelete(built.rows, deleteSeeds.map((seed) => seed.id), this.protectedReason(undefined, built.rows))
     let deleteBytes = 0
@@ -1367,7 +1371,7 @@ export class ArchiveService {
     })
   }
 
-  /** Archive without re-acquiring the lock (used inside cycles). */
+    /** Archive without re-acquiring the lock (used inside cycles). */
   private async archiveInternal(ids: readonly string[], source: 'manual' | 'auto', nativeIds: Readonly<Record<string, string>>): Promise<BatchResponse> {
     const results: OpResult[] = []
     const events: JournalEvent[] = []
@@ -1472,6 +1476,11 @@ export class ArchiveService {
           await this.flushState()
         }
       }
+      // The delete cycle backfills on its own, inside its own lock and against
+      // the rows it plans with, so this step exists for the deployment that
+      // enables the backfill but not auto-delete: the list still shows the
+      // recorded times. Running it here (never inside a cycle) keeps a single
+      // lock acquisition in flight.
       try {
         if (this.config.autoDeleteEnabled) await this.runAutoCycle('delete', currentSessionId)
       } catch (error) {

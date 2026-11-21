@@ -17,6 +17,10 @@
  *    package that already owns one (a hard "multiple active Loader sources"
  *    reconcile error), and "type": "module" keeps Node from parsing the
  *    re-export as CJS (format detection also stops at the nearest manifest).
+ * 3. DSH 0.2.1 reads display metadata from exported resources instead of a
+ *    subpath package.json: each family subpath therefore also exports its icon
+ *    and locale metadata files, whose meta.description is the one-line purpose
+ *    text the inventory renders under the row title.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -60,42 +64,84 @@ function nearestPackage(startFile: string): { dir: string; manifest: Record<stri
   }
 }
 
-describe('family subpath display names', () => {
+describe('family rows and their subpath tombstones', () => {
   const patch = readFileSync(join(PACKAGE_DIR, 'cordis.patch.yml'), 'utf8')
   const manifest = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8')) as {
     name: string
     exports: Record<string, string>
+    files?: string[]
   }
   const rows = parsePatchRows(patch)
-  const familyRows = rows.filter(row => row.plugin !== undefined)
+  const familyRows = rows.filter(row => row.id !== 'web-ui-compat')
 
-  it('every family row mounts its own subpath and keeps the config.plugin contract', () => {
-    expect(familyRows.length).toBeGreaterThan(0)
+  it('every family row mounts the real package name and carries no shell config', () => {
+    // Issue #1901: a row names its plugin package directly, which is what
+    // makes the loader serve that package's own browser half. The shell
+    // wrapper (subpath name + config.plugin) is gone from every family row.
+    expect(familyRows.length).toBeGreaterThan(10)
     for (const row of familyRows) {
-      expect(row.name).toBe(`${manifest.name}/${row.id.slice('web-ui-'.length)}`)
+      expect(row.name.startsWith(`${manifest.name}/`), `row ${row.id} still mounts a shell subpath`).toBe(false)
+      expect(row.plugin, `row ${row.id} still carries config.plugin`).toBeUndefined()
     }
     // The self row keeps the bare package name (it owns the client face).
     expect(rows.find(row => row.id === 'web-ui-compat')?.name).toBe(manifest.name)
-    // The exempted i18n row stays direct.
-    const i18n = rows.find(row => row.id === 'web-ui-i18n')
-    expect(i18n?.name).toBe('@linxin666/dsh-i18n')
-    expect(i18n?.plugin).toBeUndefined()
-    // Spot-check the forwarded real plugin of two rows.
-    expect(rows.find(row => row.id === 'web-ui-usage')).toMatchObject({
-      name: `${manifest.name}/usage`,
-      plugin: '@linxin666/dsh-usage',
-    })
+    // Spot-check two rows against their real packages.
+    expect(rows.find(row => row.id === 'web-ui-usage')?.name).toBe('@linxin666/dsh-usage')
+    expect(rows.find(row => row.id === 'web-ui-task-board')?.name).toBe('@linxin666/dsh-client-ui-task-board')
   })
 
-  it('every family subpath is an exports key resolving to the shared shell re-export', () => {
-    for (const row of familyRows) {
-      expect(manifest.exports[`.${row.name.slice(manifest.name.length)}`]).toBe('./lib/shells/shell.js')
+  it('every former family subpath stays exported so a pre-#1901 profile still boots', () => {
+    // A profile written before this change records
+    // `@linxin666/dsh-web-all/<family>` as the row NAME; dropping the export
+    // would turn that boot into ERR_PACKAGE_PATH_NOT_EXPORTED.
+    const formerSubpaths = [
+      'settings', 'plugin-manager', 'market', 'task-board', 'task-board-github',
+      'git-graph', 'remote-web-ui', 'update', 'ssh', 'liangshen',
+      'skill-explorer', 'usage', 'session-archive', 'win-bash',
+    ]
+    for (const sub of formerSubpaths) {
+      expect(manifest.exports[`./${sub}`], `missing compat export ./${sub}`).toBe('./lib/shells/shell.js')
+    }
+  })
+
+  it('operator sees every family subpath export the metadata resources the host reads', () => {
+    // Given the aggregate package manifest and its shell subpath exports
+    expect(manifest.files).toContain('shell-metadata')
+    // When inspecting every family shell subpath
+    const shellSubs = Object.entries(manifest.exports)
+      .filter(([key, target]) => target === './lib/shells/shell.js' && key.slice(2).split('/').length === 1)
+      .map(([key]) => key.slice(2))
+    expect(shellSubs.length).toBeGreaterThan(0)
+    // Then each subpath exports its icon and locale metadata, and every locale
+    // carries the row title plus the one-line purpose text under it
+    for (const sub of shellSubs) {
+      expect(manifest.exports[`./${sub}/icon`]).toBe('./icon.svg')
+      const descriptions: Record<string, string> = {}
+      for (const locale of ['en', 'ru', 'zh']) {
+        const target = `./shell-metadata/${sub}/locale/${locale}.json`
+        expect(manifest.exports[`./${sub}/locale/${locale}.json`]).toBe(target)
+        const metadata = JSON.parse(readFileSync(join(PACKAGE_DIR, 'shell-metadata', sub, 'locale', `${locale}.json`), 'utf8')) as { meta?: { title?: string; description?: string } }
+        expect(metadata.meta?.title).toBe(`web-all/${sub}`)
+        const description = metadata.meta?.description ?? ''
+        // Real copy, not a placeholder: present, already trimmed, and never a
+        // restatement of the row title it sits under.
+        expect(description).not.toBe('')
+        expect(description).toBe(description.trim())
+        expect(description).not.toBe(metadata.meta?.title)
+        descriptions[locale] = description
+      }
+      // The Chinese note must stay on one line under the title
+      const han = [...descriptions.zh].filter(char => /\p{Script=Han}/u.test(char)).length
+      expect(han).toBeGreaterThan(0)
+      expect(han).toBeLessThanOrEqual(20)
+      expect(descriptions.zh).not.toBe(descriptions.en)
     }
   })
 
   it('retired family subpaths (tombstones) resolve to the shell re-export for backwards compatibility', () => {
     expect(manifest.exports['./desktop-launcher']).toBe('./lib/shells/shell.js')
     expect(manifest.exports['./dsh-perf']).toBe('./lib/shells/shell.js')
+    expect(manifest.exports['./model-capabilities']).toBe('./lib/shells/shell.js')
   })
 
   it('the built shells face re-exports the main face apply (one degraded ledger)', async () => {
@@ -116,6 +162,9 @@ describe('family subpath display names', () => {
     // The main face walk still reaches the package root and its client face.
     const root = nearestPackage(join(PACKAGE_DIR, 'lib/index.js'))
     expect(root.manifest.name).toBe(manifest.name)
-    expect((root.manifest.dsh as Record<string, unknown>).client).toBeDefined()
+    // The walk must return the manifest as it is declared on disk, client face
+    // included — not merely "some object with a dsh key".
+    const declared = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8')) as { dsh?: unknown }
+    expect(root.manifest.dsh).toEqual(declared.dsh)
   })
 })

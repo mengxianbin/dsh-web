@@ -1,15 +1,4 @@
 // @vitest-environment jsdom
-/**
- * Client-half registration test for the web-ui-settings browser bundle:
- * asserts that apply() contributes the Web Plugins group as a first-level
- * settings section ("settings.section", a list slot keyed by id) rather than
- * as a plugin-configuration card ("settings.plugin.item", a keyed slot).
- *
- * Regression guard for issue #513: DSH 0.1.0-rc.6+ rejects keyed-slot
- * registrations without options.key, and the pre-0.1.18 bundles registered
- * the group card into "settings.plugin.item" with an id - which made the web
- * GUI fail to boot with "Failed to load plugins".
- */
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../src/client/compat-settings-scope.ts', () => ({
@@ -21,7 +10,7 @@ vi.mock('../src/client/compat-settings-scope.ts', () => ({
 import { apply } from '../src/client/index.ts'
 
 describe('web-ui-settings client registration', () => {
-  it('registers into settings.section with an id, not the keyed settings.plugin.item slot', () => {
+  it('user gets the stable parent section and its Web Plugins keyed child', () => {
     const injected: string[] = []
     const registered: Array<Record<string, unknown>> = []
     const fakeCtx = {
@@ -34,12 +23,16 @@ describe('web-ui-settings client registration', () => {
         bind: () => (key: string) => key,
       },
       get: () => undefined,
+      reflect: { provide: () => {} },
       slots: {
         inject: (name: string, fn: () => unknown) => {
           injected.push(name)
           fn()
           return () => {}
         },
+        spec: () => ({ kind: 'keyed', scope: 'root' }),
+        subscribe: () => () => {},
+        entries: () => [],
         register: (options: Record<string, unknown>) => {
           registered.push(options)
           return () => {}
@@ -50,15 +43,23 @@ describe('web-ui-settings client registration', () => {
     apply(fakeCtx as never)
 
     expect(injected).toEqual(['settings.section'])
-    expect(injected).not.toContain('settings.plugin.item')
+    expect(injected).not.toContain('plugins.bundle.config')
 
     const section = registered.find((entry) => entry.name === 'settings.section')
-    expect(section).toBeDefined()
-    expect(section?.id).toBe('web-ui-plugins')
-    expect(section?.children).toEqual({ 'web-ui.plugin.item': { kind: 'list', scope: 'root' } })
+    expect(section).toMatchObject({
+      id: 'web-ui-plugins',
+      order: 110,
+      children: { 'web-ui.extension': { kind: 'keyed', scope: 'root' } },
+    })
 
-    // The keyed slot must stay untouched: the host rejects entries without
-    // options.key and the group has no reason to contribute one there.
-    expect(registered.some((entry) => entry.name === 'settings.plugin.item')).toBe(false)
+    const child = registered.find((entry) => entry.name === 'web-ui.extension')
+    expect(child).toMatchObject({
+      key: 'web-ui-plugins',
+      children: { 'web-ui.plugin.item': { kind: 'list', scope: 'root' } },
+    })
+    expect(child).not.toHaveProperty('id')
+    expect(child).not.toHaveProperty('order')
+    expect(child).not.toHaveProperty('label')
+    expect(registered.some((entry) => entry.name === 'plugins.bundle.config')).toBe(false)
   })
 })

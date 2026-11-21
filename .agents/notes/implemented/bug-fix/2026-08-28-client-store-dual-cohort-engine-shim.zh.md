@@ -4,6 +4,8 @@ Status: implemented
 
 ## 问题
 
+store-engine 部分由[受支持平台直接解析](../simplification/2026-10-11-retire-legacy-store-engine-shim.md) 取代。下文所有 engine 专属表述，包括决策、后果与验证，都属于历史；本记录继续拥有独立的 agent-preset provider/声明/injection 决策。
+
 0.1.2-alpha.1 预览 cohort 迁移合入 `dev` 后，家族插件在正在运行的 0.1.1-rc.2 宿主上拒绝加载（npm 最新可安装版本；预览 cohort 未发布、返回 404）。先后暴露出两处对新 cohort 的硬耦合：
 
 1. **存储引擎 require 未命中模块表。** 迁移把 `dsh-client-store` 定为冻结平台模块，共享客户端构建预设将其 externalize，于是每个重建的客户端 bundle 都在求值期硬 require 它：
@@ -23,7 +25,7 @@ Status: implemented
 每个包保持一份客户端产物同时服务两种宿主 cohort，cohort 专属面的解析收进共享接缝、在使用点运行时探测：
 
 - **存储引擎（shared/tsdown.client.ts）：** `@deepseek-ai/dsh-client-store` 的值导入不再 external。bundle 纯度插件把它们重定向到生成的 shim 模块，shim 在 bundle 求值期通过 loader 注入的 `require` 解析引擎：先试平台模块，回落到旧 `@deepseek-ai/dsh-client-runtime/client` 面。shim 里的 specifier 用 `join('')` 拼出，静态解析器不可见，require 调用原样落进 factory 作用域。shim 只转发两个引擎共有的值面——`notifySubscribers` 仅存在于 cohort 包，绝不转发；未来对它的值导入会在构建期以缺导出报错，而不是在 rc.2 上静默坏掉。type-only 导入不受影响：打包前已被擦除，类型仍来自已发布的 0.1.2 声明。
-- **注入面（task-board 客户端）：** `remote.agentPresets` 移出硬 `inject` 清单（其余入口的服务在 rc.2 上都注册）。preset 名册在使用点经宿主实际提供的面读取——已注册则走 `remote.agentPresets`，否则回落 `connection.api.agentPresets`（迁移前的 rc.2 面）——两种 cohort 的 mode picker 都保留 preset，仅当宿主两者皆无时才空跑。读取失败保留旧选项并在下次重连重试，与之前一致。
+- **注入面（task-board 客户端）：** `remote.agentPresets` 移出硬 `inject` 清单（其余入口的服务在 rc.2 上都注册）。preset 名册在使用点经宿主实际提供的面读取、绝不做硬等待，因此宿主不提供该面时 mode picker 只是空跑，而不会让入口 pending。本条原本为迁移前 cohort 指定的回落面 `connection.api.agentPresets` 在受支持 cohort 上已不存在：从 0.2.0-rc.2 起 connection 句柄只承载链路（`isLoopback`、`generation`、`state`、`rpc`、`reconnect`、`registerGenerationSource`、`start`），名册改由生成的 `remote.agentPresets` 命名空间、在作用域 `ctx.inject` 内读取——api-remotes 装配挂上该命名空间的那一刻就喂一次，重连可能换部署时再喂一次。读取失败保留旧选项并在下次重连重试，与之前一致。该命名空间是**与本入口并行**装配的，不经 inject 直接从 `remote` 服务上读取会抛 `cannot get property … without inject`，所以挂载时的一次性探测会让 picker 整个页面生命周期只剩「继承」。
 
 相关：[preview SDK cohort via source-built tarball overrides](../../archived/process/2026-08-28-preview-cohort-tarball-overrides.zh.md)（引入这一双轨的迁移）。
 
@@ -41,11 +43,12 @@ Status: implemented
 - rc.2 宿主恢复加载家族客户端 bundle，task-board 正常激活；0.1.2-alpha.1 宿主的平台模块与注入面路径不变。
 - `engines.dsh >=0.1.2-alpha.1` 下限与 README 的 DSH 徽章现在高估了客户端半区的实际要求（本修复容忍 rc.2），而 host 半区仍使用 0.1.2 面。是否把声明下限降回 rc.2 是维护者的 cohort 政策决定，此处不做。
 - inject 契约中的 `dsh-client-store` 行对 0.1.2 宿主仍然正确；rc.2 宿主没有该包可注入，由 shim 回落承担。
-- 新增 cohort 独有 store 导出的值导入会在构建期显式报错（缺导出）；新增 cohort 独有注入面必须遵循 task-board 模式（使用点探测），否则入口会在旧 cohort 上 pending。
+- 新增 cohort 独有 store 导出的值导入会在构建期显式报错（缺导出）。新增 cohort 独有注入面必须遵循 task-board 模式——使用点的作用域 `ctx.inject`——否则入口会在不提供该服务的宿主上 pending；不经该 inject、直接经父服务读取同一命名空间会抛错而不是返回 undefined，所以裸探测从来不是替代方案。
 
 ## 验证
 
 - 重建全部工作区客户端 bundle：硬 `require("@deepseek-ai/dsh-client-store")` 清零；shim 恰好出现在九个值导入 store 的 bundle（desktop-launcher、doctor、market、perf、pet、remote-web-ui、task-board、tool-describe-image、web-ui-settings）。
-- 线上 rc.2 宿主已服务修复后的 bundle（抓取 `http://127.0.0.1:3080/plugins/…` 的 web-ui-settings 与 task-board，均 HTTP 200）：双 require 回落存在；task-board bundle 的 `inject` 数组已无 `remote.agentPresets`，发出的读取函数先探测 `remote.agentPresets`、回落 `connection.api.agentPresets`。
+- 线上 rc.2 宿主已服务修复后的 bundle（抓取 `http://127.0.0.1:3080/plugins/…` 的 web-ui-settings 与 task-board，均 HTTP 200）：双 require 回落存在；task-board bundle 的 `inject` 数组不含 `remote.agentPresets`，名册 feed 在作用域 `ctx.inject` 内读取该命名空间。
+- 在一台携带该 bundle 的临时 0.2.0-rc.2 宿主上，看板的 mode picker 列出部署名册（继承（部署默认：标准）、标准、PTC、极简、Cordis）；在新建对话框里钉住 preset 会存到卡片上，在卡片执行设置里改动后刷新页面仍然保留，启动控制台无任何名册失败。同一探测在未修复的 bundle 上复现了线上缺陷：`remote.agentPresets` 抛 `cannot get property "remote.agentPresets" without inject`，connection 句柄没有 `api` 回落，picker 只有「继承（部署默认）」一项。
 - rc.2 宿主树的 `dsh-client-runtime/lib/client.js` 验证导出 `createSnapshotStore` 与 `defineStore`（引擎回落可答）。
 - `pnpm typecheck`、`pnpm test`（19 套件）、`pnpm test:scripts`（226 通过）、`pnpm docs:check`、`pnpm aggregate:check`、`pnpm market:check`、`pnpm skin-center:check` 全部通过；task-board 改动后单独复验（tsc 干净、241 测试通过）。

@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createTask, EXECUTION_HISTORY_LIMIT, startExecution, withSchedule, type TaskRecord } from '../src/core/tasks.ts'
-import { HostTaskLedger, processIsAlive, processState } from '../src/host-ledger.ts'
+import { HostTaskLedger, processIsAlive, processState, win32StartTimeMs, type PowerShellProbe } from '../src/host-ledger.ts'
+import { nextRunAtMs, resolveHostTimeZone } from '../src/core/schedule.ts'
+import { TASK_BOARD_SCHEMA_VERSION } from '../src/protocol.ts'
+import { budgetAttempts, exceptionAttempts, passedAttempt, type ExecutionVerification, type VerificationAttempt } from '../src/core/verification.ts'
 
 const roots: string[] = []
 const NOW = new Date(2026, 7, 16, 10, 0, 30).getTime()
@@ -41,38 +44,28 @@ function secondGranularStartMs(pid: number): number | undefined {
 }
 
 /**
- * Try to leave a short-lived orphan behind whose exit is not reaped, so it
- * occupies the PID table as a zombie (`process.kill(pid, 0)` then reports it
- * alive). Works on Linux where PID 1 does not reap promptly (containers, some
- * CI inits); returns undefined where init reaps orphans immediately, so
- * callers skip rather than flake.
+ * Leave a child of this process behind that has exited but was never waited
+ * on, so it occupies the PID table as a zombie (`process.kill(pid, 0)` then
+ * reports it alive). The zombie has to be our own child: an orphan adopted by
+ * PID 1 is reaped whenever init next runs, which lost the kill(0) probe the
+ * race intermittently on CI, whereas only this process's event loop can reap
+ * a child, and every caller stays synchronous from the spawn to its
+ * assertions. Returns undefined where the state probe is unavailable or the
+ * child was reaped after all, so callers skip rather than flake.
  */
 function spawnZombie(): number | undefined {
   if (process.platform !== 'linux') return undefined
   try {
-    const probeFile = join(tmpdir(), `dsh-task-board-zombie-${process.pid}-${Math.random().toString(36).slice(2)}`)
-    const shell = spawn('sh', ['-c', `sleep 0.2 & echo $! > "${probeFile}"`], { stdio: 'ignore' })
-    shell.unref()
-    const deadline = Date.now() + 3000
-    let pid: number | undefined
-    while (Date.now() < deadline) {
-      try {
-        const raw = readFileSync(probeFile, 'utf8').trim()
-        if (raw !== '') {
-          const parsed = Number(raw)
-          if (Number.isSafeInteger(parsed)) pid = parsed
-          break
-        }
-      } catch { /* shell still starting */ }
-      sleepSync(50)
-    }
+    const child = spawn('sh', ['-c', 'exit 0'], { stdio: 'ignore' })
+    const pid = child.pid
+    child.unref()
     if (pid === undefined) return undefined
-    const zombieDeadline = Date.now() + 2500
-    while (Date.now() < zombieDeadline) {
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline) {
       if (processState(pid) === 'Z') return pid
-      sleepSync(50)
+      sleepSync(20)
     }
-    return undefined // init reaped it before we could observe the zombie
+    return undefined // reaped before the state became observable
   } catch {
     return undefined
   }
@@ -81,6 +74,30 @@ function spawnZombie(): number | undefined {
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
+
+/** One recorded acceptance attempt of a given stage, built for the ledger tests. */
+function attempt(stage: 'exception' | 'budget' | 'quality', index: number, passed = false): VerificationAttempt {
+  return {
+    index,
+    at: NOW + index,
+    stage,
+    passed,
+    score: stage === 'quality' ? 0.8 : 0,
+    baseline: stage === 'quality' ? 0.1 : 0,
+    criteria: stage === 'quality' ? [{ id: 'specification', name: 'Specification Adherence', score: 0.8, baseline: 0.1, threshold: 0.65, passed: true }] : [],
+    findings: [],
+    usage: { calls: 1, inputTokens: 0, outputTokens: 0, reasoningTokens: 0 },
+    evidence: { chars: 0, omittedCharacters: 0, entries: 0, hash: '' },
+    route: { provider: 'p', model: 'm' },
+    channel: 'explicit-tag',
+    rounds: 2,
+    ...(stage === 'quality' ? {} : { error: 'environment failure' }),
+  }
+}
+
+const anomaly = (index: number): VerificationAttempt => attempt('exception', index)
+const budgetStop = (index: number): VerificationAttempt => attempt('budget', index)
+const passedQuality = (index: number): VerificationAttempt => attempt('quality', index, true)
 
 describe('HostTaskLedger', () => {
   it('imports each source once and merges newer fields with the execution union', () => {
@@ -102,6 +119,63 @@ describe('HostTaskLedger', () => {
     expect(merged.title).toBe('newer')
     expect(merged.executions.map(entry => entry.id)).toEqual(['exec-a', 'exec-b'])
     expect(ledger.state().revision).toBe(revision + 1)
+  })
+
+  it('operator applies a live subtask-depth edit, clamps it, and notifies only on change', () => {
+    // Given a ledger with the default single-level limit and a subscriber
+    const root = tempRoot()
+    const ledger = new HostTaskLedger(root, () => NOW)
+    let notified = 0
+    ledger.subscribe(() => { notified += 1 })
+    expect(ledger.maxSubtaskDepth).toBe(1)
+
+    // When a settings commit raises the limit
+    ledger.setMaxSubtaskDepth(3)
+
+    // Then the new limit holds and the subscriber heard exactly one change
+    expect(ledger.maxSubtaskDepth).toBe(3)
+    expect(notified).toBe(1)
+
+    // When the same limit is committed again and an out-of-range value follows
+    ledger.setMaxSubtaskDepth(3)
+    ledger.setMaxSubtaskDepth(99)
+
+    // Then the repeat is a no-op and the out-of-range value lands clamped
+    expect(ledger.maxSubtaskDepth).toBe(3)
+    expect(notified).toBe(1)
+    ledger.setMaxSubtaskDepth(0)
+    expect(ledger.maxSubtaskDepth).toBe(1)
+    expect(notified).toBe(2)
+  })
+
+  it('user gets a private tasks array from a board read, so rewriting it cannot change the ledger', () => {
+    // Given a ledger holding one card
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('seed-read-isolation', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+
+    // When a consumer rewrites the array it was handed
+    const handedOut = ledger.state().tasks
+    handedOut.length = 0
+    handedOut.push(task('injected'))
+
+    // Then the ledger still reports its own card on the next read
+    expect(ledger.state().tasks.map(entry => entry.id)).toEqual(['task-a'])
+  })
+
+  it('user gets a fresh array on every board read while the cards stay the ledger records', () => {
+    // Given a ledger holding one card
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('seed-read-identity', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+
+    // When the board is read twice
+    const first = ledger.state().tasks
+    const second = ledger.state().tasks
+
+    // Then each read owns its collection while the card objects are the
+    // ledger's own records: a read hands out a container a caller cannot use to
+    // rewrite the board, and it no longer rebuilds the whole document to do it
+    expect(second).not.toBe(first)
+    expect(second[0]).toBe(first[0])
   })
 
   it('persists atomically, restores revision, and returns the first duplicate request result', () => {
@@ -133,7 +207,7 @@ describe('HostTaskLedger', () => {
     const recoveredId = ledger.state().scheduler.ledgerId
     expect(ledger.state().tasks).toEqual([])
     expect(ledger.state().scheduler.error).toContain('quarantined')
-    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ schemaVersion: 3, tasks: [] })
+    expect(JSON.parse(readFileSync(file, 'utf8'))).toMatchObject({ schemaVersion: 6, tasks: [] })
     const quarantined = readdirSync(root).find(name => name.startsWith('ledger-v2.json.corrupt-'))
     expect(quarantined).toBeDefined()
     expect(readFileSync(join(root, quarantined!), 'utf8')).toBe('{not json')
@@ -146,16 +220,23 @@ describe('HostTaskLedger', () => {
   it('opens one due execution and rolls a running task without queuing another', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
+    // A cron occurrence lands on a wall-clock minute boundary, so the fixture
+    // arms the rule at the boundary the engine itself would choose.
+    const firstDue = nextRunAtMs('* * * * *', NOW)!
     const due = withSchedule(task('scheduled'), {
-      enabled: true, cron: '* * * * *', nextRunAt: NOW, lastTriggeredAt: undefined,
+      enabled: true, cron: '* * * * *', nextRunAt: firstDue, lastTriggeredAt: undefined,
     }, NOW)
     ledger.applyRequest('import', { kind: 'import', sourceId: 'source', tasks: [due] })
-    const opened = ledger.openScheduled('scheduled', NOW + 60_000, NOW)
-    expect(opened).toBeDefined()
-    expect(ledger.openScheduled('scheduled', NOW + 120_000, NOW + 60_000)).toBeUndefined()
+    // openScheduled answers with the cascade run list: one entry for a plain
+    // task, an empty list when nothing may run.
+    const opened = ledger.openScheduled('scheduled', firstDue)
+    expect(opened).toHaveLength(1)
+    // The first run is still open, so the next occurrence is skipped rather
+    // than queued: no second execution, and the rule rolls one minute forward.
+    expect(ledger.openScheduled('scheduled', firstDue + 60_000)).toEqual([])
     const current = ledger.state().tasks[0]
     expect(current.executions).toHaveLength(1)
-    expect(current.schedule?.nextRunAt).toBe(NOW + 120_000)
+    expect(current.schedule?.nextRunAt).toBe(firstDue + 120_000)
   })
 
   it('derives detached runtime projections without copying settled execution details', () => {
@@ -169,10 +250,6 @@ describe('HostTaskLedger', () => {
       error: undefined,
     }))
     const running = startExecution({ ...task('running'), executions: history }, NOW - 1_000, 'open').task
-    const awaitingSession = {
-      ...startExecution(task('awaiting-session'), NOW - 500, 'awaiting-session-open').task,
-      status: 'todo' as const,
-    }
     const archivedSchedule = {
       ...withSchedule(task('archived-schedule'), {
         enabled: true, cron: '* * * * *', nextRunAt: NOW, lastTriggeredAt: undefined,
@@ -190,10 +267,18 @@ describe('HostTaskLedger', () => {
             ? { ...execution, sessionId: 'session-open' }
             : execution),
         },
-        awaitingSession,
         archivedSchedule,
       ],
     })
+    // A launch whose session has not resolved yet is what the runtime view has
+    // to project; a stored session-less execution no longer survives import,
+    // because boot cancels any open execution that never got a session.
+    ledger.applyRequest('create-awaiting', {
+      kind: 'create',
+      id: 'awaiting-session',
+      input: { title: 'Awaiting', description: '', prompt: '' },
+    })
+    ledger.applyRequest('run-awaiting', { kind: 'run', taskId: 'awaiting-session' })
     ledger.applyRequest('create-scheduled', {
       kind: 'create',
       id: 'scheduled',
@@ -208,20 +293,53 @@ describe('HostTaskLedger', () => {
         executionId: 'open',
         sessionId: 'session-open',
         startedAt: NOW - 1_000,
+        teamMember: false,
       }, {
         taskId: 'awaiting-session',
-        executionId: 'awaiting-session-open',
+        executionId: expect.any(String),
         sessionId: undefined,
-        startedAt: NOW - 500,
+        startedAt: NOW,
+        teamMember: false,
       }],
+      // One session id per open execution: the launch that has not resolved a
+      // session yet contributes none, and the settled 2,000-row history is not
+      // walked into the projection.
+      openSessionIds: ['session-open'],
+      needsSessionState: true,
     })
     expect(ledger.armedScheduleCount()).toBe(1)
     expect(ledger.dueSchedules(NOW + 60_000)).toEqual([{
       taskId: 'scheduled',
+      mode: 'cron',
       cron: '* * * * *',
+      timeZone: expect.any(String),
       nextRunAt: NOW + 30_000,
     }])
     expect(ledger.runtimeView().openExecutions[0]).not.toBe(runtime.openExecutions[0])
+  })
+
+  it('operator with an idle board sees the runtime view report no session state to reconcile', () => {
+    // Given a board whose cards all settled and whose only schedule is archived
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('idle-create', { kind: 'create', id: 'idle', input: { title: 'Idle', description: '', prompt: '' } })
+    ledger.applyRequest('idle-run', { kind: 'run', taskId: 'idle' })
+    const execution = ledger.getTask('idle')?.executions.at(-1)
+    if (execution === undefined) throw new Error('no execution')
+    ledger.settle('idle', execution.id, 'succeeded')
+
+    // When the runtime view is derived
+    const idle = ledger.runtimeView()
+
+    // Then nothing asks for the session roster
+    expect(idle.openExecutions).toEqual([])
+    expect(idle.openSessionIds).toEqual([])
+    expect(idle.needsSessionState).toBe(false)
+
+    // And a card parked in the running column without a tracked execution asks
+    // for it again: its verdict may arrive from a settle this process never saw
+    ledger.applyRequest('park', { kind: 'move', taskId: 'idle', status: 'running' })
+    expect(ledger.runtimeView().needsSessionState).toBe(true)
+    ledger.dispose()
   })
 
   it('cancels a running record without a session id after restart instead of resending it', () => {
@@ -367,6 +485,21 @@ describe('HostTaskLedger', () => {
     expect(message).toContain(lockFile)
   })
 
+  it('reclaims a truncated lock left by an unclean shutdown (issue #1528)', () => {
+    const root = tempRoot()
+    const lockFile = join(root, 'ledger-v2.lock')
+    // The reported Host found a 0-byte lock whose mtime was two days old: the
+    // owner died between creating the file and writing its record. Nothing can
+    // still be writing a lock that old, so the next start reclaims it instead
+    // of leaving the Host half unmounted until someone deletes it by hand.
+    writeFileSync(lockFile, '', { encoding: 'utf8' })
+    const past = NOW - 2 * 24 * 60 * 60 * 1000
+    utimesSync(lockFile, past / 1000, past / 1000)
+    const ledger = new HostTaskLedger(root, () => NOW)
+    expect(ledger.state().scheduler.ledgerId).toBeDefined()
+    ledger.dispose()
+  })
+
   it('takes over a lock owned by an unreaped zombie process', () => {
     const zombie = spawnZombie()
     if (zombie === undefined) return // environment reaps orphans; cannot exercise
@@ -439,6 +572,204 @@ describe('HostTaskLedger', () => {
     expect(ledger.state().tasks[0].executions).toHaveLength(1)
   })
 
+  it('operator parks a card in the running column by hand and moves it back', () => {
+    // Given a card the operator parked in the running column without a run
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('park', { kind: 'move', taskId: 'task-a', status: 'running' })
+    expect(ledger.state().tasks[0].status).toBe('running')
+
+    // When the operator moves it back to the todo column
+    ledger.applyRequest('unpark', { kind: 'move', taskId: 'task-a', status: 'todo' })
+
+    // Then the column follows and no execution was ever recorded
+    expect(ledger.state().tasks[0].status).toBe('todo')
+    expect(ledger.state().tasks[0].executions).toHaveLength(0)
+  })
+
+  it('operator declaring a card done records the column without inventing an execution', () => {
+    // Given a card that has never been run
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+
+    // When the operator declares the work finished on the board
+    ledger.applyRequest('move', { kind: 'move', taskId: 'task-a', status: 'done' })
+
+    // Then the column changes and the execution history stays empty
+    const declared = ledger.state().tasks[0]
+    expect(declared.status).toBe('done')
+    expect(declared.executions).toHaveLength(0)
+    expect(declared.updatedAt).toBe(NOW)
+  })
+
+  it('operator clearing acceptance anomalies resets the counter but keeps every recorded verdict', () => {
+    // Given an open execution carrying one anomaly, one budget stop and one pass
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+    const execution = ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' }).runs?.[0]?.execution
+    expect(execution).toBeDefined()
+    const attempts: ExecutionVerification['attempts'] = [
+      anomaly(1), anomaly(2), budgetStop(1), passedQuality(1),
+    ]
+    ledger.setVerification('task-a', execution!.id, {
+      contract: {
+        enabled: true, modelSource: 'inherit', route: { provider: 'p', model: 'm' }, preset: 'coding', threshold: 0.65,
+      },
+      attempts,
+      applicability: 'enforced',
+      failedReason: 'acceptance anomaly budget exhausted',
+    })
+
+    // When the operator clears the recorded anomalies
+    ledger.applyRequest('reset', { kind: 'reset-verification', taskId: 'task-a' })
+
+    // Then only the non-verdict attempts are gone: the pass record survives
+    const cleared = ledger.state().tasks[0].executions[0].verification
+    expect(exceptionAttempts(cleared)).toHaveLength(0)
+    expect(budgetAttempts(cleared)).toHaveLength(0)
+    expect(passedAttempt(cleared)?.passed).toBe(true)
+    expect(cleared?.failedReason).toBeUndefined()
+
+    // And a second reset is refused, because there is nothing left to clear
+    expect(() => ledger.applyRequest('reset2', { kind: 'reset-verification', taskId: 'task-a' })).toThrow('no acceptance anomaly')
+  })
+
+  it('operator clearing anomalies is refused on a card with no open execution or no acceptance gate', () => {
+    // Given a card that was never run, and a card whose open execution is not gated
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create-idle', { kind: 'create', id: 'idle', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('create-plain', { kind: 'create', id: 'plain', input: { title: 'B', description: '', prompt: '' } })
+    const execution = ledger.applyRequest('run', { kind: 'run', taskId: 'plain' }).runs?.[0]?.execution
+    ledger.setVerification('plain', execution!.id, {
+      contract: { enabled: false, modelSource: 'inherit', preset: 'coding', threshold: 0.65 },
+      attempts: [anomaly(1)],
+      applicability: 'disabled',
+    })
+
+    // When the operator tries to clear acceptance anomalies on either card
+    const idle = (() => { try { ledger.applyRequest('r1', { kind: 'reset-verification', taskId: 'idle' }); return '' } catch (error) { return (error as Error).message } })()
+    const plain = (() => { try { ledger.applyRequest('r2', { kind: 'reset-verification', taskId: 'plain' }); return '' } catch (error) { return (error as Error).message } })()
+
+    // Then both are refused, with the reason that names the actual obstacle
+    expect(idle).toContain('no open execution')
+    expect(plain).toContain('not gated by task acceptance')
+  })
+
+  it('operator recording an external outcome writes one execution the column and the history both derive from', () => {
+    // Given a card an agent outside this Host finished
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+
+    // When that agent records the outcome
+    ledger.applyRequest('ext', {
+      kind: 'record-external-outcome',
+      taskId: 'task-a',
+      result: 'succeeded',
+      initiatedBy: 'codex',
+      summary: 'fixed the parser, tests green',
+    })
+
+    // Then the card is done AND the history carries the record that says why
+    const task = ledger.state().tasks[0]
+    expect(task.status).toBe('done')
+    expect(task.executions).toHaveLength(1)
+    expect(task.executions[0].result).toBe('succeeded')
+    expect(task.executions[0].external).toBe(true)
+    expect(task.executions[0].initiatedBy).toBe('codex')
+    expect(task.executions[0].sessionId).toBeUndefined()
+    expect(task.executions[0].endedAt).toBe(NOW)
+    expect(task.executions[0].error).toBe('fixed the parser, tests green')
+  })
+
+  it('operator recording a failed external outcome lands in the failed column', () => {
+    // Given a card an outside agent could not finish
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+
+    // When that agent records the failure
+    ledger.applyRequest('ext', { kind: 'record-external-outcome', taskId: 'task-a', result: 'failed', initiatedBy: 'claude-code' })
+
+    // Then the column and the record agree, and no session is invented
+    const task = ledger.state().tasks[0]
+    expect(task.status).toBe('failed')
+    expect(task.executions[0].result).toBe('failed')
+    expect(task.executions[0].external).toBe(true)
+    expect(task.executions[0].sessionId).toBeUndefined()
+  })
+
+  it('operator recording an external outcome over a run the Host is executing is refused', () => {
+    // Given a card the Host is running right now
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('run', { kind: 'run', taskId: 'task-a' })
+
+    // When an outside agent tries to write the terminal verdict over it
+    const refused = (() => {
+      try {
+        ledger.applyRequest('ext', { kind: 'record-external-outcome', taskId: 'task-a', result: 'succeeded', initiatedBy: 'codex' })
+        return ''
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    })()
+
+    // Then the Host stays the authority, and nothing was recorded
+    expect(refused).toContain('running task cannot receive an external outcome')
+    const task = ledger.state().tasks[0]
+    expect(task.status).toBe('running')
+    expect(task.executions).toHaveLength(1)
+    expect(task.executions[0].external).toBeUndefined()
+  })
+
+  it('operator recording an external outcome on an archived card is refused by the ledger', () => {
+    // Given an archived card
+    const ledger = new HostTaskLedger(tempRoot(), () => NOW)
+    ledger.applyRequest('create', { kind: 'create', id: 'task-a', input: { title: 'A', description: '', prompt: '' } })
+    ledger.applyRequest('archive', { kind: 'archive', taskId: 'task-a' })
+
+    // When an outside agent reports an outcome for it
+    const refused = (() => {
+      try {
+        ledger.applyRequest('ext', { kind: 'record-external-outcome', taskId: 'task-a', result: 'succeeded', initiatedBy: 'codex' })
+        return ''
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error)
+      }
+    })()
+
+    // Then the archived card stays read-only
+    expect(refused).toContain('archived task is read-only')
+    expect(ledger.state().tasks[0].executions).toHaveLength(0)
+  })
+
+  it('operator reading a ledger written before external outcomes existed gets those rows unchanged', () => {
+    // Given a ledger document whose execution rows predate the external marker
+    const root = tempRoot()
+    const legacy = task('task-a')
+    legacy.executions = [{
+      id: 'old-execution',
+      sessionId: 'session-old',
+      startedAt: NOW - 500,
+      endedAt: NOW - 100,
+      result: 'succeeded',
+      error: undefined,
+      initiatedBy: 'session-old',
+    }]
+    writeFileSync(join(root, 'ledger-v2.json'), JSON.stringify({
+      schemaVersion: TASK_BOARD_SCHEMA_VERSION, revision: 3, tasks: [legacy], scheduler: { timeZone: 'UTC' },
+    }))
+
+    // When the Host loads it
+    const ledger = new HostTaskLedger(root, () => NOW)
+
+    // Then the old row reads back exactly as it was, with no fabricated marker
+    const stored = ledger.state().tasks[0].executions[0]
+    expect(stored.result).toBe('succeeded')
+    expect(stored.external).toBeUndefined()
+    expect(stored.initiatedBy).toBe('session-old')
+    ledger.dispose()
+  })
+
   it('cancels an imported interrupted start and preserves an invalid cron as disabled', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
@@ -482,7 +813,7 @@ describe('HostTaskLedger', () => {
     expect(() => ledger.applyRequest('rerun-archived', {
       kind: 'rerun', taskId: 'archived',
     })).toThrow('archived task is read-only')
-    expect(ledger.openScheduled('archived', NOW + 60_000, NOW)).toBeUndefined()
+    expect(ledger.openScheduled('archived', NOW)).toEqual([])
     expect(ledger.state().tasks[0].executions).toEqual([])
   })
 
@@ -576,7 +907,7 @@ describe('HostTaskLedger', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
     const enospcError = Object.assign(new Error('no space left on device'), { code: 'ENOSPC' })
-    vi.spyOn(ledger as never, 'writeSchedulerSidecar').mockImplementationOnce(() => {
+    vi.spyOn(ledger as unknown as { writeSchedulerSidecar: () => void }, 'writeSchedulerSidecar').mockImplementationOnce(() => {
       throw enospcError
     })
     expect(() => {
@@ -587,8 +918,8 @@ describe('HostTaskLedger', () => {
   })
 })
 
-describe('ledger schema v3 migration', () => {
-  it('migrates a v2 document losslessly to v3 on load and writes it back as v3', () => {
+describe('ledger schema v4 migration', () => {
+  it('migrates a v2 document losslessly to v4 on load, stamping the schedule zone', () => {
     const root = tempRoot()
     const scheduled = withSchedule(
       { ...task('legacy-scheduled'), permission: 'workspace-write', workspaceId: 'ws-1', mode: 'mode-a' },
@@ -623,16 +954,19 @@ describe('ledger schema v3 migration', () => {
     expect(migratedScheduled.permission).toBe('workspace-write')
     expect(migratedScheduled.workspaceId).toBe('ws-1')
     expect(migratedScheduled.mode).toBe('mode-a')
-    expect(migratedScheduled.schedule).toEqual({ enabled: false, cron: '*/5 * * * *', nextRunAt: NOW + 120_000, lastTriggeredAt: NOW - 60_000 })
+    // v4 stamps the Host zone onto a pre-v4 rule so the trigger instant it
+    // already committed stops following the process TZ. The instant itself is
+    // untouched, because the stored nextRunAt already encodes the old zone.
+    expect(migratedScheduled.schedule).toEqual({ enabled: false, mode: 'cron', cron: '*/5 * * * *', timeZone: expect.any(String), nextRunAt: NOW + 120_000, lastTriggeredAt: NOW - 60_000, runCount: 0 })
     const migratedSettled = state.tasks.find(entry => entry.id === 'legacy-settled')!
     expect(migratedSettled.archivedAt).toBe(NOW - 10)
     expect(migratedSettled.executions).toHaveLength(2)
     expect(migratedSettled.executions[1]).toEqual({ id: 'exec-2', sessionId: 'session-2', startedAt: NOW - 300, endedAt: NOW - 200, result: 'failed', error: 'boom' })
     expect(state.scheduler.ledgerId).toBe('ledger-legacy')
     expect(state.scheduler.lastTickAt).toBe(NOW - 1_000)
-    // The migration is written back immediately as v3, keeping every field.
+    // The migration is written back immediately as v4, keeping every field.
     const onDisk = JSON.parse(readFileSync(join(root, 'ledger-v2.json'), 'utf8'))
-    expect(onDisk.schemaVersion).toBe(3)
+    expect(onDisk.schemaVersion).toBe(6)
     expect(onDisk.revision).toBe(41)
     expect(onDisk.tasks).toEqual(state.tasks)
     expect(onDisk.scheduler.ledgerId).toBe('ledger-legacy')
@@ -641,17 +975,71 @@ describe('ledger schema v3 migration', () => {
     ledger.dispose()
   })
 
-  it('cold-starts an empty v3 ledger on a fresh directory and reloads an empty v3 document', () => {
+  it('operator upgrading a v3 rule that stored no zone gets the Host zone stamped on it', () => {
+    // Given a v3 document whose enabled rule committed a future target while
+    // the Host zone was whatever the process reported
+    // When the document is loaded and migrated
+    const root = tempRoot()
+    const committed = NOW + 120_000
+    const v3Document = JSON.stringify({
+      schemaVersion: 3, revision: 7,
+      tasks: [{
+        ...task('legacy-zoned'),
+        schedule: { enabled: false, cron: '0 9 * * *', nextRunAt: committed, lastTriggeredAt: NOW - 60_000 },
+      }],
+      scheduler: { timeZone: 'UTC', ledgerId: 'ledger-v3' },
+      recentRequests: [],
+    })
+    writeFileSync(join(root, 'ledger-v2.json'), v3Document, 'utf8')
+
+    // When it is loaded
+    const ledger = new HostTaskLedger(root, () => NOW + 2_000)
+    const migrated = ledger.state().tasks[0].schedule!
+
+    // Then the rule carries the Host zone so it stops following a later TZ
+    // change, and the instant it had already committed is untouched.
+    expect(migrated.timeZone).toBe(resolveHostTimeZone())
+    expect(migrated.nextRunAt).toBe(committed)
+    expect(migrated.cron).toBe('0 9 * * *')
+    ledger.dispose()
+  })
+
+  it('operator upgrading a v3 rule that already has a zone keeps that stored zone', () => {
+    // Given a v3 row that already carries an explicit zone
+    // When the document is loaded and migrated
+    // Then the stored zone is kept rather than replaced by the Host zone
+    const root = tempRoot()
+    const committed = NOW + 120_000
+    const v3Document = JSON.stringify({
+      schemaVersion: 3, revision: 8,
+      tasks: [{
+        ...task('legacy-explicit'),
+        schedule: { enabled: false, cron: '0 9 * * *', timeZone: 'Europe/London', nextRunAt: committed, lastTriggeredAt: NOW - 60_000 },
+      }],
+      scheduler: { timeZone: 'UTC', ledgerId: 'ledger-v3b' },
+      recentRequests: [],
+    })
+    writeFileSync(join(root, 'ledger-v2.json'), v3Document, 'utf8')
+
+    // When it is loaded
+    const ledger = new HostTaskLedger(root, () => NOW + 2_000)
+
+    // Then the stored zone wins over the Host zone
+    expect(ledger.state().tasks[0].schedule!.timeZone).toBe('Europe/London')
+    ledger.dispose()
+  })
+
+  it('cold-starts an empty v4 ledger on a fresh directory and reloads an empty v4 document', () => {
     const fresh = tempRoot()
     const ledger = new HostTaskLedger(fresh, () => NOW)
     expect(ledger.state().tasks).toEqual([])
     expect(ledger.state().revision).toBe(0)
-    expect(JSON.parse(readFileSync(join(fresh, 'ledger-v2.json'), 'utf8')).schemaVersion).toBe(3)
+    expect(JSON.parse(readFileSync(join(fresh, 'ledger-v2.json'), 'utf8')).schemaVersion).toBe(6)
     ledger.dispose()
 
     const existing = tempRoot()
     writeFileSync(join(existing, 'ledger-v2.json'), JSON.stringify({
-      schemaVersion: 3, revision: 0, tasks: [], scheduler: { timeZone: 'UTC', ledgerId: 'ledger-empty' }, recentRequests: [],
+      schemaVersion: 5, revision: 0, tasks: [], scheduler: { timeZone: 'UTC', ledgerId: 'ledger-empty' }, recentRequests: [],
     }), 'utf8')
     const reloaded = new HostTaskLedger(existing, () => NOW)
     expect(reloaded.state().tasks).toEqual([])
@@ -686,7 +1074,7 @@ describe('ledger schema v3 migration', () => {
     ledger.dispose()
   })
 
-  it('round-trips a v3 document through persist and reload without field drift', () => {
+  it('round-trips a v4 document through persist and reload without field drift', () => {
     const root = tempRoot()
     const ledger = new HostTaskLedger(root, () => NOW)
     ledger.applyRequest('create', {
@@ -702,7 +1090,129 @@ describe('ledger schema v3 migration', () => {
     expect(after.revision).toBe(before.revision)
     expect(after.tasks).toEqual(before.tasks)
     expect(after.scheduler.ledgerId).toBe(before.scheduler.ledgerId)
-    expect(JSON.parse(readFileSync(join(root, 'ledger-v2.json'), 'utf8')).schemaVersion).toBe(3)
+    expect(JSON.parse(readFileSync(join(root, 'ledger-v2.json'), 'utf8')).schemaVersion).toBe(6)
     reloaded.dispose()
   })
 })
+describe('win32StartTimeMs', () => {
+  /** Records every script the fallback chain runs and answers per script. */
+  function recordingProbe(answers: (script: string) => string | undefined): { probe: PowerShellProbe; scripts: string[] } {
+    const scripts: string[] = []
+    return {
+      scripts,
+      probe: (script) => {
+        scripts.push(script)
+        return answers(script)
+      },
+    }
+  }
+
+  it('operator gets the lock identity from Win32_Process when Get-Process reads nothing', () => {
+    // Given issue #1629: an unprivileged caller gets no StartTime for a protected
+    // process (System, svchost), so the direct probe prints nothing
+    const { probe, scripts } = recordingProbe(script => script.includes('Win32_Process') ? '1789782344683' : '')
+
+    // When the Win32 start time is probed
+    const startTime = win32StartTimeMs(4, probe)
+
+    // Then the CIM fallback still supplies the identity of the PID the lock named
+    expect(startTime).toBe(1789782344683)
+    expect(scripts).toHaveLength(2)
+    expect(scripts[0]).toContain('Get-Process -Id 4')
+    expect(scripts[1]).toContain('Win32_Process -Filter "ProcessId=4"')
+    expect(scripts[1]).toContain('CreationDate')
+  })
+
+  it('operator keeps the Get-Process reading and skips the CIM probe when it answers', () => {
+    // Given a direct probe that answers
+    const { probe, scripts } = recordingProbe(() => '1789782344683')
+
+    // When the Win32 start time is probed
+    const startTime = win32StartTimeMs(1234, probe)
+
+    // Then the direct reading is used and no CIM script is built
+    expect(startTime).toBe(1789782344683)
+    expect(scripts).toHaveLength(1)
+    expect(scripts[0]).toContain('Get-Process -Id 1234')
+  })
+
+  it('operator gets no start time when neither probe answers', () => {
+    // Given both probes stay empty, which the lock treats as "cannot prove PID reuse"
+    const { probe, scripts } = recordingProbe(() => undefined)
+
+    // When the Win32 start time is probed
+    const startTime = win32StartTimeMs(4, probe)
+
+    // Then the caller gets no timestamp instead of a fabricated one
+    expect(startTime).toBeUndefined()
+    expect(scripts).toHaveLength(2)
+  })
+
+  it('operator sees a pid that is not a positive integer rejected before any script is built', () => {
+    // Given a probe that records whether it was consulted
+    let invocations = 0
+    const probe = () => { invocations += 1; return '1' }
+
+    // When a zero, negative and fractional pid are probed
+    const results = [win32StartTimeMs(0, probe), win32StartTimeMs(-4, probe), win32StartTimeMs(1.5, probe)]
+
+    // Then each is rejected and no script was built
+    expect(results).toEqual([undefined, undefined, undefined])
+    expect(invocations).toBe(0)
+  })
+})
+
+/**
+ * Lock-refusal text contract (issue #1730).
+ *
+ * The refusal message is not only a log line: the degraded-ledger reason the
+ * task board renders carries it, and the panel unpacks the owning pid out of
+ * it. Its shape must therefore keep naming the owner, so the panel can say
+ * which process to close instead of advising a restart that cannot win a lock.
+ */
+describe('task-board ledger lock refusal text', () => {
+  it('operator is told which live process owns the ledger', () => {
+    // Given a ledger directory whose lock a live owner already holds
+    const root = tempRoot()
+    const first = new HostTaskLedger(root, () => NOW)
+    // When a second board tries to start on the same directory
+    let message = ''
+    try {
+      new HostTaskLedger(root, () => NOW)
+    } catch (error) {
+      message = (error as Error).message
+    }
+    // Then the refusal names the owning process, which is what the panel shows
+    expect(message).toContain('already owned by process')
+    expect(/already owned by process\s+\d+/.test(message)).toBe(true)
+    first.dispose()
+  })
+})
+
+describe('HostTaskLedger label management', () => {
+  it('operator renaming and deleting labels rewrites every card and refuses an unknown label', () => {
+    // Given a ledger with two cards sharing one label
+    const root = tempRoot()
+    const ledger = new HostTaskLedger(root, () => NOW)
+    ledger.applyRequest('label-create-a', { kind: 'create', id: 'label-a', input: { title: 'A', description: '', prompt: 'a', tags: [{ name: 'ship' }] } })
+    ledger.applyRequest('label-create-b', { kind: 'create', id: 'label-b', input: { title: 'B', description: '', prompt: 'b', tags: [{ name: 'ship' }] } })
+    const before = ledger.state().revision
+
+    // When the operator renames the label
+    ledger.applyRequest('label-rename', { kind: 'rename-tag', from: 'ship', to: 'release' })
+
+    // Then both cards carry the new name and the revision moved exactly once
+    expect(ledger.state().tasks.map(entry => entry.tags?.map(tag => tag.name))).toEqual([['release'], ['release']])
+    expect(ledger.state().revision).toBe(before + 1)
+
+    // And renaming a label no card carries is refused
+    expect(() => ledger.applyRequest('label-rename-ghost', { kind: 'rename-tag', from: 'ghost', to: 'x' })).toThrow('label not found')
+
+    // When the operator deletes the label
+    ledger.applyRequest('label-delete', { kind: 'delete-tag', name: 'release' })
+
+    // Then no card carries a label any more
+    expect(ledger.state().tasks.map(entry => entry.tags)).toEqual([undefined, undefined])
+  })
+})
+

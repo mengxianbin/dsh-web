@@ -1,13 +1,28 @@
-# @linxin666/dsh-client-ui-web-ui-settings
+# dsh-web-settings · Web GUI Settings Enhancement & Appearance Preferences for DeepSeek Harness (DSH)
 
 English | [中文](README.zh.md)
 
-The dsh web UI plugin group for the DSH settings page: it adds a first-level settings section (a sibling nav item of General / Models / Plugins / Agent presets) that hosts the enable switches and configuration forms of the family plugins.
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-client-ui-web-ui-settings?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>Unified Settings Enhancement & Plugin Preferences for DeepSeek Harness (DSH)</strong><br>
+  <em>Unified Settings Section · Native ConfigForm Bridge · Legacy Settings Migration · UI Appearance & Preferences</em>
+</p>
+
+A settings enhancement plugin for DeepSeek Harness (DSH) Web GUI and official desktop client: registers the Web Extensions section in Settings to group extension management pages, enable toggles and configuration forms across the plugin family.
 
 ## What it is
 
-- **One section for the family**: on the DSH settings page it registers a first-level section with a static heading and cards for the remaining dsh web UI family plugins (task-board, remote-web-ui, describe-image). Each plugin card is collapsed by default and expands independently to show its enable switch and configuration form.
-- **First-level sections**: the Skin Center, the Desktop Pet and the Workshop (store card) each register as their own first-level settings section that opens directly expanded; the official Plugins section ships the official installer beside the plugin-manager tab provided by `dsh-plugin-manager`.
+- **One Web Extensions section**: the stable first-level `web-ui-plugins` entry hosts Web Plugins, Skins, Pet, Workshop and Usage as secondary TABs. The Web Plugins TAB holds the remaining dsh web UI family cards (task-board, remote-web-ui and others); each card expands independently to show its enable switch and configuration form.
+- **Standalone fallback**: Skin Center, Desktop Pet, Workshop and Usage keep their original first-level settings entries when this parent package is absent. The official Plugins section ships the official installer beside the plugin-manager tab provided by `dsh-plugin-manager`.
+- **The group is optional for the family plugins**: this package declares the `web-ui.plugin.item` list seat the family cards register into. A family plugin registers into that seat while this package is loaded, and into the official keyed `plugins.bundle.config` seat of the plugin manager page when it is not (keyed by the bundle's package name), so a profile that installs a family plugin without this group still reaches every card.
+- **Native settings transport**: the 0.1.7 settings surface addresses every configuration form by profile entry id. The host bridge resolves the entry id that owns each family namespace from the profile roster and reports it on its describe response, so the browser half binds the native shared form (`ctx.configForms`); the loopback HTTP pair stays the fallback for a page where no entry id resolves.
 
 ## Install
 
@@ -50,7 +65,7 @@ reverse_proxy 127.0.0.1:3080 {
 
 `header_up` with a value replaces any client-supplied value. Do not combine that line with a deletion of the same field: Caddy 2.6 applies grouped deletes after sets. If the Caddy systemd unit starts `caddy run --environ`, remove that flag or otherwise protect its output because it prints environment variables at startup.
 
-`web_settings_namespaces` in `settings.yaml` still decides which family namespaces the bridge serves; when absent, the built-in family list applies. Config changes require a DSH restart, while `web_settings_namespaces` is re-read for every bridge call.
+`web_settings_namespaces` in `settings.yaml` still decides which family namespaces the bridge serves; when absent, the built-in family list applies. The Host imports `settings.yaml` once on first boot and renames it to `settings.yaml.imported`, so the bridge reads the renamed import first, the pre-0.1.7 document second, and treats the Host-reported profile patch as a settings document only when its name says it is one. Config changes require a DSH restart, while `web_settings_namespaces` is re-read for every bridge call.
 
 ## Security model
 
@@ -81,4 +96,6 @@ See [issue #513](https://github.com/zhu1090093659/dsh-web/issues/513).
 
 ## Telemetry
 
-The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.
+The browser half sends one anonymous install heartbeat per UTC day to dsh-market.com: a random localStorage id plus this package's name, nothing else. The server stores only a salted hash of that id, never IP addresses, and exposes aggregate counts only.
+
+The telemetry switch in the General group at the top of the Web Plugins page turns the family-wide heartbeat off for every wired plugin at once. Reporting is on by default, so the switch shows on until it is turned off; it stores the preference in localStorage under `dsh-web-ui-telemetry-opt-out`, and a browser that sends Do Not Track stops reporting on its own while the switch keeps showing the stored preference and the row says so. The Workshop, plugin installation and online updates keep working either way. See [docs/telemetry.md](../../docs/telemetry.md) for the full contract.

@@ -4,9 +4,10 @@
  * the outer leg down without an unhandled error, and normal completion must
  * keep reusing the upstream keep-alive connection.
  */
-import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http'
+import { createServer, request as httpRequest, type IncomingHttpHeaders, type IncomingMessage, type Server } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
+import type { InnerAuth } from '../src/inner-auth.ts'
 import { proxyLoopbackHttp } from '../src/loopback-proxy.ts'
 
 interface TestServer {
@@ -157,6 +158,142 @@ describe('loopback proxy connection lifecycle', () => {
     } finally {
       await proxy.close()
       await up.close()
+    }
+  })
+})
+interface Captured {
+  headers: IncomingHttpHeaders
+  body: string
+}
+
+/** Upstream that records each request it received and answers 200 JSON. */
+async function serveEcho(): Promise<TestServer & { hits: Captured[] }> {
+  const hits: Captured[] = []
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = []
+    req.on('data', (chunk) => { chunks.push(chunk as Buffer) })
+    req.on('end', () => {
+      hits.push({ headers: { ...req.headers }, body: Buffer.concat(chunks).toString('utf8') })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+    })
+  })
+  return { ...(await listen(server)), hits }
+}
+
+/** Outer server whose every request is proxied with the given inner credential. */
+async function serveProxyWithAuth(port: number, auth: InnerAuth): Promise<TestServer> {
+  const server: Server = createServer((req, res) => { proxyLoopbackHttp(req, res, port, req.url ?? '/', auth) })
+  return await listen(server)
+}
+
+/** One POST through the proxy with explicit request headers. */
+function post(port: number, path: string, headers: Record<string, string>, body: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path, method: 'POST', headers }, (res) => {
+      const chunks: Buffer[] = []
+      res.on('data', (chunk) => { chunks.push(chunk as Buffer) })
+      res.on('end', () => { resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }) })
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+/**
+ * The re-issue forwards the caller headers it does not own: a plugin that
+ * authenticates its calls with a marker of its own reaches its route through
+ * the channel (issue #1925), while the authority, the tripwire marker, the
+ * caller cookie, its device credential and the forwarding marks stay here.
+ */
+describe('loopback proxy request headers', () => {
+  it('user keeps a plugin marker header on the re-issued request', async () => {
+    // Given a plugin route that only answers when its own marker arrives
+    const upstream = await serveEcho()
+    const proxy = await serveProxy(upstream.port)
+    try {
+      // When a paired client posts through the channel with that marker
+      const result = await post(proxy.port, '/api/dsh-im-connect/sessions/ensure', {
+        'content-type': 'application/json',
+        'x-dsh-im-connect-client': '1',
+      }, '{"channel":"im-1"}')
+      // Then the upstream route receives the marker and the body untouched
+      expect(result.status).toBe(200)
+      expect(upstream.hits).toHaveLength(1)
+      expect(upstream.hits[0].headers['x-dsh-im-connect-client']).toBe('1')
+      expect(upstream.hits[0].headers['content-type']).toBe('application/json')
+      expect(upstream.hits[0].body).toBe('{"channel":"im-1"}')
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
+  })
+
+  it('user keeps the loopback authority, the same-origin marker and the inner credential', async () => {
+    // Given a channel whose inner credential resolved and a client that sent
+    // its own authority, origin, cookie and a cross-site marker
+    const upstream = await serveEcho()
+    const auth: InnerAuth = { ready: async () => 'dsh-auth-abc=v1', invalidate: () => undefined }
+    const proxy = await serveProxyWithAuth(upstream.port, auth)
+    try {
+      // When the request is re-issued to loopback
+      await post(proxy.port, '/api/session.list', {
+        host: 'tunnel.example.com',
+        origin: 'https://tunnel.example.com',
+        referer: 'https://tunnel.example.com/app',
+        cookie: 'dsh_pair=device-1',
+        'sec-fetch-site': 'cross-site',
+        'content-type': 'application/json',
+      }, '{}')
+      // Then the upstream sees the rewritten authority, the synthetic marker,
+      // and the process credential in place of the pairing cookie
+      const seen = upstream.hits[0].headers
+      expect(seen.host).toBe(`127.0.0.1:${String(upstream.port)}`)
+      expect(seen['sec-fetch-site']).toBe('same-origin')
+      expect(seen.cookie).toBe('dsh-auth-abc=v1')
+      expect(seen.origin).toBeUndefined()
+      expect(seen.referer).toBeUndefined()
+    } finally {
+      await proxy.close()
+      await upstream.close()
+    }
+  })
+
+  it('user device credential and forwarding marks never reach the upstream', async () => {
+    // Given an edge that stamped forwarding marks and a client carrying its
+    // own device credential, a hop-by-hop nomination, and a custom header
+    const upstream = await serveEcho()
+    const proxy = await serveProxy(upstream.port)
+    try {
+      // When the request is re-issued to loopback
+      await post(proxy.port, '/api/pet/state', {
+        'x-dsh-remote-device': 'device-1',
+        'x-forwarded-for': '203.0.113.7',
+        'cf-connecting-ip': '203.0.113.7',
+        'x-real-ip': '203.0.113.7',
+        'accept-encoding': 'gzip',
+        'range': 'bytes=0-1',
+        'sec-fetch-mode': 'navigate',
+        connection: 'x-dsh-hop',
+        'x-dsh-hop': '1',
+        'x-dsh-pass': '2',
+        'content-type': 'application/json',
+      }, '{}')
+      // Then only the header this channel does not own is forwarded
+      const seen = upstream.hits[0].headers
+      expect(seen['x-dsh-remote-device']).toBeUndefined()
+      expect(seen['x-forwarded-for']).toBeUndefined()
+      expect(seen['cf-connecting-ip']).toBeUndefined()
+      expect(seen['x-real-ip']).toBeUndefined()
+      expect(seen['accept-encoding']).toBeUndefined()
+      expect(seen.range).toBeUndefined()
+      expect(seen['sec-fetch-mode']).toBeUndefined()
+      expect(seen['x-dsh-hop']).toBeUndefined()
+      expect(seen['x-dsh-pass']).toBe('2')
+      expect(seen['content-type']).toBe('application/json')
+    } finally {
+      await proxy.close()
+      await upstream.close()
     }
   })
 })

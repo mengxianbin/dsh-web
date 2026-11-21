@@ -9,6 +9,10 @@ permissions:
   issues: write
   pull-requests: write
 
+# 临时开放期开关（2026-10-27 起）：'true' 暂停关闭外部 PR；改回 'false' 即恢复原门禁。
+env:
+  ACCEPT_EXTERNAL_PRS: 'true'
+
 jobs:
   reject:
     name: Close documentation-only PRs
@@ -55,6 +59,13 @@ jobs:
             }
             if (hasWriteAccess) {
               console.log(`PR #${pr.number}: authored by write-access collaborator, keeping open.`);
+              return;
+            }
+
+            // 临时开放期：'true' 时不关闭纯文档 PR；恢复原门禁把 ACCEPT_EXTERNAL_PRS
+            // 改回 'false' 即可，下方关闭逻辑保持原样。
+            if ((process.env.ACCEPT_EXTERNAL_PRS || '').toLowerCase() === 'true') {
+              console.log(`PR #${pr.number}: temporary open window, skipping documentation-only closure.`);
               return;
             }
 

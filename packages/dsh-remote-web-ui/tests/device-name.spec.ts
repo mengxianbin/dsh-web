@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { deviceNameFromUserAgent } from '../src/client/device-name.ts'
+import { deviceDisplayName, deviceNameFromUserAgent, duplicateDeviceGroups } from '../src/client/device-name.ts'
 
 describe('deviceNameFromUserAgent', () => {
   it.each([
@@ -15,5 +15,46 @@ describe('deviceNameFromUserAgent', () => {
   it('returns no label for an absent or unrecognized User-Agent', () => {
     expect(deviceNameFromUserAgent()).toBeUndefined()
     expect(deviceNameFromUserAgent('Custom Client')).toBeUndefined()
+  })
+})
+
+describe('deviceDisplayName', () => {
+  it('user sees the custom name, then the UA name, then the fallback', () => {
+    // Given rows with a custom name, a blank custom name, and neither.
+    const named = { name: 'My phone', userAgent: 'Custom Client' }
+    const blank = { name: '   ', userAgent: 'Mozilla/5.0 (Linux; Android 16) Chrome/151.0.0.0' }
+    const bare = {}
+    // When the panel resolves each label...
+    // Then the custom name wins, then the UA-derived name, then the fallback.
+    expect(deviceDisplayName(named, 'Unknown device')).toBe('My phone')
+    expect(deviceDisplayName(blank, 'Unknown device')).toBe('Android · Chrome')
+    expect(deviceDisplayName(bare, 'Unknown device')).toBe('Unknown device')
+  })
+})
+
+describe('duplicateDeviceGroups', () => {
+  it('user sees rows grouped by an exact non-empty User-Agent, with singletons dropped', () => {
+    // Given two rows sharing one User-Agent plus several singletons.
+    const devices = [
+      { id: 'a', userAgent: 'UA-1' },
+      { id: 'b', userAgent: 'UA-2' },
+      { id: 'c', userAgent: 'UA-1' },
+      { id: 'd' },
+      { id: 'e', userAgent: '  ' },
+    ]
+    // When the roster groups its rows...
+    const groups = duplicateDeviceGroups(devices)
+    // Then only the shared User-Agent forms a group.
+    expect(groups).toEqual([[devices[0], devices[2]]])
+  })
+
+  it('user sees no duplicate group when every row is unique', () => {
+    // Given a roster with no repeated User-Agent.
+    const devices = [{ userAgent: 'A' }, { userAgent: 'B' }]
+    // When the roster groups its rows...
+    const groups = duplicateDeviceGroups(devices)
+    // Then no merge affordance would be offered.
+    expect(groups).toEqual([])
+    expect(duplicateDeviceGroups([])).toEqual([])
   })
 })

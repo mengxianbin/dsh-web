@@ -18,7 +18,7 @@ Issue #1300 要求 Web GUI 提供 English 与 Русский 支持。en 侧此�
 
 ## 纯 DOM 界面与运行时语言（GUI 实测跟进）
 
-首轮 GUI 实测暴露了外壳回退之外的第二种混杂来源：dsh-task-board、dsh-ssh、dsh-skill-explorer 三个包的 L1 侧边栏入口文案走包内模块级 t/tt 助手，按 `documentElement.lang` 二选 zh/en，而 SDK 的 Language 切换永远不会改它（实测切到 English 后这些入口仍是中文）。修复：模块级助手优先使用已接线的 SDK 翻译位（apply() 在字典注册后调用 `ctx.locale.bind(NS)`），仅在未接线时回退 document-language 二选；shared 的 sidebar-entry 核心新增可选 `refresh` 订阅，在语言变化时重贴 label / aria-label / tooltip；board / panel 挂载点在同一 `ctx.locale.subscribe` 信号下重渲染已打开的视图。
+首轮 GUI 实测暴露了外壳回退之外的第二种混杂来源：dsh-task-board、dsh-ssh、dsh-skill-explorer 三个包的 L1 侧边栏入口文案走包内模块级 t/tt 助手，按 `documentElement.lang` 二选 zh/en，而 SDK 的 Language 切换永远不会改它（实测切到 English 后这些入口仍是中文）。修复：模块级助手优先使用已接线的 SDK 翻译位（apply() 在字典注册后调用 `ctx.locale.bind(NS)`），仅在未接线时回退 document-language 二选；shared 的 sidebar-entry 核心新增可选 `refresh` 订阅，在语言变化时重贴 label / aria-label / tooltip；board / panel 挂载点在同一 `ctx.locale.subscribe` 信号下重渲染已打开的视图。 dsh-session-archive 的归档会话设置卡也归入同一模式（#1830）：`t()` 优先使用 `apply()` 中 `setRuntimeTranslate(ctx.locale.bind(NS))` 装配的模块级翻译位，document-language 的 zh/en 二选降级为未接线时的回落（`src/client/locales.ts`），回归覆盖见 `tests/card-locale.spec.ts`。该卡尚未订阅 `ctx.locale.subscribe`，所以卡片已打开时切换语言仍要等下一次渲染才生效。
 
 ## Alternatives considered
 

@@ -1,6 +1,19 @@
-# dsh-i18n
+# dsh-i18n · DeepSeek Harness (DSH) 国际化多语言（中/英/俄）本地化增强插件
 
 [English](README.md) | 中文
+
+<p align="center">
+  <img src="https://img.shields.io/npm/v/@linxin666/dsh-i18n?style=flat-square" alt="Version">
+  &nbsp;
+  <img src="https://img.shields.io/badge/DSH-%3E%3D0.2.1--rc.3-4c6ef5?style=flat-square&amp;labelColor=454a54" alt="DSH">
+  &nbsp;
+  <img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>DeepSeek Harness（DSH）官方 Web GUI 与桌面客户端国际化多语言扩展与文案中心</strong><br>
+  <em>多语言本地化支持 · 俄语 Русский 语言包 · 覆盖全家桶插件命名空间 · 优雅降级无感知</em>
+</p>
 
 dsh Web GUI 的语言包插件：向 Web GUI 语言目录注册 Русский（俄语），并集中承载全部家族插件命名空间的 ru 字典，让外部翻译贡献者能在一处翻译与维护俄语文案。
 
@@ -17,24 +30,26 @@ dsh Web GUI 的语言包插件：向 Web GUI 语言目录注册 Русский�
 
 | 命名空间 | 来源包 |
 | --- | --- |
-| `doctor` | dsh-doctor |
 | `git-graph` | dsh-git-graph |
+| `liangshen` | dsh-liangshen |
 | `dsh-web-ui-market` | dsh-market |
 | `pet` | dsh-pet |
 | `settings.pluginManager` | dsh-plugin-manager |
+| `dsh-web-ui-preset-center` | dsh-preset-center |
 | `remote` | dsh-remote-web-ui |
 | `session-id` | dsh-session-id |
+| `dsh-web-ui-session-archive` | dsh-session-archive |
 | `dsh-skill-explorer` | dsh-skill-explorer |
 | `dsh-ssh` | dsh-ssh |
 | `task-board` | dsh-task-board |
-| `describe-image` | dsh-tool-describe-image |
+| `task-board-github` | dsh-task-board-github |
+| `update` | dsh-update |
 | `dsh-web-ui-usage` | dsh-usage |
 | `web-ui-plugins` | dsh-web-settings |
 
 ## 安装
 
-需要 DSH 0.1.2-alpha.2 或更高版本：插件针对 0.1.2-alpha.2 DSH cohort 开发，其
-`@deepseek-ai/*` 运行时服务由宿主自身提供。
+需要 DSH 0.2.1-rc.3 或更高版本：插件针对 0.2.1-rc.3 DSH cohort 开发，其 `@deepseek-ai/*` 运行时服务由宿主自身提供。
 
 在你的 profile（如 `~/.dsh/profiles/web`）中执行：
 

@@ -10,7 +10,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { buildConnectConfig, connectChain, connectClient } from '../src/engine/connection-pool.ts'
+import { DEFAULTS, WINDOWS_AGENT_PIPE, buildConnectConfig, connectChain, connectClient, parseJumpSpec } from '../src/engine/connection-pool.ts'
 import type { SshHostEntry } from '../src/protocol.ts'
 import type { HostStore } from '../src/store.ts'
 
@@ -112,6 +112,19 @@ function passwordEntry(alias: string, overrides: Partial<SshHostEntry> = {}): Ss
   } as SshHostEntry
 }
 
+/** The minimal pool engine shape connectChain consumes. */
+function poolEngine(store: HostStore): unknown {
+  return {
+    store,
+    opts: {
+      idleTimeoutMs: 1, connectTimeoutMs: 1, keepaliveIntervalMs: 1,
+      maxOutputBytes: 1, defaultExecTimeoutMs: 1, defaultMaxWorkers: 1, sftpConcurrency: 1,
+    },
+    pool: new Map(),
+    acquireQueue: new Map(),
+  }
+}
+
 /** Distinctive engine options used to verify timeouts reach the ssh2 config. */
 function defaultOpts(): Record<string, number> {
   return {
@@ -124,6 +137,15 @@ function defaultOpts(): Record<string, number> {
     sftpConcurrency: 1,
   }
 }
+
+describe('connection timeout (issue #1931)', () => {
+  it('operator gets a 30 s default pre-ready ceiling instead of the previous 15 s', () => {
+    // Given no engine option override
+    // When the engine applies its defaults
+    // Then slow PAM / LDAP password authentication has 30 s to finish
+    expect(DEFAULTS.connectTimeoutMs).toBe(30_000)
+  })
+})
 
 describe('connectClient', () => {
   beforeEach(() => {
@@ -155,6 +177,31 @@ describe('connectClient', () => {
     expect(client).toBeDefined()
     const instance = sshMock.instances[0]
     expect(instance.destroyCalls).toBe(0)
+  })
+
+  it('operator reads a user-authentication timeout when the key exchange already completed', async () => {
+    // Given a client whose key exchange completed
+    // When ssh2 reports its pre-ready timeout
+    // Then the rejection names user authentication and the shared budget
+    sshMock.behaviors.push((client) => {
+      client.emit('handshake')
+      client.emit('error', Object.assign(new Error('Timed out while waiting for handshake'), { level: 'client-timeout' }))
+    })
+    const config = buildConnectConfig(passwordEntry('slow-auth'), undefined, defaultOpts() as never)
+
+    await expect(connectClient(config)).rejects.toThrow('SSH authentication timed out after 7001 ms')
+  })
+
+  it('operator reads a connection or key-exchange timeout before the handshake completes', async () => {
+    // Given a client that has not completed the key exchange
+    // When ssh2 reports its pre-ready timeout
+    // Then the rejection names TCP connect or key exchange rather than authentication
+    sshMock.behaviors.push((client) => {
+      client.emit('error', Object.assign(new Error('Timed out while waiting for handshake'), { level: 'client-timeout' }))
+    })
+    const config = buildConnectConfig(passwordEntry('slow-connect'), undefined, defaultOpts() as never)
+
+    await expect(connectClient(config)).rejects.toThrow('SSH connection timed out after 7001 ms before key exchange completed')
   })
 
   it('threads EngineOptions timeouts into the ssh2 connect config', async () => {
@@ -238,11 +285,147 @@ describe('buildConnectConfig agent auth', () => {
     const previous = process.env.SSH_AUTH_SOCK
     delete process.env.SSH_AUTH_SOCK
     const previousPlatform = process.platform
-    // Force the non-Windows branch (Pageant is the Windows fallback).
+    // Force the non-Windows branch (the native named pipe is the Windows fallback).
     Object.defineProperty(process, 'platform', { value: 'linux' })
     try {
       const entry = passwordEntry('agent-none', { auth: { kind: 'agent' } })
       expect(() => buildConnectConfig(entry, undefined, defaultOpts() as never)).toThrow(/ssh-agent is not available/)
+    } finally {
+      if (previous !== undefined) process.env.SSH_AUTH_SOCK = previous
+      Object.defineProperty(process, 'platform', { value: previousPlatform })
+    }
+  })
+
+  it('member leaving the agent path empty on Windows connects through the native OpenSSH pipe (#1910)', () => {
+    // Given a Windows machine with no SSH_AUTH_SOCK and an agent-auth host
+    // that left the agent path empty (the form's "auto-detect" choice)
+    const previous = process.env.SSH_AUTH_SOCK
+    delete process.env.SSH_AUTH_SOCK
+    const previousPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    try {
+      const entry = passwordEntry('agent-win', { auth: { kind: 'agent' } })
+
+      // When the connect config is built
+      const config = buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then it dials the pipe the native ssh-agent service listens on, not
+      // PuTTY's "pageant" protocol name
+      expect(config.agent).toBe(WINDOWS_AGENT_PIPE)
+      expect(config.agent).toBe('\\\\.\\pipe\\openssh-ssh-agent')
+      expect(config.agent).not.toBe('pageant')
+    } finally {
+      if (previous !== undefined) process.env.SSH_AUTH_SOCK = previous
+      Object.defineProperty(process, 'platform', { value: previousPlatform })
+    }
+  })
+
+  it('member pinning pageant on Windows keeps the PuTTY endpoint', () => {
+    // Given a Windows user who explicitly chose PuTTY Pageant
+    const previous = process.env.SSH_AUTH_SOCK
+    delete process.env.SSH_AUTH_SOCK
+    const previousPlatform = process.platform
+    Object.defineProperty(process, 'platform', { value: 'win32' })
+    try {
+      const entry = passwordEntry('agent-pageant', { auth: { kind: 'agent', agentPath: 'pageant' } })
+
+      // When the connect config is built
+      const config = buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then the explicit endpoint wins over the new default
+      expect(config.agent).toBe('pageant')
+    } finally {
+      if (previous !== undefined) process.env.SSH_AUTH_SOCK = previous
+      Object.defineProperty(process, 'platform', { value: previousPlatform })
+    }
+  })
+})
+
+describe('buildConnectConfig agent forwarding', () => {
+  /** Distinctive endpoint so a resolution that ignored the environment is visible. */
+  const FORWARD_SOCK = '/tmp/dsh-ssh-forward-agent.sock'
+
+  it('member enabling forwarding on a password host gets a forwarding config with a concrete agent', () => {
+    // Given a password host with forwarding enabled and one local agent endpoint
+    const previous = process.env.SSH_AUTH_SOCK
+    process.env.SSH_AUTH_SOCK = FORWARD_SOCK
+    try {
+      const entry = passwordEntry('forward-password', { forwardAgent: true })
+
+      // When the connect config is built
+      const config = buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then the connection forwards the local agent and still authenticates
+      // with the stored password
+      expect(config.agentForward).toBe(true)
+      expect(config.agent).toBe(FORWARD_SOCK)
+      expect(config.password).toBe('secret')
+    } finally {
+      if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previous
+    }
+  })
+
+  it('member leaving forwarding off gets neither agent nor agentForward on the config', () => {
+    // Given the same local agent endpoint, with the host opt-in left out
+    const previous = process.env.SSH_AUTH_SOCK
+    process.env.SSH_AUTH_SOCK = FORWARD_SOCK
+    try {
+      const entry = passwordEntry('no-forward')
+
+      // When the connect config is built
+      const config = buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then the endpoint is never mentioned, so nothing is forwarded
+      expect(config.agentForward).toBeUndefined()
+      expect(config.agent).toBeUndefined()
+    } finally {
+      if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previous
+    }
+  })
+
+  it('member enabling forwarding on an agent-auth host reuses the configured agent path', () => {
+    // Given an agent-auth host pinned to an explicit endpoint, forwarding on,
+    // and a different endpoint in the environment
+    const previous = process.env.SSH_AUTH_SOCK
+    process.env.SSH_AUTH_SOCK = FORWARD_SOCK
+    try {
+      const entry = passwordEntry('forward-agent', {
+        auth: { kind: 'agent', agentPath: '/tmp/pinned-agent.sock' },
+        forwardAgent: true,
+      })
+
+      // When the connect config is built
+      const config = buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then the configured path is both the auth and the forwarded endpoint
+      expect(config.agent).toBe('/tmp/pinned-agent.sock')
+      expect(config.agentForward).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previous
+    }
+  })
+
+  it('operator enabling forwarding with no agent endpoint gets an actionable forwarding error', () => {
+    // Given a host with forwarding on and no endpoint on this machine
+    const previous = process.env.SSH_AUTH_SOCK
+    delete process.env.SSH_AUTH_SOCK
+    const previousPlatform = process.platform
+    // Force the non-Windows branch (Pageant is the Windows fallback).
+    Object.defineProperty(process, 'platform', { value: 'linux' })
+    try {
+      const entry = passwordEntry('forward-none', { forwardAgent: true })
+
+      // When the connect config is built
+      const build = (): unknown => buildConnectConfig(entry, undefined, defaultOpts() as never)
+
+      // Then the engine names the missing endpoint and the way out, instead of
+      // letting ssh2's raw "You must set a valid agent path" surface
+      expect(build).toThrow(/agent forwarding is enabled for this host/)
+      expect(build).toThrow(/SSH_AUTH_SOCK/)
+      expect(build).not.toThrow(/You must set a valid agent path/)
     } finally {
       if (previous !== undefined) process.env.SSH_AUTH_SOCK = previous
       Object.defineProperty(process, 'platform', { value: previousPlatform })
@@ -316,5 +499,127 @@ describe('connectChain', () => {
     expect(hopAInstance.endCalls).toBe(1)
     // The failed hop B is destroyed by connectClient on its own failure.
     expect(hopBInstance.destroyCalls).toBe(1)
+  })
+
+  it('seeds the transport from the entry ProxyCommand', async () => {
+    const entry = passwordEntry('proxied', { proxyCommand: 'echo %h %p' })
+    sshMock.behaviors.push((client) => { client.emit('ready') })
+    const engine = poolEngine(fakeStore([entry]))
+
+    await connectChain(engine as never, entry)
+
+    const instance = sshMock.instances[0]
+    const sock = instance?.connectConfig?.['sock'] as { destroy?: unknown } | undefined
+    expect(sock).toBeDefined()
+    expect(typeof sock?.destroy).toBe('function')
+    ;(sock as { destroy: () => void }).destroy()
+  })
+
+  it('resolves an address-form hop and reuses the target credentials', async () => {
+    const target = passwordEntry('target', { proxyJump: ['ops@bastion.example.com:2222'] })
+    sshMock.behaviors.push((client) => { client.emit('ready') })
+    sshMock.behaviors.push((client) => { client.emit('ready') })
+    const engine = poolEngine(fakeStore([target]))
+
+    await connectChain(engine as never, target)
+
+    const hopConfig = sshMock.instances[0]?.connectConfig as Record<string, unknown> | undefined
+    expect(hopConfig?.['host']).toBe('bastion.example.com')
+    expect(hopConfig?.['port']).toBe(2222)
+    expect(hopConfig?.['username']).toBe('ops')
+    // An ad-hoc hop carries no auth of its own; it reuses the target's.
+    expect(hopConfig?.['password']).toBe('secret')
+  })
+
+  it('names the hop when a hop connect fails', async () => {
+    const target = passwordEntry('target', { proxyJump: ['ops@bastion.example.com:2222'] })
+    sshMock.behaviors.push((client) => { client.emit('error', new Error('handshake dropped')) })
+    const engine = poolEngine(fakeStore([target]))
+
+    await expect(connectChain(engine as never, target))
+      .rejects.toThrow("proxyJump hop 'ops@bastion.example.com:2222' (ops@bastion.example.com:2222): handshake dropped")
+  })
+
+  it('member forwarding through an ad-hoc address hop leaves the hop itself unforwarded', async () => {
+    // Given a forwarding target that jumps through an address-form hop
+    const previous = process.env.SSH_AUTH_SOCK
+    process.env.SSH_AUTH_SOCK = '/tmp/dsh-ssh-hop-agent.sock'
+    try {
+      const target = passwordEntry('forward-target', { proxyJump: ['ops@bastion.example.com:2222'], forwardAgent: true })
+      sshMock.behaviors.push((client) => { client.emit('ready') })
+      sshMock.behaviors.push((client) => { client.emit('ready') })
+      const engine = poolEngine(fakeStore([target]))
+
+      // When the whole chain connects
+      await connectChain(engine as never, target)
+
+      // Then the ad-hoc hop carries no forwarding (it was never configured as
+      // a Host), while the target session does forward
+      const hopConfig = sshMock.instances[0]?.connectConfig as Record<string, unknown> | undefined
+      const targetConfig = sshMock.instances[1]?.connectConfig as Record<string, unknown> | undefined
+      expect(hopConfig?.['agentForward']).toBeUndefined()
+      expect(hopConfig?.['agent']).toBeUndefined()
+      expect(targetConfig?.['agentForward']).toBe(true)
+    } finally {
+      if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previous
+    }
+  })
+
+  it('member forwarding through a configured alias hop gets that hop own forwarding setting', async () => {
+    // Given a configured hop that enables forwarding and a plain target
+    const previous = process.env.SSH_AUTH_SOCK
+    process.env.SSH_AUTH_SOCK = '/tmp/dsh-ssh-hop-agent.sock'
+    try {
+      const hop = passwordEntry('forwarding-bastion', { forwardAgent: true })
+      const target = passwordEntry('plain-target', { proxyJump: ['forwarding-bastion'] })
+      sshMock.behaviors.push((client) => { client.emit('ready') })
+      sshMock.behaviors.push((client) => { client.emit('ready') })
+      const engine = poolEngine(fakeStore([hop, target]))
+
+      // When the whole chain connects
+      await connectChain(engine as never, target)
+
+      // Then each hop follows its own stored setting, not the target's
+      const hopConfig = sshMock.instances[0]?.connectConfig as Record<string, unknown> | undefined
+      const targetConfig = sshMock.instances[1]?.connectConfig as Record<string, unknown> | undefined
+      expect(hopConfig?.['agentForward']).toBe(true)
+      expect(hopConfig?.['agent']).toBe('/tmp/dsh-ssh-hop-agent.sock')
+      expect(targetConfig?.['agentForward']).toBeUndefined()
+    } finally {
+      if (previous === undefined) delete process.env.SSH_AUTH_SOCK
+      else process.env.SSH_AUTH_SOCK = previous
+    }
+  })
+
+  it('refuses a ProxyCommand on a hop that is not the first one', async () => {
+    const hopA = passwordEntry('a', { proxyCommand: 'echo a' })
+    const hopB = passwordEntry('b', { proxyCommand: 'echo b' })
+    const target = passwordEntry('target', { proxyJump: ['a', 'b'] })
+    sshMock.behaviors.push((client) => { client.emit('ready') })
+    const engine = poolEngine(fakeStore([hopA, hopB, target]))
+
+    await expect(connectChain(engine as never, target)).rejects.toThrow(/only supported on the first hop/)
+    expect(sshMock.instances[0]?.endCalls).toBe(1)
+  })
+
+  it('refuses an entry that declares both transports (hand-edited store file)', async () => {
+    const hop = passwordEntry('hop')
+    const entry = passwordEntry('both', { proxyJump: ['hop'], proxyCommand: 'echo %h' })
+    const engine = poolEngine(fakeStore([hop, entry]))
+
+    await expect(connectChain(engine as never, entry)).rejects.toThrow(/both proxyCommand and proxyJump/)
+    expect(sshMock.instances).toHaveLength(0)
+  })
+})
+
+describe('parseJumpSpec', () => {
+  it('parses [user@]host[:port] and rejects what is not an address', () => {
+    expect(parseJumpSpec('bastion')).toEqual({ host: 'bastion' })
+    expect(parseJumpSpec('ops@bastion.example.com:2222')).toEqual({ host: 'bastion.example.com', port: 2222, user: 'ops' })
+    expect(parseJumpSpec('[::1]:22')).toEqual({ host: '::1', port: 22 })
+    expect(parseJumpSpec('host:0')).toBeUndefined()
+    expect(parseJumpSpec('host:not-a-port')).toBeUndefined()
+    expect(parseJumpSpec('   ')).toBeUndefined()
   })
 })

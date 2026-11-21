@@ -7,10 +7,14 @@
  * consult.
  *
  * Security model:
- * - While `requirePairingForLan` is on (default), every request must carry a
- *   live paired-device cookie, enforced before any bytes are forwarded and
- *   before any host call. With the policy off, the cookie gate is skipped
- *   (the local-only denials below still apply).
+ * - Every request must carry a live paired-device credential, enforced before
+ *   any bytes are forwarded and before any host call. This gate is
+ *   unconditional and does NOT follow `requirePairingForLan`: the channel
+ *   re-issues traffic with the process's own browser-auth credential, so it is
+ *   an authentication amplifier — an unpaired caller admitted here would reach
+ *   the full host API without ever holding that credential. The LAN policy
+ *   governs the plain `/api` surface only (whether the harness fence's LAN
+ *   auto-trust stands on its own); it can never widen this channel.
  * - A paired remote desktop is a full-control credential: the browser half
  *   flips the official UI into host mode (the transport ownsHost hook), so
  *   the configuration plane (settings, credentials, presets, deliverables)
@@ -69,15 +73,13 @@ function isSafeSegment(segment: string): boolean {
 export interface RemoteApiDeps {
   /** The pairing service (device gate + cookie name). */
   service: PairingService
-  /** The local webServer port the loopback proxy connects to. */
-  port: number
   /**
-   * Live policy: whether the paired-device cookie gates the /remote channel.
-   * When false, requests are proxied without a cookie (the loopback-only
-   * denials still apply). A function is re-read per request, so a settings
-   * edit takes effect without a restart. Defaults to true.
+   * Local webServer port the loopback proxy connects to, read per request:
+   * `undefined` before the listener binds (a recompose pass can run this
+   * apply ahead of the bind), in which case the handlers refuse with 503
+   * instead of minting an `:undefined` URL.
    */
-  requirePairingForLan?: boolean | (() => boolean)
+  port: () => number | undefined
   /**
    * The process's inner browser-auth credential attached to re-issued
    * requests (the connection plugin's /api route enforces that cookie and
@@ -139,24 +141,22 @@ export function pairedDeviceIdOf(req: IncomingMessage, service: PairingService):
 
 /**
  * Build the remote desktop channel HTTP routes.
- * @param deps - pairing service + local port + live pairing policy.
+ * @param deps - pairing service + local port + inner credential.
  * @returns the routes to register on webServer.
  */
 export function makeRemoteApiRoutes(deps: RemoteApiDeps): WebRoute[] {
-  const { service, port, requirePairingForLan = true } = deps
+  const { service } = deps
 
   const handler = (req: IncomingMessage, res: ServerResponse): void => {
-    // Cookie gate first — same order as /m/api. Do not buffer an unpaired body.
-    // With the live policy off, untrusted-but-policy-open callers are proxied
-    // (a stale client rewrite must not 403); loopback-only denials stay below.
-    const require = typeof requirePairingForLan === 'function' ? requirePairingForLan() : requirePairingForLan
-    if (require) {
-      const paired = pairedDeviceIdOf(req, service)
-      if (paired === undefined) {
-        req.resume()
-        envelopeError(res, 403, 'invalid-request', 'unpaired', 'this device is not paired with the desktop')
-        return
-      }
+    // Paired credential first — before any bytes are buffered or forwarded.
+    // Unconditional by design: this channel attaches the process's own
+    // browser-auth cookie to every re-issued call, so admitting an unpaired
+    // caller would hand out that credential's authority (issue #1665).
+    const paired = pairedDeviceIdOf(req, service)
+    if (paired === undefined) {
+      req.resume()
+      envelopeError(res, 403, 'invalid-request', 'unpaired', 'this device is not paired with the desktop')
+      return
     }
 
     const method = req.method ?? 'GET'
@@ -180,6 +180,14 @@ export function makeRemoteApiRoutes(deps: RemoteApiDeps): WebRoute[] {
       return
     }
 
+    const port = deps.port()
+    if (port === undefined) {
+      // The listener has not bound yet (a recompose pass): refuse instead of
+      // minting an http://127.0.0.1:undefined target; the desktop retries.
+      req.resume()
+      envelopeError(res, 503, 'invalid-request', 'port-unbound', 'the local web server port is not bound yet; retry shortly')
+      return
+    }
     proxyLoopbackHttp(req, res, port, `${inner}${url.search}`, deps.auth)
   }
 
@@ -187,7 +195,19 @@ export function makeRemoteApiRoutes(deps: RemoteApiDeps): WebRoute[] {
 }
 
 /**
- * Map one outer upgrade URL onto the loopback path (query string included).
+ * Map one outer upgrade URL onto the loopback path, dropping the cookieless
+ * device credential on the way in.
+ *
+ * The outer handshake carries the device id as `?device=<id>` because WebSocket
+ * handshakes cannot carry headers from the Web API. That id is a live session
+ * credential — it opens the full host API through this same channel — and the
+ * inner leg is a request the rest of the loopback origin sees (on a WebSocket
+ * leg, a raw handshake request line written to a loopback socket), so forwarding
+ * it handed a working credential to every other observer of the local port for
+ * no benefit: the gate above has already authenticated the caller, and no
+ * upstream route reads the parameter (the gateway mux matches on path alone).
+ * The rest of the query rides through unchanged, so a caller's own parameters
+ * still reach the upstream.
  */
 export function upgradeInnerPath(reqUrl: string | undefined, fallbackPath: string): string {
   if (reqUrl === undefined || reqUrl === '') return fallbackPath
@@ -199,6 +219,7 @@ export function upgradeInnerPath(reqUrl: string | undefined, fallbackPath: strin
   }
   const inner = innerPathOf(url.pathname)
   if (inner === undefined) return fallbackPath
+  url.searchParams.delete(REMOTE_DEVICE_QUERY)
   return `${inner}${url.search}`
 }
 
@@ -209,24 +230,29 @@ export function upgradeInnerPath(reqUrl: string | undefined, fallbackPath: strin
  * @returns the upgrade routes to register on webServer.
  */
 export function makeRemoteApiUpgradeRoutes(deps: RemoteApiDeps): WebUpgradeRoute[] {
-  const { service, port, requirePairingForLan = true } = deps
+  const { service } = deps
 
   const handlerFor = (fallbackPath: string) => (req: IncomingMessage, socket: Duplex, head: Buffer): void => {
-    const require = typeof requirePairingForLan === 'function' ? requirePairingForLan() : requirePairingForLan
-    if (require) {
-      // WebSocket handshakes cannot carry headers from the Web API, so the
-      // cookieless credential rides the query; the cookie stays the primary.
-      let queryDevice: string | undefined
-      try {
-        queryDevice = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get(REMOTE_DEVICE_QUERY) ?? undefined
-      } catch { /* fall through to the cookie */ }
-      const deviceId = pairedDeviceIdOf(req, service)
-      const paired = deviceId ?? (queryDevice !== undefined && service.touchDevice(queryDevice) ? queryDevice : undefined)
-      if (paired === undefined) {
-        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
-        socket.destroy()
-        return
-      }
+    // WebSocket handshakes cannot carry headers from the Web API, so the
+    // cookieless credential rides the query; the cookie stays the primary.
+    // The gate is unconditional here too (issue #1665).
+    let queryDevice: string | undefined
+    try {
+      queryDevice = new URL(req.url ?? '/', 'http://127.0.0.1').searchParams.get(REMOTE_DEVICE_QUERY) ?? undefined
+    } catch { /* fall through to the cookie */ }
+    const deviceId = pairedDeviceIdOf(req, service)
+    const paired = deviceId ?? (queryDevice !== undefined && service.touchDevice(queryDevice) ? queryDevice : undefined)
+    if (paired === undefined) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    const port = deps.port()
+    if (port === undefined) {
+      // Same unbound-port refusal as the HTTP leg: no :undefined handshake.
+      socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n')
+      socket.destroy()
+      return
     }
     const inner = upgradeInnerPath(req.url, fallbackPath)
     const denied = loopbackOnlyDenial(inner.split('?')[0] ?? inner)

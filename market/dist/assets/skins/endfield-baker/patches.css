@@ -1,0 +1,2634 @@
+/* ============================================================================
+   终末地 · BAKER  —  L3 结构补丁
+   语汇：细网格 / 四角角标 / 青色信号 / 信号黄选中 / 切角控制台卡片 / 等宽微标签
+   层级顺序：0 全局 · 1 侧栏 · 2 会话头 · 3 消息 · 4 工具卡 · 5 输入区 · 6 浮层
+   ========================================================================== */
+
+/* ---------------------------------------------------------------- 0 全局 --- */
+
+[id="root"] { background: none; }
+
+/* 焦点环：应用给的是浏览器默认的 `auto`（浅灰 1px），重绘时也会留白边；统一换成青色细环，
+   并且只对键盘导航显示 —— 鼠标点击（浏览器只给 :focus、不给 :focus-visible）不留任何环。
+   归档管理的「已选 N 项」这类带 tabindex 的标签，以前点一下就留一个蓝框，就是它。 */
+:is(button, a, [role="button"], [role="tab"], [role="switch"], input, select, textarea, summary):focus-visible {
+  outline-color: var(--ef-cyan) !important;
+  outline-offset: 0 !important;
+}
+:not(:focus-visible):focus {
+  outline: none !important;
+}
+/* 「残影」的真正机制（用户复现出来的）：按住 Shift 点击时，浏览器把这次焦点算成键盘导航，
+   于是 :focus-visible 命中、框上留下一条焦点环 —— 普通点击不会。聊天中间行与整条侧栏都是
+   纯鼠标操作的区域，这里干脆不要焦点环（用户点名的就是这两处）；输入框/设置页控件仍保留青环。 */
+[data-disclosure-row]:focus,
+[data-disclosure-row]:focus-visible,
+[data-pane="sidebar"] :focus,
+[data-pane="sidebar"] :focus-visible {
+  outline: none !important;
+}
+
+
+/* 选中文本沿用 BAKER 列表的黄/墨对比 */
+[data-pane="sidebar"] ::selection { background: rgb(var(--ef-cyan-rgb) / .3); }
+
+/* 等宽微标签工具类（皮肤内部复用） */
+[data-slot="sidebar"] [class*="brandName"],
+[data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"]) {
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .16em;
+}
+/* 「工作区」这类分区小标题：跟上面的按钮同一套黑体，颜色对齐右侧那排功能键 */
+[data-slot="sidebar.workspaces"] [class*="sectionLabel"] {
+  font-family: var(--ef-ui);
+  font-size: 12px;
+  letter-spacing: .02em;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* ---------------------------------------------------------------- 1 侧栏 --- */
+
+[data-pane="sidebar"] {
+  border-right: 1px solid var(--ef-line);
+}
+
+/* 会话行 = BAKER 通讯名录。形状/底纹/尺寸/缩进/配色/圆角全部在第 15 节（按参考站复刻），
+   这里只留定位与过渡底座 */
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] {
+  position: relative;
+  transition: background-color .13s, color .25s ease;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"],
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] * {
+  color: #1c1c1c;                      /* 源站 .subcard.is-selected .subcard__text */
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] [class*="title"] {
+  font-size: 12.5px;
+  letter-spacing: .01em;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] [class*="matrix"] rect,
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] svg rect {
+  fill: var(--ef-signal-ink);
+}
+
+/* 侧栏状态方阵图标 = 终末地像素指示灯 */
+[class*="matrix"] rect { fill: var(--ef-cyan); }
+[class*="matrix"][data-state="error"] rect { fill: var(--ef-alert); }
+
+/* 新建会话 / 导航行：青色描边块，悬停点亮 */
+[data-dsh-part="new-session"],
+button[class*="newSession"],
+[data-pane="sidebar"] button[class*="entry"] {
+  border-radius: 2px;
+  transition: background-color .13s, border-color .13s, color .13s;
+}
+[data-dsh-part="new-session"]:hover,
+button[class*="newSession"]:hover,
+[data-pane="sidebar"] button[class*="entry"]:hover {
+  background: rgb(var(--ef-cyan-rgb) / .12);
+  box-shadow: inset 2px 0 0 var(--ef-cyan);
+}
+[data-dsh-part="new-session"] {
+  border: 1px solid var(--ef-line);
+  margin: 3px 14px !important;   /* 与下面四行导航同宽：导航 x12 宽256，这里 x14 + 252 = 同一条右缘 */
+}
+[data-dsh-part="new-session"]:hover { border-color: rgb(var(--ef-cyan-rgb) / .55); }
+
+/* 侧栏分区标题：细线 + 等宽字 */
+[data-slot="sidebar.workspaces"] [class*="sectionHeader"] {
+  border-bottom: 1px solid var(--ef-line);
+}
+[data-slot="sidebar"] [class*="searchInput"] {
+  border-radius: 2px;
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+}
+
+/* ------------------------------------------------------------ 2 会话标头 --- */
+
+[data-slot="main.conversation"] header {
+  position: relative;
+  border: 1px solid var(--ef-edge-dark);
+  border-radius: var(--ef-radius) var(--ef-radius) 0 0;
+  /* 不要 overflow: hidden —— 会把下拉菜单（··· / 文件资源管理器）伸出顶栏的部分
+     整个裁掉：看不见也点不着（用户报的「按钮被顶栏圈住」就是它）。
+     装饰伪元素自己带圆角即可，见下两条。 */
+  overflow: visible;
+  background: var(--dsw-alias-bg-layer-1);
+}
+[data-slot="main.conversation"] header > * { position: relative; z-index: 1; }
+
+/* 左侧双青条（BAKER 标头标志） */
+[data-slot="main.conversation"] header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  border-top-left-radius: var(--ef-radius);   /* header 不再 overflow:hidden，装饰自己裁角 */
+  pointer-events: none;
+  background:
+    linear-gradient(var(--ef-cyan), var(--ef-cyan)) 0 0 / 4px 100% no-repeat,
+    linear-gradient(var(--ef-cyan), var(--ef-cyan)) 6px 0 / 4px 100% no-repeat;
+}
+/* 右上角：BAKER 原版标头图形（自参考图裁切）—— 高度拉满整个顶栏，宽度按原图 504:70 走
+   （2026-09-28 重裁：原 399×71 少截了右侧 105px，用户给了新范围参考；资产 = baker-ui.png (1835,139,504,70)，
+     比例 7.2 与 skin.css 的 --ef-art-ratio 必须一致） */
+[data-slot="main.conversation"] header::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: auto;
+  aspect-ratio: 504 / 70;   /* = --ef-art-ratio（7.2），改图时两处一起改 */
+  background: url("assets/baker-header.png") right center / 100% 100% no-repeat;
+  border-top-right-radius: var(--ef-radius);   /* header 不再 overflow:hidden，装饰自己裁角 */
+  opacity: 1;
+  pointer-events: none;
+}
+/* 右侧栏收起：顶栏功能键整体左移，挪到标头图形的左侧（77px = 顶栏高度） */
+[data-slot="main.conversation"] header [class*="titleRow"] {
+  padding-right: calc(var(--ef-art-ratio) * 75px + 14px);   /* 75px = 顶栏内容高；+14px = 功能键多让一点 */
+  /* titleRow 与 tabs 同为 header>* 且同 z-index:1，tabs 在 DOM 之后胜出 →
+     页签区域把下拉菜单（··· / 打开方式）的点击截走。抬到 tabs 之上。 */
+  z-index: 3;
+}
+/* 右侧栏展开：顶栏本来就紧凑，标头图形直接让位。
+   注意：展开时宿主是**把 data-rightbar-collapsed 整个摘掉**（不是改成 false），
+   所以不能只认 ="false"，得从右侧栏自己的 data-sidebar-right-open 反向判断。 */
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"]) [data-slot="main.conversation"] header::after,
+[data-rightbar-collapsed="false"] [data-slot="main.conversation"] header::after {
+  display: none;
+}
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"]) [data-slot="main.conversation"] header [class*="titleRow"],
+[data-rightbar-collapsed="false"] [data-slot="main.conversation"] header [class*="titleRow"] {
+  padding-right: 0;
+}
+[data-slot="main.conversation"] header [class*="crumbCurrent"],
+[data-slot="main.conversation"] header [class*="title"] {
+  font-weight: 600;
+  letter-spacing: .015em;
+}
+[data-slot="main.conversation"] header [class*="headerUtilities"] {
+  display: flex;
+  align-items: center;
+  /* 下拉菜单（··· / 打开方式）挂在功能键容器里；同为 header>* 的 tabs 在 DOM 之后、
+     同 z-index 后者胜出，菜单项 z-100 也白搭（视觉在上、点击被 tabs 截走）。
+     把容器层级抬到 tabs 之上即可（用户报的「菜单大部分点不动」）。 */
+  position: relative;
+  z-index: 3;
+}
+
+/* 页签：等宽字 + 青色下划线指示 */
+[data-slot="main.conversation"] header [class*="tabs"] {
+  border-bottom: 0;
+}
+button[role="tab"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  letter-spacing: .1em;
+  border-radius: 0;
+}
+button[role="tab"][class*="tabActive"],
+button[role="tab"][aria-selected="true"] {
+  color: var(--ef-cyan) !important;
+  box-shadow: inset 0 -2px 0 var(--ef-cyan);
+}
+
+/* ---------------------------------------------------------------- 3 消息 --- */
+
+/* 用户消息 = BAKER 白色胶囊（浅色主题改为墨色胶囊） */
+[data-chat-flow-kind="user"] [class*="userStack"] {
+  align-items: flex-end;
+}
+[data-chat-flow-kind="user"] [class*="bubble"],
+[data-chat-flow-kind="steering"] [class*="bubble"],
+[class*="userRow"] [class*="bubble"] {
+  position: relative;
+  background: rgba(240, 238, 238, calc(.72 + .28 * var(--ef-bubble-alpha, 1)));
+  color: #14100f;
+  border: 1px solid rgba(255, 255, 255, .22);
+  border-radius: 14px 14px 3px 14px;
+  padding: 10px 15px;
+  font-size: 13.5px;
+  line-height: 1.72;
+  box-shadow: 0 8px 26px rgba(0, 0, 0, .45);
+}
+/* 胶囊右下角的信号黄切角 */
+[data-chat-flow-kind="user"] [class*="bubble"]::after,
+[data-chat-flow-kind="steering"] [class*="bubble"]::after,
+[class*="userRow"] [class*="bubble"]::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 11px;
+  height: 11px;
+  background: var(--ef-signal);
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  border-bottom-right-radius: 3px;
+  opacity: .9;
+}
+[data-chat-flow-kind="user"] [class*="attachmentRow"] [class*="frame"] {
+  border-radius: 8px;
+  border: 1px solid var(--ef-line-strong);
+}
+
+/* 助手消息 = 左侧青色导轨 + 行首方块标记 */
+[data-chat-flow-kind="assistant-step"] {
+  position: relative;
+  padding-left: 15px;
+  border-left: 2px solid rgb(var(--ef-cyan-rgb) / .34);
+}
+/* （原「助手步骤行首 8px 青色方块」已按用户要求删除：最终输出和思考行都嫌它丑） */
+[data-chat-flow-kind="assistant-step"] [class*="markdown"] {
+  font-size: 13.5px;
+  line-height: 1.78;
+}
+
+/* 时间与操作行：等宽微标签 */
+[class*="timeStart"], [class*="timeEnd"] {
+  font-family: var(--ef-mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+}
+[data-chat-flow-kind="user"] [class*="actions"] button,
+[data-chat-flow-kind="assistant-step"] [class*="actions"] button {
+  border-radius: 2px;
+}
+
+/* 上下文注入 / 系统提示：第 12 节统一按「工具卡」的样子做（这里不再单独画灰导轨） */
+[class*="thinkBody"], [data-context-injection-body], [data-system-prompt-body] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+}
+[class*="thinkingQuote"] {
+  border-left: 2px solid rgb(var(--ef-signal-rgb) / .5);
+  font-family: var(--ef-mono);
+}
+
+/* turn 状态行（深度求索中…） */
+[class*="turnStatus"]:not([class*="turnStatusClock"]) {
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .06em;
+  color: var(--ef-cyan);
+}
+[class*="turnStatusClock"] {
+  font-family: var(--ef-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------ 4 工具控制台 --- */
+
+[data-slot="tool.call.toolview"] > [data-tool],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) {          /* 思考条：与代码/工具调用卡完全同一套设置（三类条统一） */
+  position: relative;
+  background: rgba(41, 43, 42, .62);
+  border: 1px solid var(--ef-line);
+  border-left: 2px solid var(--ef-cyan);
+  border-radius: 2px;
+  /* 右下切角改用背景层画的那块三角形（见本节末），不再用 clip-path：
+     clip-path 会把这些行提成合成层，悬停重绘时留下一块白框残影（用户点名多次的 bug） */
+  font-family: var(--ef-mono);
+  transition: background-color .14s, border-color .14s;
+}
+[data-slot="tool.call.toolview"] > [data-tool]:hover,
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]):hover {
+  background: rgb(var(--ef-cyan-rgb) / .08);
+  border-color: rgb(var(--ef-cyan-rgb) / .45);
+}
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"] {
+  border-left-color: var(--ef-alert);
+  background: rgba(255, 106, 82, .07);
+}
+/* 思考卡与代码卡要一样高（36px = 1 上框 + 34 行 + 1 下框）：
+   第 12 节那套尺寸是给「裸行」用的，卡片里的行回到应用的 5px 内边距，
+   缺的高度由卡片的上下内边距补（6 + 24 + 6 = 36），这样卡片内的行仍是 24px 高。 */
+[data-slot="tool.call.toolview"] > [data-tool] [data-disclosure-row],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) [data-disclosure-row] {
+  padding: 5px 10px;
+  margin-left: 0;   /* 卡片自带左导轨，取消第 12 节给裸行补的 -5px */
+}
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) {
+  box-sizing: border-box;
+  min-height: 36px;
+  /* 竖向不留内边距：卡片固定 36px，留 5px 会把 34px 的行推到 +6 —— 行里的文字与行尾
+     下拉键就比代码卡低 5px，而且行会从卡片下沿溢出 4px。去掉后行落在 +1（框内），
+     与代码卡、工具卡同一条中线。 */
+  padding-top: 0;
+  padding-bottom: 0;
+  /* 思考卡的容器比代码卡窄 2px（应用给助手步骤留了 2px 缩进）：往左顶 2px，
+     卡片框与代码卡/上下文卡同一条左缘（425）。图标位置由第 12 节的 -2px 补偿改回 0 来配平。 */
+  margin-left: -2px;
+}
+[data-slot="tool.call.toolview"] > [data-tool] [class*="title"],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) [class*="title"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  letter-spacing: .08em;
+}
+[data-slot="tool.call.toolview"] > [data-tool] [class*="summary"],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) [class*="summary"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  letter-spacing: .01em;
+}
+[data-slot="tool.call.toolview"] > [data-tool] [class*="chevron"] { opacity: .65; }
+[data-slot="tool.call.toolview"] > [data-tool][data-state="ok"] [class*="iconIdle"],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) [class*="iconIdle"] { color: var(--ef-cyan); }
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"] [class*="iconIdle"] { color: var(--ef-alert); }
+
+/* 子调用：虚线导轨 */
+[class*="subCalls"] {
+  border-left: 1px dashed var(--ef-line-strong);
+  margin-left: 9px;
+  padding-left: 7px;
+}
+
+/* 工具详情里的 markdown / 代码 */
+[data-slot="tool.call.toolview"] [class*="md-code-block"],
+[data-slot="tool.call.toolview"] pre {
+  border-radius: 2px;
+  border-left: 2px solid var(--ef-cyan-deep);
+}
+[class*="toolCallPayload"], [class*="resultPreview"], [class*="contentText"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+}
+
+/* 代码块通用：青色导轨 + 斜纹标题 */
+[class*="md-code-block"] {
+  border-radius: 2px;
+  border-left: 2px solid var(--ef-cyan-deep);
+}
+[class*="md-code-block"] > :first-child {
+  font-family: var(--ef-mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  background-image: repeating-linear-gradient(135deg, var(--ef-hatch) 0 6px, transparent 6px 13px);
+}
+[class*="markdown"] :not(pre) > code {
+  font-family: var(--ef-mono);
+  border-radius: 2px;
+}
+[class*="markdown"] blockquote {
+  border-left: 2px solid var(--ef-cyan);
+  font-family: var(--ef-mono);
+  font-size: 12.5px;
+}
+
+/* ---------------------------------------------------------------- 5 输入 --- */
+
+/* 底板：BAKER 底栏灰 #3C3B39，四周留边距 */
+[data-composer-card] {
+  background: rgba(60, 59, 57, .94);
+  border: 1px solid var(--ef-edge);
+  border-radius: var(--ef-radius);
+  /* 下边距调小 = 整块输入卡往下挪，让「输入卡↔统计条」的间距等于「统计条↔窗口底」 */
+  margin: 0 12px 5px;
+  padding: 10px;
+}
+/* 输入卡磨砂不能挂在卡片本体上（2026-09-30 实测坑，现象＝任务期间鼠标悬浮发送键时整块内容上窜 ~510px）。
+   backdrop-filter ≠ none 会给 fixed 后代造 containing block：app 的「拖拽把手」悬浮气泡
+   （._bubble_12mhf_1[data-dsh-part="resize-handle"]，position:fixed + 文档绝对坐标 left/top）
+   于是改为相对输入卡解析，落到卡片下方 ~505px、且溢出到滚动内容之外 → 撑大 scrollBody.scrollHeight，
+   滚动跟随（ScrollFollow.jump）跳到新底部 → 消息区+输入卡整体被顶上去，气泡一隐一现即来回抖。
+   改挂到无子元素的 ::before 上：不再给 app 后代造 containing block，视觉等价（卡片底 rgba(60,59,57,.94) 近乎不透明）。
+   实测：挂在卡片上 → 错位（seatY 102）；摘掉 → 480 帧 0 次错位。 */
+[data-composer-card]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  pointer-events: none;
+  backdrop-filter: blur(var(--dsh-input-card-blur, 0px));
+}
+/* 输入胶囊：左边缘对齐左下角「＋」按钮的左边缘；文字左右内边距同值
+   （--ef-input-pad 28px = 加号按钮宽，于是文字左端正好落在加号右边缘上） */
+[data-input-scroll] {
+  background: rgba(240, 238, 238, .96);
+  border-radius: var(--ef-radius);
+  max-height: var(--ef-input-max);
+  overflow-y: auto;
+  margin-left: var(--ef-input-inset);
+  margin-right: var(--ef-input-inset);
+  padding: 11px var(--ef-input-pad);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .5), 0 6px 20px rgba(0, 0, 0, .28);
+}
+[data-input-scroll] [data-composer-input],
+[data-input-scroll] [data-composer-placeholder] {
+  color: #14100f;
+}
+[data-input-scroll] [data-composer-input] {
+  padding-left: 7px;        /* 正文左端继续往左挪，落在与占位文字的中点 */
+}
+[data-input-scroll] [data-composer-placeholder] {
+  opacity: .5;
+  left: 7px;                /* 占位文字往右挪同样的距离，二者在 447 汇合 */
+}
+[data-input-scroll] ::selection { background: rgb(var(--ef-cyan-rgb) / .35); color: #06171c; }
+
+/* 输入区按钮：圆角方块化 */
+[data-slot="conversation.composer"] button[class*="add"],
+[data-slot="conversation.input.left"] button,
+[data-slot="conversation.input.right"] button,
+[data-slot="conversation.input.model"] button {
+  border-radius: 3px;
+}
+[data-slot="conversation.input.right"] button:last-child {
+  border-radius: 3px;
+}
+
+/* 底部统计 / 提示条 */
+[class*="composerStats"], [class*="stats"] {
+  font-family: var(--ef-mono);
+  font-size: 10.5px;
+  letter-spacing: .05em;
+}
+
+/* ---------------------------------------------------------------- 6 浮层 --- */
+
+/* 通用弹窗外框。⚠ 提问窗（Mbwy4a_card）不吃这一条：它是 role=dialog 的 section，
+   皮肤这个 4px 圆角的描边和卡片本体的圆角对不上（用户反馈的「灰色描边错位」），
+   而且用户明确说「提问窗的描边直接用 DeepSeek 预设的就行，留着青色提交键已经有皮肤味了」。 */
+[role="dialog"]:not(:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"])) {
+  border: 1px solid var(--ef-line-strong);
+  border-radius: 4px;
+  box-shadow: var(--ef-shadow-3);
+}
+/* 提问窗：皮肤只动底色与提交键，描边/圆角/阴影全都交回应用。
+   应用自己在卡片上挂了一条 0.5px 的浅色环（box-shadow）—— 半像素环在缩放屏上会糊成
+   一条错位的灰边，用户两次都指着它说「没去干净」，所以这里连它一起去掉。 */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]),
+:is([class*="Mbwy4a_frame"], [class*="mAtvLq_frame"]) {
+  border: 0 !important;
+  box-shadow: none !important;
+  border-radius: var(--ef-radius);
+}
+[role="menu"], [class*="menu"][role="menu"], [class*="menuView"] {
+  border-radius: 3px;
+}
+[role="tooltip"], [data-slot="shell.overlay"] [role="tooltip"] {
+  border: 1px solid var(--ef-cyan);
+  border-radius: 2px;
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+/* 提问框（ask_user_question）：渲染在 `wSkVaW_composerSeat` 里，属于页面文档（皮肤 CSS 能命中）。
+   实测类名：整张卡 `Mbwy4a_card`(section)、头 `Mbwy4a_header`（青色装饰是它的 ::before）、
+   按钮行 `Mbwy4a_footer`；按钮走通用类 `_button_cfgyt_*` + `_primary_cfgyt_*`（提交）/
+   `_outline_cfgyt_*`（跳过本题）。 */
+/* 只改卡片底色：头部那条青色装饰是 Mbwy4a_header::before 画的，一并去掉 */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]),
+:is([class*="Mbwy4a_header"], [class*="mAtvLq_header"]) {
+  background-image: none !important;
+  background-color: #1b1d1c !important;
+}
+/* ⚠ 必须连卡片一起限定：聊天页顶栏的类名里也含 "header"，
+   只写 [class*="header"]::before 会把顶栏那条双青条一起删掉（上一版就是这个 bug） */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) :is([class*="Mbwy4a_header"], [class*="mAtvLq_header"])::before,
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) :is([class*="Mbwy4a_header"], [class*="mAtvLq_header"])::after {
+  background-image: none !important;
+}
+/* 提交键 = 应用那套 _primary_ 按钮（旧配色是发暗的 #0E7D95），换亮青；
+   「跳过本题」是 _outline_ 变体，显式恢复成描边样式（第一版把整排按钮都刷成青色了）。 */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) button[class*="_primary_"] {
+  background-image: none !important;
+  background-color: var(--ef-cyan) !important;
+  border-color: var(--ef-cyan) !important;
+  color: #08171c !important;
+  font-weight: 600;
+}
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) button[class*="_primary_"]:hover {
+  background-color: #3fdcff !important;
+}
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) button[class*="_outline_"] {
+  background-image: none !important;
+  background-color: transparent !important;
+  border: 1px solid var(--ef-line-strong) !important;
+  color: var(--dsw-alias-label-secondary) !important;
+}
+
+/* 主按钮（模型页「保存」、其它确定键…）：应用的旧配色是发暗的蓝，统一换成亮信号青 */
+[class*="VOzbGW_panel"] button:is([class*="primary"], [class*="Primary"], [class*="submit"], [class*="Submit"]),
+[class*="VOzbGW_panel"] button[class*="_primary_"],
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) button[class*="_primary_"] {
+  background-image: none !important;
+  background-color: var(--ef-cyan) !important;
+  border-color: var(--ef-cyan) !important;
+  color: #08171c !important;
+  font-weight: 600;
+}
+[class*="VOzbGW_panel"] button:is([class*="primary"], [class*="Primary"]):hover,
+[class*="VOzbGW_panel"] button[class*="_primary_"]:hover {
+  background-color: #3fdcff !important;
+}
+
+[class*="hovercard"], [class*="hoverCard"] {
+  border: 1px solid var(--ef-line-strong);
+  border-radius: 3px;
+}
+[data-slot="rightbar"] [class*="panel"] {
+  border-left: 1px solid var(--ef-line);
+}
+/* 快捷键提示 / 空态 */
+[class*="empty"] [class*="title"], [class*="hero"] [class*="title"] {
+  letter-spacing: .02em;
+}
+
+/* ------------------------------------------------- 7 终末地补充语汇 --- */
+
+/* 思考行 = 信号黄导轨（与青色工具导轨区分） */
+[data-chat-flow-kind="assistant-step"]:has([class*="thinkingToggle"]),
+[data-chat-flow-kind="assistant-step"]:has([class*="thinkingQuote"]) {
+  border-left-color: rgb(var(--ef-signal-rgb) / .38);
+}
+[data-chat-flow-kind="assistant-step"]:has([class*="thinkingToggle"])::before,
+[data-chat-flow-kind="assistant-step"]:has([class*="thinkingQuote"])::before {
+  background: var(--ef-signal);
+}
+[class*="thinkingToggle"] {
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .06em;
+}
+[class*="thinkingQuote"] [class*="markdown"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* 上下文注入 / 系统提示：整行升格成卡片（原来只是一条灰导轨），与工具/思考卡同一套 */
+[data-chat-flow-kind="context"] > div > [class*="root"],
+[data-chat-flow-kind="system-prompt"] > div > [class*="root"] {
+  position: relative;
+  box-sizing: border-box;
+  background-color: rgba(41, 43, 42, .62) !important;
+  background-image:
+    linear-gradient(to bottom left, #292b2a calc(var(--ef-cut) * .7071), transparent 0);
+  background-repeat: no-repeat !important;
+  background-position: right bottom !important;
+  background-size: var(--ef-cut) var(--ef-cut) !important;
+  border: 1px solid var(--ef-line) !important;
+  border-left: 2px solid var(--ef-cyan) !important;
+  border-radius: 2px;
+  /* 卡片左缘落在 425（与代码卡同一条导轨）：内容列 435 + 行内边距 8 = 图标 443、标题 461，
+     与代码卡逐像素对齐。竖向内边距 0：卡片高 = 1 上框 + 34 行 + 1 下框 = 36，
+     与思考卡/代码卡同高（原来上下各 6px，比它们高 12px）。 */
+  padding: 0 10px 0 7px !important;
+  margin: -1px 0 0 0 !important;
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  color: var(--dsw-alias-label-tertiary);
+  transition: background-color .14s, border-color .14s;
+}
+[data-chat-flow-kind="context"] > div > [class*="root"]:hover,
+[data-chat-flow-kind="system-prompt"] > div > [class*="root"]:hover {
+  background-color: rgb(var(--ef-cyan-rgb) / .08) !important;
+  border-color: rgb(var(--ef-cyan-rgb) / .45) !important;
+  border-left-color: var(--ef-cyan) !important;
+}
+/* 上下文注入行的行首图标：应用给的是灰的（label-tertiary），其余折叠行都是青色 —— 统一成青 */
+[data-chat-flow-kind="context"] [class*="leading"],
+[data-chat-flow-kind="system-prompt"] [class*="leading"] { color: var(--ef-cyan); }
+[data-chat-flow-kind="context"] [class*="leading"] svg,
+[data-chat-flow-kind="system-prompt"] [class*="leading"] svg { opacity: 1; }
+
+/* 折叠行悬停：青色描边（展开态不再铺底：卡片的底已经够用，铺了会在卡片顶部留下一条色带） */
+[data-disclosure-row]:hover {
+  background-color: rgb(var(--ef-cyan-rgb) / .06);
+}
+[data-disclosure-row][aria-expanded="true"]:not(:hover) {
+  background-color: transparent;
+}
+[data-disclosure-row][aria-expanded="true"] {
+  box-shadow: inset 0 -1px 0 var(--ef-line);
+}
+
+/* 用户消息操作条：等宽、右对齐 */
+[data-chat-flow-kind="user"] [class*="actions"] {
+  font-family: var(--ef-mono);
+  letter-spacing: .08em;
+}
+
+/* 队列 / 任务坞 / turn 尾行 */
+[data-queue-dock], [data-turn-tail], [class*="queueDock"] {
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+}
+
+/* 会话列最小化的空白态：给个取景框提示 */
+[data-slot="conversation.composer"] [class*="hero"] {
+  letter-spacing: .02em;
+}
+
+/* 图片附件：相框圆角跟全局一致（含深一层的内嵌 img，避免出现方角） */
+/* 相框本身 + 任何一层容器 + 里面的 img 全部压成同一个圆角，
+   否则应用在别的尺寸档位上会用自己的 16px/更大圆角盖回来 */
+[data-slot="conversation.message.images"],
+[data-slot="conversation.message.images"] *:not(img),
+[class*="gallery"],
+[class*="gallery"] *:not(img) {
+  border-radius: var(--ef-radius) !important;
+  overflow: hidden;
+}
+[data-slot="conversation.message.images"] img,
+[class*="gallery"] img,
+[class*="gallery"] [class*="frame"] img {
+  border-radius: var(--ef-radius) !important;
+  display: block;
+}
+[class*="gallery"] [class*="frame"],
+[data-slot="conversation.message.images"] [class*="frame"] {
+  border: 1px solid var(--ef-line-strong);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .32);
+}
+[class*="gallery"] [class*="frame"]:hover {
+  border-color: var(--ef-cyan);
+}
+
+/* 输入区「待发送附件」缩略图：应用给的是 999px（近圆），这里压回全局 12px */
+[data-slot="conversation.input.attachments"] [class*="_54WpYG_thumbnail"],
+[data-slot="conversation.input.attachments"] [class*="_54WpYG_imageItem"],
+[data-slot="conversation.input.attachments"] [class*="JVDQca_item"] {
+  border-radius: var(--ef-radius) !important;
+  overflow: hidden;
+}
+[data-slot="conversation.input.attachments"] img {
+  border-radius: inherit !important;
+  display: block;
+}
+
+/* --------------------------------------------- 8 BAKER 终端窗口 --- */
+
+/* 会话区 = 悬浮终端窗口：内缩 + 单像素描边 + 四角取景标 ----
+   桌面端（DesktopUI）的 ConversationRoot.module.css 哈希是 Dc7zOa_*（web 是 wSkVaW_*）——
+   实测 desktop 包里 wSkVaW_ 出现 0 次 → 本节四条规则在桌面端一条都不匹配，
+   现象就是「聊天页整块底板（磨砂底/灰边/圆角/三色条）全都没有」。两类哈希并联即可两端通吃。 */
+:is([class*="wSkVaW_root"], [class*="Dc7zOa_root"]) {
+  position: relative;
+  margin: 8px 10px 10px 6px;
+  border: 0;
+  border-radius: var(--ef-radius);
+  background: rgba(19, 21, 20, .62);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .42);
+  overflow: hidden;
+}
+
+/* 聊天页：自己的浅灰近白描边 + BAKER 磨砂灰底板（顶边与顶栏那条青线分成两条横线） */
+:is([class*="wSkVaW_body"], [class*="Dc7zOa_body"]) {
+  position: relative;
+  margin-top: var(--ef-deck);
+  border: 1px solid var(--ef-edge);
+  border-top: 0;
+  /* 只有下两角圆：上两角要方（新会话页与非新对话页共用这份资源，四角都圆会把非新对话页也改圆） */
+  border-radius: 0 0 var(--ef-radius) var(--ef-radius);
+  background-color: rgb(var(--ef-chat-bg) / .80);
+  background-image: url("assets/baker-chat.jpg");
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-blend-mode: soft-light;   /* 截图纹理与底色叠加，得出 BAKER 的磨砂质感 */
+  /* ★这里**不能**挂 backdrop-filter（2026-09-30 实测坑，与输入卡那次同源 —— 详见坑 36）：
+     backdrop-filter ≠ none 会给**该元素的所有 fixed 后代**造包含块（本机 Chrome 实测：
+     任意 div 加 blur(10px) 后，其 position:fixed 子元素按该 div 的 padding box 解析；
+     挂 filter 同理，position:sticky 不造）。聊天区里到处是 app 的 Tooltip 气泡
+     （`._bubble_*`，position:fixed + 视口坐标写进内联 left/top、内联在触发器里），
+     一旦被当成包含块 → 气泡落到视口外 → 撑大 wSkVaW_scrollBody.scrollHeight
+     → ScrollFollow.jump 把消息区+输入卡整体顶上去（实测气泡位移 +744px scrollHeight）。
+     而这里这层模糊本来也看不见：身后只有一层平色（html rgb(19,21,20)），
+     blur 对平色是恒等变换、saturate(1.08) 的色差被 0.80 底色稀释 ——
+     A/B 整块截图逐像素比对 mean|ΔRGB| = 0.039 / 765（≈0），故直接摘掉。 */
+}
+
+/* 黑色实体：压在三色条与滚动内容之间，下边缘就是聊天页真正的顶边——
+   两端平齐，右端「三色条区」按 --ef-notch 整段下凹（BAKER 的凹槽），
+   于是滚动的文字永远撞不到三色条上 */
+:is([class*="wSkVaW_body"], [class*="Dc7zOa_body"])::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: calc(-1 * var(--ef-deck));
+  height: calc(var(--ef-deck) + var(--ef-notch));
+  background: #060807;
+  z-index: 2;                       /* 必须压住滚动内容，否则文字会从黑实体上冒出来 */
+  clip-path: polygon(
+    0 0,
+    100% 0,
+    100% var(--ef-deck),
+    calc(100% - var(--ef-right-flat)) var(--ef-deck),
+    calc(100% - var(--ef-right-flat) - var(--ef-notch)) calc(var(--ef-deck) + var(--ef-notch)),
+    calc(100% - var(--ef-strip-zone) + var(--ef-notch)) calc(var(--ef-deck) + var(--ef-notch)),
+    calc(100% - var(--ef-strip-zone)) var(--ef-deck),
+    0 var(--ef-deck)
+  );
+  pointer-events: none;
+}
+
+/* 顶边描边 = 左平段 + 45° 斜边 + 凹槽底边 + 45° 斜边；三色条压在平齐高度上 */
+:is([class*="wSkVaW_body"], [class*="Dc7zOa_body"])::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: calc(-1 * var(--ef-deck));
+  height: calc(var(--ef-deck) + var(--ef-notch));
+  pointer-events: none;
+  z-index: 3;
+  background-image:
+    linear-gradient(#e202e2, #e202e2),
+    linear-gradient(#f3f100, #f3f100),
+    linear-gradient(#01f1f1, #01f1f1),
+    linear-gradient(var(--ef-edge), var(--ef-edge)),
+    linear-gradient(45deg, transparent calc(50% - .7px), var(--ef-edge) calc(50% - .7px) calc(50% + .7px), transparent calc(50% + .7px)),
+    linear-gradient(var(--ef-edge), var(--ef-edge)),
+    linear-gradient(135deg, transparent calc(50% - .7px), var(--ef-edge) calc(50% - .7px) calc(50% + .7px), transparent calc(50% + .7px)),
+    linear-gradient(var(--ef-edge), var(--ef-edge));
+  background-repeat: no-repeat;
+  background-size:
+    58px 3px, 58px 3px, 58px 3px,
+    calc(100% - var(--ef-strip-zone)) 1px,
+    var(--ef-notch) var(--ef-notch),
+    calc(var(--ef-strip-zone) - 2 * var(--ef-notch) - var(--ef-right-flat)) 1px,
+    var(--ef-notch) var(--ef-notch),
+    var(--ef-right-flat) 1px;
+  background-position:
+    right 172px top var(--ef-deck),
+    right 106px top var(--ef-deck),
+    right 40px top var(--ef-deck),
+    left 0 top var(--ef-deck),
+    right calc(var(--ef-strip-zone) - var(--ef-notch)) top var(--ef-deck),
+    right calc(var(--ef-right-flat) + var(--ef-notch)) bottom 0,
+    right var(--ef-right-flat) top var(--ef-deck),
+    right 0 top var(--ef-deck);
+}
+
+/* 会话窗口内的滚动口：顶部留出凹槽深度，底部留余量 */
+[data-conversation-scroll] {
+  padding-top: calc(var(--ef-notch) + 14px);
+  padding-bottom: 10px;
+}
+
+/* 工具卡在窗口内稍微收紧 */
+[data-slot="tool.call.toolview"] > [data-tool] {
+  margin: 1px 0;
+}
+
+/* ------------------------------------------------ 9 侧栏与输入区收尾 --- */
+
+/* 侧栏品牌行的斜纹信号条 */
+[data-pane="sidebar"] [class*="logoRow"] {
+  border-bottom: 1px solid var(--ef-line);
+  background-image: repeating-linear-gradient(135deg, var(--ef-hatch) 0 5px, transparent 5px 11px);
+  background-repeat: no-repeat;
+  background-size: 72px 3px;
+  background-position: left bottom;
+}
+
+/* 新建会话 = 终末地动作块 */
+[data-dsh-part="new-session"],
+button[class*="newSession"] {
+  border: 1px solid rgb(var(--ef-cyan-rgb) / .35);
+  background: rgb(var(--ef-cyan-rgb) / .07);
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+/* New Baker 的图标与文案在按钮里居中（::before 的右外边距会把图标顶偏） */
+[data-dsh-part="new-session"]::before {
+  align-self: center;
+}
+[data-dsh-part="new-session"]:hover,
+button[class*="newSession"]:hover {
+  background: rgb(var(--ef-cyan-rgb) / .16);
+  border-color: var(--ef-cyan);
+  box-shadow: none;
+}
+[data-dsh-part="new-session"] span,
+button[class*="newSession"] span {
+  letter-spacing: .14em;
+}
+/* 文案改写：新会话 → New Baker（原文字用 0 号字藏掉，再用 ::after 写上）
+   ★ 必须 `:not([class*="Mask"])`：应用 DOM 里 `.hHd-Xa_newSessionLabelMask` 的类名**也含**
+     "newSessionLabel" 子串，不加排除就会让 ::after 渲染两遍 —— 一行里出现两个 "New Baker"
+     （mask 盒 50px 高、label 盒 25px 高 → 一高一低，看着像「错位」，用户报的就是这个）。
+     这条是 making-skin §4.2「短子串污染」的实例。 */
+[data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"]) {
+  font-size: 0;
+  letter-spacing: 0;
+}
+[data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"])::after {
+  content: "New Baker";
+  font-size: 11px;
+  line-height: 22px;
+  letter-spacing: .16em;
+}
+/* 图标换成参考图里的白色对话气泡（已抠成透明 PNG） */
+[data-dsh-part="new-session"] svg { display: none; }
+[data-dsh-part="new-session"]::before {
+  content: "";
+  display: inline-block;
+  vertical-align: middle;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 14px;
+  margin-right: 8px;
+  background: url("assets/new-session.png") center / contain no-repeat;
+}
+
+/* 侧栏导航行：图标随悬停点亮为信号青 */
+[data-pane="sidebar"] button[class*="entry"] { border-radius: 2px; }
+[data-pane="sidebar"] button[class*="entry"] [class*="entryIcon"] {
+  color: var(--dsw-alias-label-tertiary);
+}
+[data-pane="sidebar"] button[class*="entry"]:hover [class*="entryIcon"] {
+  color: var(--ef-cyan);
+}
+
+/* 用量行是「主按钮 + 刷新 + 折叠」的复合行（外层 div 才是那一行），
+   原来只有外层的 8px 圆角 + 白 6% 底，与上面三行（2px 圆角 + 青 14% 底）不像。
+   这里整体拉齐：同一个圆角、同一个激活底色、同一个悬停导轨。 */
+[data-pane="sidebar"] [data-dsh-usage-entry] {
+  border-radius: 2px;
+  transition: background-color .13s, box-shadow .13s;
+}
+[data-pane="sidebar"] [data-dsh-usage-entry]:hover {
+  background: rgb(var(--ef-cyan-rgb) / .12);
+  box-shadow: inset 2px 0 0 var(--ef-cyan);
+}
+[data-pane="sidebar"] [data-dsh-usage-entry][data-active="true"] {
+  background: rgb(var(--ef-cyan-rgb) / .14);
+}
+/* 外层已经整行上色，内层主按钮不要再单独上一次 */
+[data-pane="sidebar"] [data-dsh-usage-entry] button[class*="entryMain"],
+[data-pane="sidebar"] [data-dsh-usage-entry] button[class*="entryMain"]:hover {
+  background: none;
+  box-shadow: none;
+  border-radius: 2px;
+}
+[data-pane="sidebar"] [data-dsh-usage-entry][data-active="true"] button[class*="entryMain"] {
+  color: var(--dsw-alias-label-primary);
+}
+
+/* 上面这几行原来一点缝都没有，挤得慌。统一成「名录行」规格：
+   8px 圆角 + 1px 灰边框 + 6px 行距（与下面的任务行同一套） */
+/* 2026-09-30（rc2 复查）：侧栏六行的描边来自**本规则**、不是注册方给的。而本规则的两个前提只对 web 成立：
+   ① 只有 web-all 提供的三行带 data-dsh-part="sidebar-entry"（任务看板/技能中心/SSH）；
+      内核自带的「插件」与 dsh-skill-mcp-panel 的「技能」「MCP」**没有该属性** → 少三行描边；
+   ② [data-pane="sidebar"] 在 desktop **命中 0 个**（FINDINGS §4 D2）→ 桌面端六行全裸。
+   CDP 实测（web，改动前）：前 3 行 bw 0px / h36 / 有效行距 4px，后 3 行 bw 1px / h38 / margin-block 3px / 有效行距 10px。
+   改用行类名后缀 button[class*="_panelRow"]（web hHd-Xa_ / desktop n_2Q3W_ 通用）把六行拉成同一规格；
+   带 data-pane 的两条留给不带该类的行（如「用量」复合行）。 */
+button[class*="_panelRow"],
+[data-pane="sidebar"] button[data-dsh-part="sidebar-entry"],
+[data-pane="sidebar"] [data-dsh-usage-entry] {
+  border: 1px solid var(--ef-line);
+  border-radius: 8px;
+  margin-block: 3px;
+}
+button[class*="_panelRow"]:hover,
+[data-pane="sidebar"] button[data-dsh-part="sidebar-entry"]:hover,
+[data-pane="sidebar"] [data-dsh-usage-entry]:hover {
+  border-color: rgb(var(--ef-cyan-rgb) / .45);
+}
+
+/* 收起态（56px 图标栏）：New Baker 的图标正中；余额框收成一个小方图标，
+   别再把「剩余 CNY …」的文字顶到框外面去 */
+:is([data-dsh-frame][data-sidebar-collapsed="true"], [data-dsh-surface="root"]:has([data-sidebar-collapsed="true"])) [data-dsh-part="new-session"]::before {
+  margin-right: 0;
+}
+:is([data-dsh-frame][data-sidebar-collapsed="true"], [data-dsh-surface="root"]:has([data-sidebar-collapsed="true"])) [class*="cvtkAW_sidebarPanel"] {
+  display: none;   /* 56px 里塞不下「DeepSeek 剩余 CNY …」，直接收起来，展开态照旧 */
+}
+
+/* 输入区按钮：BAKER 圆形钮 */
+[data-composer-card] button { border-radius: 999px; }
+[data-composer-card] [class*="trigger"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  letter-spacing: .02em;
+}
+[data-composer-card] [class*="mode"] ,
+[data-composer-card] [class*="chip"] {
+  font-family: var(--ef-mono);
+  font-size: 11px;
+  letter-spacing: .03em;
+}
+
+/* ------------------------------------------------ 9b 侧栏收放不留残影 --- */
+
+/* 侧栏收/放是个 200ms 的宽度动画：行上的 border/box-shadow 会跟着过渡，
+   动画途中截图（或系统截图撞上动画）就会留下一条蓝边/蓝色描边的残影。
+   这里在动画期间把过渡关掉，动画结束再恢复。 */
+:is([data-dsh-frame][data-sidebar-animating], [data-dsh-surface="root"]:has([data-sidebar-animating])) [data-pane="sidebar"],
+:is([data-dsh-frame][data-sidebar-animating], [data-dsh-surface="root"]:has([data-sidebar-animating])) [data-pane="sidebar"] *,
+[data-sidebar-animating] [data-pane="sidebar"] {
+  transition: none !important;
+  animation: none !important;
+}
+
+/* 收起态（56px）：New Baker 是个 36×36 的图标钮。皮肤给它加的 14px 左右外边距
+   会把 36px 的钮挤到右边（实测 x 22 / 宽 36，右边被裁 2px）。这里把它居中。 */
+:is([data-dsh-frame][data-sidebar-collapsed="true"], [data-dsh-surface="root"]:has([data-sidebar-collapsed="true"])) [data-dsh-part="new-session"] {
+  margin-left: auto !important;
+  margin-right: auto !important;
+  margin-block: 3px !important;
+  width: 36px !important;
+  height: 36px !important;
+  min-width: 36px !important;
+  padding: 0 !important;
+}
+
+/* 收起态里其它行同理：留一点内边距，别被 56px 的栏宽裁掉 */
+:is([data-dsh-frame][data-sidebar-collapsed="true"], [data-dsh-surface="root"]:has([data-sidebar-collapsed="true"])) [data-pane="sidebar"] button[data-dsh-part="sidebar-entry"],
+:is([data-dsh-frame][data-sidebar-collapsed="true"], [data-dsh-surface="root"]:has([data-sidebar-collapsed="true"])) [data-dsh-usage-entry] {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
+/* --------------------------------- 10 输入区提亮 / 统计条 / 右侧栏卡片 --- */
+
+/* (0) ★docking 配件一律去毛玻璃（2026-09-30 实测坑，与聊天页那条同源 —— 详见坑 36）：
+   skin / custom-theme 模式下 app 会给 `[data-slot="conversation.input.dock"] > *`
+   （token 统计条、右下角上下文环 24% …）统一加
+   `backdrop-filter: blur(var(--dsh-composer-accessory-blur, var(--dsh-input-card-blur, 10px))) !important`，
+   于是**每个配件都变成 fixed 后代的包含块**：上下文环的 Tooltip 气泡就内联在环里，
+   真鼠标悬浮 → 气泡按环的 padding box 解析 → 实测落到 (1850, 1507)（视口 1264×805）、
+   scrollHeight +744 →「整块内容往上跳」，就是鱼片报的 24% 那个位移。
+   本皮肤里这些配件的底色是不透明 rgb(27,29,28)，毛玻璃翻不出任何东西，故置空。
+   值的写法是刻意的：app 那边是 `blur(var(…))`，把变量写成非法值 → 整条声明在**计算值阶段**失效
+   → backdrop-filter 回退成 none（写 `0px` 没用，blur(0px) 照样造包含块）。 */
+[class*="composerSeat"],
+[data-slot="conversation.input.dock"],
+[data-slot="conversation.composer.dock"] {
+  --dsh-composer-accessory-blur: none;
+}
+
+/* (7) token 统计小条：加同色描边，与窗口下沿分开 */
+:is([class*="bOPqQW_root"], [class*="iq1doa_root"]) {
+  /* 该元素上 border 会被应用的模块样式吃掉，改用 box-shadow 描边并加 !important 保底 */
+  box-shadow: 0 0 0 1px var(--ef-edge) !important;
+  border-radius: var(--ef-radius);
+}
+:is([class*="bOPqQW_pill"], [class*="iq1doa_pill"]) {
+  border-radius: calc(var(--ef-radius) - 3px);
+}
+
+/* (7) 发送键：改用顶栏同款亮青 */
+:is([class*="uV2eYG_primary"], [class*="RlGAzG_primary"]) {
+  background: var(--ef-cyan);
+  color: #0b1416;
+}
+:is([class*="uV2eYG_primary"], [class*="RlGAzG_primary"]):hover {
+  background: var(--ef-cyan-bright);
+  color: #0b1416;
+}
+
+/* (6) 灰色聊天框内的文字层级提亮 */
+[class*="Sh0Q9G_triggerLabel"],
+:is([class*="_7KE1Ra_triggerLabel"], [class*="wq12jW_triggerLabel"]) {
+  color: var(--dsw-alias-label-primary);
+}
+:is([class*="_7KE1Ra_triggerEffort"], [class*="wq12jW_triggerEffort"]) {
+  color: var(--dsw-alias-label-secondary);
+}
+:is([class*="JObwrW_trigger"], [class*="_2WTFBq_trigger"]) {
+  color: var(--dsw-alias-label-secondary);
+}
+:is([class*="JObwrW_track"], [class*="_2WTFBq_track"]) {
+  stroke: rgba(233, 235, 234, .42);
+}
+:is([class*="JObwrW_fill"], [class*="_2WTFBq_fill"]) {
+  stroke: #e9ebea;
+}
+:is([class*="uV2eYG_tools"], [class*="RlGAzG_tools"]) button {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* (3)(4) 右侧栏卡片：圆角对齐全局 + 图标垂直居中 */
+[class*="geFEbW_entry"] {
+  border-radius: var(--ef-radius);
+}
+[class*="geFEbW_entry"] [class*="entryIcon"],
+[class*="geFEbW_entry"] [class*="entryIcon"] > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+[class*="geFEbW_entry"] svg {
+  display: block;
+}
+
+/* ------------------------- 11 右侧栏底板 / 侧栏名录 / 输入条细节 --- */
+
+/* (1) 右侧栏（含全屏）补一块实心底板，避免透出聊天内容
+   ★ 必须限定在「右侧栏展开」时才画：0.1.7-rc2 之后 P3OORG_* 这类 CSS Module 哈希语义变了 ——
+     收起态该面板仍挂着一个 570px 宽、pointer-events:none 的 overlay（实测 rect [694,0,570,805]，
+     视口 1264 → 正好压住聊天窗右半），无条件刷黑底就把聊天区右一半直接盖黑了（用户报的「右边一半被黑块盖住」）。
+     判展开只能用正向 :has(右侧栏自己的 data-sidebar-right-open)：展开态 data-rightbar-collapsed 是被整个摘掉的，
+     不能靠 :not([data-rightbar-collapsed="true"]) 反推。 */
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"]) :is([class*="P3OORG_panel"], [class*="OUqwTW_panel"]),
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"]) :is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) {
+  background: rgba(19, 21, 20, .97);
+}
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"]) :is([class*="P3OORG_panel"], [class*="OUqwTW_panel"]) {
+  border-left: 1px solid var(--ef-edge-dark);
+}
+
+/* (4-3) 输入条内滚动条：比底板更浅，不再和聊天页同色 */
+[data-input-scroll]::-webkit-scrollbar { width: 8px; }
+[data-input-scroll]::-webkit-scrollbar-track { background: transparent; }
+[data-input-scroll]::-webkit-scrollbar-thumb {
+  background: rgba(20, 16, 15, .22);
+  border-radius: 4px;
+}
+[data-input-scroll]::-webkit-scrollbar-thumb:hover { background: rgba(20, 16, 15, .38); }
+
+/* ============ 11b 侧栏名录：按参考站 chat.peilika.beer 的 .card / .subcard 复刻 ============
+   源站是一张 1920 宽的设计画布（.design-canvas 整体缩放到视口），左侧名录列 .character-card 宽 526 设计 px。
+   我们的名录列宽 = 应用给的那条列（280 侧栏下约 252px），所以换算系数提成变量：
+     --ef-bk = 0.48   ← 想整体放大/缩小只改这一个数（皮肤里名录尺寸都是 calc(源站设计值 * var(--ef-bk))）
+   元素对应：
+     .card    角色卡 458.28 × 92.99 设计 → 工作区行（projectRow）
+     .subcard 子卡   435.53 × 68.95 设计 → 会话行（sessionRow）
+   ★ 宽度一律「左右内缩 + auto 宽」，不给死宽度：用户那边侧栏比 agent 这边窄，
+     之前写死 250px 列 + 228px 行会横向溢出，把行右侧和时间截掉（还冒出横/竖滚动条）。
+   高度 / 圆角 / 字号 / 装饰位置都是 calc(源站设计值 * var(--ef-bk))，对着源站 CSS 一眼能核。
+
+   资产：从源站抠出并按源站自己的 opacity / filter 烘进 PNG（CSS 背景层没法逐层设不透明度）——
+     card__texture .50（工作区行与会话行共用）、card__faint .02、card__underline / card__corner .40、
+     subcard__faint .02、deco-badge / deco-wing ×.11、subcard__arrow ×.11 + .15（wing 源站 scaleX(-1)，已镜像）。
+   角色头像不做：工作区行左侧只留源站头像框的位置当占位（既不画框也不放头像，只放应用自己的文件夹图标）。
+   边框按用户要求换回本皮肤上一版的灰线 --ef-line（源站自己那圈描边不好看），圆角仍用源站的小圆角。
+
+   ★ 坑：绝对定位的伪元素画在内容层之上 → 内容（图标/标题/时间）必须显式 position/z-index，
+     否则选中态的黄色块会把文字盖住；选中态文字还要另写一条带 [aria-selected="true"] 的规则。 */
+
+/* 名录列宽度跟应用给的一致（原来加到 250px，会横向溢出） */
+[class*="groupSection"] {
+  width: 100%;
+}
+
+/* (1) 工作区行 = 源站 .card（源站那张角色卡，去掉角色头像） */
+[class*="projectRow"] {
+  position: relative;
+  box-sizing: border-box;
+  height: calc(92.99px * var(--ef-bk));
+  /* 左右内缩按源站占整列的比例（左 47.42/526 = 9.02%、右 19.7/526 = 3.75%），用 % 写、随侧栏自适应；
+     写死 px 在用户那边（侧栏较窄）会把行右侧顶出去、还冒出横向滚动条 */
+  margin: 0 3.96% calc(7.87px * var(--ef-bk)) 3.88%;
+  padding-left: calc(8.5px * var(--ef-bk));
+  border: 1px solid var(--ef-line);                /* 用户要求：用回上一版的灰描边 */
+  border-radius: calc(4.39px * var(--ef-bk));
+  background-color: #3e3f3d;                       /* .card__rect */
+  background-image: url("assets/baker-card-texture.png"), url("assets/baker-card-faint.png");
+  background-repeat: no-repeat, no-repeat;
+  background-position: left top, calc(35.28px * var(--ef-bk)) 0.2px;
+  background-size: 100% 100%, calc(100% - 35.28px * var(--ef-bk)) 100%;
+  transition: background-color .13s;
+}
+[class*="projectRow"]:hover {
+  background-color: #555655;                       /* #3e3f3d 叠 #ffffff1f（源站 .card:hover:before） */
+}
+/* 头像框位只占位（用户要求：不要框、也不做头像），里面就是应用自己的文件夹图标 */
+[class*="projectRow"] > [class*="folder"] {
+  flex: 0 0 auto;
+  width: calc(76px * var(--ef-bk));
+  height: calc(76px * var(--ef-bk));
+  border: 0;
+  border-radius: 0;
+  background: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 1;
+}
+[class*="projectRow"] > [class*="folder"] svg { width: 17px; height: 17px; }
+[class*="projectRow"] [class*="projectText"] {
+  margin-left: calc(17.52px * var(--ef-bk));       /* 名字左缘 102.02 设计 − 头像框右缘 84.5 */
+  position: relative;
+  z-index: 1;
+}
+[class*="projectRow"] [class*="title"] {
+  font-family: var(--ef-baker-font);
+  font-size: calc(24.12px * var(--ef-bk));
+  font-weight: 500;
+  line-height: 1;
+  color: #fff;
+}
+/* 名字下面的虚线段 + 右上「••▬」（源站 .card__underline / .card__corner，都 .40） */
+[class*="projectRow"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background-image: url("assets/baker-card-underline.png"), url("assets/baker-card-corner.png");
+  background-repeat: no-repeat, no-repeat;
+  background-position: calc(104.02px * var(--ef-bk)) calc(62.72px * var(--ef-bk)),
+                       right calc(19.07px * var(--ef-bk)) top calc(15.75px * var(--ef-bk));
+  background-size: calc(42.75px * var(--ef-bk)) calc(4.5px * var(--ef-bk)),
+                   calc(45px * var(--ef-bk)) calc(6px * var(--ef-bk));
+}
+/* 右下角的「⋯」= 应用自己的工作区操作菜单钮（原来只在悬停时出现在行尾），
+   按用户要求摆到源站 .card__btn 那个位置（右下角）并常显；
+   同一格里的「＋ 新建会话」按钮删掉 —— 它的功能改由 ⋯ 菜单里的「新会话」承担（见 hooks.mjs） */
+[class*="projectRow"] [class*="rowActions"] {
+  display: flex !important;
+  position: absolute;
+  right: calc(11.16px * var(--ef-bk));
+  bottom: calc(9.48px * var(--ef-bk));
+  top: auto;
+  left: auto;
+  opacity: 1 !important;
+  visibility: visible !important;
+  align-items: center;
+}
+[class*="projectRow"] [class*="rowActions"] button[aria-label*="新建会话"] {
+  display: none !important;                        /* 用户要求：加号直接删掉 */
+}
+[class*="projectRow"] [class*="rowActions"] button {
+  width: calc(31.2px * var(--ef-bk));
+  height: calc(31.2px * var(--ef-bk));
+  padding: 0;
+  opacity: .62;
+}
+[class*="projectRow"] [class*="rowActions"] button:hover { opacity: 1; }
+[class*="projectRow"] [class*="rowActions"] svg {
+  width: calc(16px * var(--ef-bk));
+  height: calc(16px * var(--ef-bk));
+}
+
+/* (2) 会话行 = 源站 .subcard */
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] {
+  position: relative;
+  box-sizing: border-box;
+  height: calc(68.95px * var(--ef-bk));
+  margin: calc(2.5px * var(--ef-bk)) 3.96% calc(2.5px * var(--ef-bk)) 9.04%;   /* 源站左 70.77/526 = 13.45% */
+  padding-left: calc(11.93px * var(--ef-bk));
+  border: 1px solid var(--ef-line);                /* 未选中：上一版的灰描边 */
+  border-radius: calc(4.12px * var(--ef-bk));
+  background-color: #292827;                       /* .subcard__rect */
+  background-image: url("assets/baker-card-texture.png"), url("assets/baker-sub-faint.png");
+  background-repeat: no-repeat, no-repeat;
+  background-position: left top, calc(297.93px * var(--ef-bk)) 0.2px;
+  background-size: 100% 100%, calc(100% - 297.93px * var(--ef-bk)) 100%;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"]:hover:not([aria-selected="true"]) {
+  background-color: #434140;                       /* #292827 叠 #ffffff1f（源站 .subcard:hover:before） */
+}
+/* 选中态：源站是 .subcard__rect:after 那块 #ffef00 从左往右展开（scaleX 0→1） */
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #ffef00;
+  transform: scaleX(0);
+  transform-origin: left center;
+  transition: transform .1s ease-out;
+  pointer-events: none;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] {
+  background-color: transparent;
+  background-image: none;
+  border-color: transparent;                       /* 保持 1px 边框占位，换状态不跳 */
+  box-shadow: none;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"]::before {
+  transform: scaleX(1);
+}
+/* 第二层伪元素：源站的 subcard__faint（选中时只隐底纹、faint 留着，而且 faint 画在黄块之上）
+   + 选中后才出现的深色装饰 badge / wing / 线 / 两支箭头 */
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity .25s ease;
+  pointer-events: none;
+  background-image:
+    url("assets/baker-sub-faint.png"),
+    url("assets/baker-sub-badge.png"),
+    url("assets/baker-sub-wing.png"),
+    linear-gradient(#1c1c1c, #1c1c1c),
+    url("assets/baker-sub-arrow.png"),
+    url("assets/baker-sub-arrow.png");
+  background-repeat: no-repeat;
+  background-size:
+    calc(100% - 297.93px * var(--ef-bk)) 100%,
+    calc(29.19px * var(--ef-bk)) calc(29.19px * var(--ef-bk)),
+    calc(38.13px * var(--ef-bk)) calc(11.07px * var(--ef-bk)),
+    calc(62.71px * var(--ef-bk)) calc(0.6px * var(--ef-bk)),
+    calc(48px * var(--ef-bk)) calc(71.04px * var(--ef-bk)),
+    calc(48px * var(--ef-bk)) calc(71.04px * var(--ef-bk));
+  background-position:
+    calc(297.93px * var(--ef-bk)) 0.2px,
+    calc(26.76px * var(--ef-bk)) calc(11.43px * var(--ef-bk)),
+    calc(34.99px * var(--ef-bk)) calc(5.65px * var(--ef-bk)),
+    calc(27.38px * var(--ef-bk)) calc(54.11px * var(--ef-bk)),
+    calc(70.89px * var(--ef-bk)) 0,
+    calc(115.45px * var(--ef-bk)) 0;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"]::after {
+  opacity: 1;
+}
+/* 行内图标框：49.08 设计 px / 圆角 2.74 / 底色 #353534；气泡 31.5×25.5 居中
+   （源站是白图标 + brightness(.882)，这里直接烘成 #e1e1e1 / 选中 #1c1c1c 两张 svg） */
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] [class*="slot"] {
+  flex: 0 0 auto;
+  width: calc(49.08px * var(--ef-bk));
+  height: calc(49.08px * var(--ef-bk));
+  border: 0;
+  border-radius: calc(2.74px * var(--ef-bk));
+  background-color: #353534;
+  background-image: url("assets/baker-sub-icon.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: calc(31.5px * var(--ef-bk)) calc(25.5px * var(--ef-bk));
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+  top: 0;
+  z-index: 1;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] [class*="slot"] svg {
+  display: none;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] [class*="slot"] {
+  background-color: transparent;
+  background-image: url("assets/baker-sub-icon-dark.svg");
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] [class*="title"] {
+  position: relative;
+  z-index: 1;
+  margin-left: calc(21.58px * var(--ef-bk));       /* 文字左缘 82.59 设计 − 图标框右缘 61.01 */
+  font-family: var(--ef-baker-font);
+  font-size: calc(20.88px * var(--ef-bk));
+  font-weight: 400;
+  line-height: 1;
+  color: #e3e1e1;
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] [class*="title"] {
+  color: #1c1c1c;                                  /* 源站 .subcard.is-selected .subcard__text */
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"] [class*="time"] {
+  position: relative;
+  z-index: 1;
+  font-family: var(--ef-baker-font);
+  font-size: calc(19px * var(--ef-bk));
+  color: rgb(227 225 225 / .5);
+}
+[data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"][aria-selected="true"] [class*="time"] {
+  color: rgb(28 28 28 / .62);                      /* 黄底上时间也跟着转深色 */
+}
+
+/* 名录滚动条：用户要求直接隐藏（滚轮照样能滚），隐藏后行右侧也不会被压住 */
+[class*="listArea"], [class*="treeBody"] {
+  scrollbar-width: none;
+}
+[class*="listArea"]::-webkit-scrollbar,
+[class*="treeBody"]::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+[class*="treeBody"] [class*="row"] {
+  border-radius: 8px;
+}
+
+/* ------------------- 12 折叠行统一：左导轨 / 下拉键 / 右侧文字 --- */
+
+/* 工具调用 / 上下文注入 / 思考 / Pwsh / 读取图片……所有中间行统一成「工具卡」的样子：
+   同一个 2px 青色左导轨、同一套 34px 行高、同一个行首图标、同一个行尾下拉标识。
+   三类的容器左边缘同为那条 680px 内容列，差在各自的内缩（工具卡 2px 边框 + 10px 内边距 = 12px，
+   上下文行原来自带 11px，思考行落在助手步骤的缩进里），所以这里只做横向补偿。 */
+[data-chat-flow-kind="context"] [data-disclosure-row],
+[data-chat-flow-kind="system-prompt"] [data-disclosure-row] {
+  /* 卡片在 425、内容列 435；行内边距 3px → 图标 438 → 与代码/思考行同一条竖线（都是 437.x） */
+  padding: 5px 10px 5px 3px !important;
+}
+[data-chat-flow-kind="assistant-step"] [data-disclosure-row] {
+  margin-left: 0;
+}
+
+/* 图标框与标题之间统一留 8px；图标框固定 16px 居中 */
+[data-disclosure-row] > span:first-child {
+  margin-right: 8px;
+}
+/* （原来的 -2px 图标补偿已删：v0.15 把思考卡本身往左顶了 2px，
+   行内图标不再需要补偿，否则会比代码/工具/上下文行的图标左移 2px。） */
+/* 行首图标统一 16px（应用按图标种类给 12/14/18px 不等），和标题排在同一条竖线上 */
+[data-disclosure-row] > span:first-child > span:first-child {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+}
+[data-disclosure-row] > span:first-child > span:first-child > svg {
+  width: 16px;
+  height: 16px;
+}
+/* 分隔符与右侧摘要的位置统一 */
+[data-disclosure-row] > span:nth-of-type(2),
+[data-disclosure-row] > span:nth-of-type(3) {
+  flex: 0 0 auto;
+}
+[data-disclosure-row] > span:nth-of-type(2) {
+  margin-right: 8px !important;   /* 上下文行那个分隔符原来不带右外边距，摘要位置是偏的 */
+}
+/* 上下文注入行：标题与摘要取工具卡的同一套字号，两行的字才对得齐 */
+[data-chat-flow-kind="context"] [data-disclosure-row] [class*="title"],
+[data-chat-flow-kind="system-prompt"] [data-disclosure-row] [class*="title"],
+[data-chat-flow-kind="context"] [data-disclosure-row] [class*="source"],
+[data-chat-flow-kind="context"] [data-disclosure-row] [class*="summary"],
+[data-chat-flow-kind="system-prompt"] [data-disclosure-row] [class*="source"],
+[data-chat-flow-kind="system-prompt"] [data-disclosure-row] [class*="summary"] {
+  font-family: var(--ef-mono);
+  font-size: 11.5px;
+  letter-spacing: .01em;
+}
+
+/* ---- 卡片右下切角：改用背景层那块三角形画（原来是 clip-path）。
+   clip-path 会把这些行提成合成层，悬停重绘之后留下一块白框残影——
+   用户点名过多次的 bug，这里连同卡片本身一起去掉 clip-path。 ---- */
+[data-slot="tool.call.toolview"] > [data-tool],
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]),
+[data-chat-flow-kind="context"] > div > [class*="root"],
+[data-chat-flow-kind="system-prompt"] > div > [class*="root"] {
+  background-image:
+    linear-gradient(to bottom left, #292b2a calc(var(--ef-cut) * .7071), transparent 0);
+  background-repeat: no-repeat;
+  background-position: right bottom;
+  background-size: var(--ef-cut) var(--ef-cut);
+}
+[data-slot="tool.call.toolview"] > [data-tool]:hover,
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]):hover {
+  background-image:
+    linear-gradient(to bottom left, #1f2b2e calc(var(--ef-cut) * .7071), transparent 0);
+}
+
+/* 纯思考的助手步骤：它自己的青导轨 + 行首方块与「思考卡」的左导轨重复，
+   去掉后思考卡左缘正好和代码/工具卡对齐（同为内容列 425） */
+[data-chat-flow-kind="assistant-step"]:has(:is([class*="lcKema_root"], [class*="_3GBCTG_root"])):not(:has([class*="markdown"])) {
+  border-left-color: transparent;
+  padding-left: 0;
+}
+[data-chat-flow-kind="assistant-step"]:has(:is([class*="lcKema_root"], [class*="_3GBCTG_root"])):not(:has([class*="markdown"]))::before {
+  display: none;
+}
+
+/* 思考行的行首：应用展开时会把图标换成下拉箭头，这里一律换成同一张图标
+   （下拉标识已经挪到行尾了，左边随时随地都是图标） */
+:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"]) svg { display: none; }
+:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"])::before {
+  content: "";
+  width: 14px;
+  height: 14px;
+  /* 它同时是 flex 项：flex 项默认 flex-shrink:1，只给 width 会被压成 0 宽（图标就没了），
+     所以这里要显式给 flex-basis */
+  flex: 0 0 14px;
+  background: var(--ef-icon-think) center / 14px 14px no-repeat;
+}
+
+/* 图标常显：原来鼠标一悬停，左侧图标会被下拉箭头顶掉 */
+[data-disclosure-row] [class*="iconIdle"] { opacity: 1 !important; }
+[data-disclosure-row] [class*="chevronHover"] { display: none !important; }
+
+/* 思考卡展开后，应用会把这张卡的行（lcKema_row）钉在聊天窗顶边（position:sticky + z-index:1）。
+   行没有底色（实测 computed bg = rgba(0,0,0,0)），卡片自己又是半透明的 —— 正文从行底下穿过
+   时直接透出来，行首图标与「思考」标题就叠在正文上（实测：行 [444,111,662,34]、正文
+   [444,100,662,108]，重叠 34px）。
+   皮肤不给这行上底色（贴一条色带反而更难看，已否决），改为取消这行的悬停固定：行随卡片一起
+   滚走，正文自然不会再从它底下穿过去。折叠、悬停、行尾下拉键都不受影响。 */
+:is([class*="lcKema_row"], [class*="_3GBCTG_row"])[data-disclosure-row] {
+  position: static !important;
+}
+
+/* 下拉键改到行尾（右侧），展开时翻转；同时给右侧摘要留出固定呼吸位 */
+[data-disclosure-row][data-expandable="true"]::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: 10px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-bottom: 1.5px solid var(--dsw-alias-label-tertiary);
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform .15s, border-color .15s;
+  opacity: .7;
+}
+[data-disclosure-row][data-expandable="true"][aria-expanded="true"]::after {
+  transform: rotate(-135deg) translate(-1px, -1px);
+}
+[data-disclosure-row][data-expandable="true"]:hover::after {
+  border-color: var(--ef-cyan);
+  opacity: 1;
+}
+
+/* 聊天/侧栏宽度拖拽把手（应用给 z-index 8）会浮在三色条与黑实体上面，压回内容层 */
+[class*="wSkVaW_widthHandle"], [class*="Dc7zOa_widthHandle"] { z-index: 1 !important; }
+
+/* --------------- 12b 开始页右侧的入口卡（文件 / 终端 / 浏览器…） --- */
+
+/* 悬停/聚焦 → 亮蓝底；点开对应面板之后 → 常态蓝底 + 蓝描边（这就是用户说的
+   「鼠标点击并展开页面后生效，关闭页面后取消」）。 */
+[class*="paneCard"] {
+  border-radius: var(--ef-radius);
+  transition: background-color .13s, border-color .13s, box-shadow .13s;
+}
+[class*="paneCard"]:hover,
+[class*="paneCard"]:focus-visible {
+  background-color: rgb(var(--ef-cyan-rgb) / .12) !important;
+  border-color: rgb(var(--ef-cyan-rgb) / .55) !important;
+}
+[class*="paneCard"]:has([aria-expanded="true"]) {
+  background-color: rgb(var(--ef-cyan-rgb) / .14) !important;
+  /* 用户看过之后觉得「点开后一直保持蓝边」丑，改成只保持蓝底 */
+  border-color: var(--ef-line) !important;
+}
+
+/* 侧栏「用量」行：与上面四行同逻辑 —— 悬停只给蓝底、移走就收；
+   把用量面板下拉出来（宿主给行标 data-active）才常态蓝底 + 蓝描边，收起来就取消。 */
+[data-dsh-usage-entry] {
+  border-radius: 8px;
+  border: 1px solid var(--ef-line);
+  transition: background-color .13s, border-color .13s, box-shadow .13s;
+}
+[data-dsh-usage-entry]:hover {
+  background-color: rgb(var(--ef-cyan-rgb) / .12);
+  border-color: rgb(var(--ef-cyan-rgb) / .55);
+}
+/* 用量行只保留蓝底：用户看过之后要求把那条蓝描边也去掉 */
+[data-dsh-usage-entry][data-active="true"] {
+  background-color: rgb(var(--ef-cyan-rgb) / .14);
+  border-color: var(--ef-line);
+  box-shadow: none;
+}
+/* 下拉出来的用量面板外壳也不要蓝描边（只要行上的蓝底） */
+[data-dsh-usage-entry] [class*="sidebarPanel"],
+[data-dsh-usage-entry] ~ div [class*="sidebarPanel"] {
+  border-color: var(--ef-line) !important;
+  box-shadow: none !important;
+}
+/* 用量下面那个余额框：与上面几行（x 12 / 宽 256）同宽同位置。
+   面板自己是 248px 且内缩 4px，所以这里补到 100% 宽度。 */
+[data-dsh-usage-entry] + div,
+[data-dsh-usage-entry] ~ div {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+[data-dsh-usage-entry] ~ div > [class*="Panel"],
+[data-dsh-usage-entry] ~ div > [class*="panel"] {
+  width: 100% !important;
+  max-width: 100% !important;
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+  box-sizing: border-box !important;
+}
+
+/* ------------------------- 12c 设置页方框补全 --- */
+
+/* 设置页里的卡片（插件卡 / 终端 / Agent 循环 / 网页搜索…）统一：
+   同一条描边 + 同一个圆角（跟设置页自己的 12px 对齐，不然就像图 6 图 7 那样看着很怪） */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) :is(
+  [class*="card"],
+  [class*="_card"],
+  [class*="Card"],
+  [class*="rowCard"],
+  [class*="RowCard"]
+) {
+  border-radius: var(--ef-radius) !important;
+}
+/* 宠物 / 创意工坊：用户明确不要补框，这两个页签的内容样式一律不动
+   （kKk9aW = 宠物、RcIGlq + bkhjFa = 创意工坊及其卡片） */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) :is([class*="kKk9aW"], [class*="KApx_W"], [class*="RcIGlq"], [class*="bkhjFa"]) {
+  box-shadow: none !important;
+  border-color: var(--dsw-alias-border-l2) !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) :is([class*="kKk9aW"], [class*="KApx_W"], [class*="RcIGlq"], [class*="bkhjFa"]) [class*="body"] {
+  border-color: var(--dsw-alias-border-l2) !important;
+}
+
+/* 插件配置那几张卡（网页搜索 / Subagent / Agent 循环 / 终端 / ego-browser…）点开后，
+   展开的内容区没有自己的框 —— 补上整圈（与卡片矩形一致），收起时回到常态。
+   ⚠ 以前这里写成通用的 [aria-expanded="true"]，把宠物 / 创意工坊 / 归档管理里
+   所有带这个属性的元素都框了一遍（用户点名的误加蓝边），现在改成按卡片结构限定。 */
+/* 展开态：整张卡只保留一圈蓝框（用卡片自己的 border），内容区不再套第二个框；
+   头部与内容之间补一条蓝线当分隔（= 用户要的「整个大外圈 + 中间一行」）。 */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) li[class*="card"]:is([class*="_cardOpen"], [class*="--open"]):not([class*="kKk9aW"], [class*="KApx_W"], [class*="RcIGlq"]),
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="dsh-ego-card--open"] {
+  border: 1px solid var(--ef-cyan) !important;
+  border-radius: var(--ef-radius) !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) li[class*="card"]:is([class*="_cardOpen"], [class*="--open"]):not([class*="kKk9aW"], [class*="KApx_W"], [class*="RcIGlq"]) > [class*="body"],
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="dsh-ego-card--open"] > [class*="__body"] {
+  border: 0 !important;
+  border-top: 1px solid var(--ef-cyan) !important;
+  border-radius: 0 !important;
+}
+
+/* Agent 预设：一张卡在 DOM 里是「card（外层）+ cardMain（上段）+ cardFoot（下段）」。
+   应用只给选中的那张卡的 cardMain 画一条 1px 内圈（品牌色，皮肤里 = 青色），所以看起来
+   「大外圈只包住上面那半」。现在：
+     · 未选中：完全没有蓝边（应用自己的常态描边），也不留中间那条线；
+     · 选中（rtSEdW_cardActive）：整圈蓝框画在整个 card 上 + 中间一条蓝线（用户要的样式）。 */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="cardMain"] {
+  border-radius: var(--ef-radius) var(--ef-radius) 0 0 !important;
+  margin-bottom: 0 !important;
+  box-shadow: none !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="cardFoot"] {
+  border-top: 0;
+  margin-top: 0 !important;
+  border-radius: 0 0 var(--ef-radius) var(--ef-radius) !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="cardActive"] {
+  border: 1px solid var(--ef-cyan) !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="cardActive"] [class*="cardFoot"] {
+  border-top: 1px solid var(--ef-cyan);
+}
+
+/* 三选一这类小方框照旧给整圈蓝描边（皮肤页那张「当前激活」卡也在内） */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) :is([class*="themeCube"], [class*="pluginCard"], [class*="skinCard"], [class*="_card"]):is([aria-pressed="true"], [aria-selected="true"], [class*="_selected"], [class*="_cardOn"], [class*="_cardOpen"]):not([class*="kKk9aW"], [class*="KApx_W"], [class*="RcIGlq"], [class*="bkhjFa"]),
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class~="eDzMgW_card"]:has([class*="badgeActive"]) {
+  box-shadow: inset 0 0 0 1px var(--ef-cyan);
+}
+
+/* 皮肤卡 / 归档管理的会话卡：只给应用的常态描边，别再加蓝边 */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="eDzMgW_card"],
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="dsh-session-archive"] {
+  box-shadow: none;
+}
+/* 侧边卡片页：用户要求这一页里所有带蓝的东西都去掉蓝 */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="_2vuxea_"] {
+  box-shadow: none !important;
+}
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="_2vuxea_"] :is([class*="card"], [class*="cardMain"], [class*="icon"], button, [class*="badge"]) {
+  box-shadow: none !important;
+  border-color: var(--ef-line) !important;
+}
+/* 侧边卡片页：连「打开」状态的青底也去掉 —— 用户要这一页完全没有蓝色，
+   回到应用自己的卡片底色（原来的青底是皮肤给 cardOn 加的） */
+:is([class*="VOzbGW_panel"], [data-dsh-surface="settings"]) [class*="_2vuxea_"] [class*="cardOn"] {
+  background-color: transparent !important;
+  background-image: none !important;
+}
+/* 侧边卡片页：开关「拉条」的开态 = 亮信号青（原来走 --dsw-alias-button-primary-fill，
+   是皮肤压暗过的 #0E7D95）。卡片上的小拉条（cardSwitch）与「常规」里那个带 input 的
+   大拉条各有一套类名，所以两条都写；thumb 保持应用的深色 —— 亮青底 + 深色圆点就是参考图里的拉条。 */
+[class*="_2vuxea_cardOn"] [class*="_2vuxea_cardSwitchTrack"],
+[class*="_2vuxea_switch"]:has(input:checked) [class*="_2vuxea_switchTrack"] {
+  background-color: var(--ef-cyan) !important;
+  border-color: var(--ef-cyan) !important;
+}
+
+/* 【D5b 桌面端补充·鱼片 2026-09-29 点名「颜色模式 / Agent 预设 / Web 插件 大框选中的蓝边和 web 对齐」】
+   desktop 实测（CDP，rc1 内核）三个页面的选中标记：
+     · 通用设置 颜色模式：acoaHG_themeCube acoaHG_selected（aria-pressed=true），宿主只给
+       0.5px rgb(173,178,184) 灰边 —— 12c 的 themeCube inset 青环经作用域并联后命中（实测
+       inset 0 0 0 1px rgb(25,207,253)）；
+     · Agent 预设：与 web 同构 —— 外层 _68N-sW_cardActive + 内层 cardMain[aria-pressed=true]，
+       12c 的 [class*="cardActive"] 两条（整圈青框 + 脚部青线）并联作用域后直接命中
+       （实测外层 border 1px rgb(25,207,253)），**不需要额外规则**；
+     · Web 插件：展开态 li.Kwoi6G_cardOpen + Kwoi6G_body 顶线，12c 的 li.cardOpen 两条覆盖。
+   排除名单已补桌面宠物 KApx_W（web 端是 kKk9aW）；侧边卡片 _2vuxea 去蓝规则同步并联作用域。 */
+
+/* ------------------------------- 13 设置面板 --- */
+
+/* 设置弹窗直接沿用聊天页资产：同一个磨砂底（底色 + 截图纹理 + soft-light + blur）、
+   同一条 --ef-edge 描边、同一个 --ef-radius —— 区别只有「四边都给圆角」，
+   于是顶边三色条与它上方的黑实体也整体留在面板内部，并且往里挪一点避开圆角。 */
+[class*="VOzbGW_panel"] {
+  position: relative;
+  border: 1px solid var(--ef-edge);
+  border-radius: var(--ef-radius);
+  background-color: rgb(var(--ef-chat-bg) / .80);
+  background-image: url("assets/baker-chat.jpg");
+  background-size: cover;
+  background-position: center top;
+  background-repeat: no-repeat;
+  background-blend-mode: soft-light;
+  backdrop-filter: blur(14px) saturate(1.08);
+  /* 凹槽几何：顶框（面板自己的 1px 边框）→ 3px → 三色条 3px → 3px → 底框 1px，
+     于是三色条到上下两条框的距离都是 3px；斜边从顶框直接斜到底框（45°）。 */
+  /* 凹槽与三色条的绝对几何（面板 802×759、左缘 231 时逐像素量过）：
+     凹槽（含两道 8px 斜边）总宽 214px，右端平边 293px —— 于是凹槽落在面板水平中心
+     （525-739），三色条（各 58px、间隔 8px）刚好居中且两边各留 12px。
+     竖向：凹槽高 9px，三条 3px 放在 top 4px（原来 1px，几乎贴着顶框）。 */
+  --ef-set-zone: 507px;    /* 凹槽左端到面板右缘的距离（zone − flat = 凹槽总宽 214px） */
+  --ef-set-flat: 293px;    /* 凹槽右端到面板右缘的距离 */
+  --ef-set-recess: 9px;    /* 凹槽总深 */
+  --ef-set-bevel: 8px;     /* 45° 斜边宽 */
+}
+/* 黑实体（覆盖）+ 顶边描边 + 三色条：画法与聊天页 ::before / ::after 完全一致，
+   只是画在面板内部；两者都给上圆角，免得从面板的圆角处冒出去 */
+[class*="VOzbGW_panel"]::before,
+[class*="VOzbGW_panel"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;                       /* 定位盒的 0 = 面板顶框下面那 1px */
+  height: var(--ef-set-recess);
+  pointer-events: none;
+}
+[class*="VOzbGW_panel"]::before {
+  background: #060807;
+  z-index: 2;
+  /* 只填凹槽（两道斜边之间），顶框那条线仍由面板自己的 border-top 画 ——
+     于是非凹槽处只有一行框 */
+  clip-path: polygon(
+    calc(100% - var(--ef-set-zone)) 0,
+    calc(100% - var(--ef-set-zone) + var(--ef-set-bevel)) 100%,
+    calc(100% - var(--ef-set-flat) - var(--ef-set-bevel)) 100%,
+    calc(100% - var(--ef-set-flat)) 0
+  );
+}
+[class*="VOzbGW_panel"]::after {
+  z-index: 3;
+  background-image:
+    linear-gradient(#e202e2, #e202e2),
+    linear-gradient(#f3f100, #f3f100),
+    linear-gradient(#01f1f1, #01f1f1),
+    linear-gradient(45deg, transparent calc(50% - .7px), var(--ef-edge) calc(50% - .7px) calc(50% + .7px), transparent calc(50% + .7px)),
+    linear-gradient(var(--ef-edge), var(--ef-edge)),
+    linear-gradient(135deg, transparent calc(50% - .7px), var(--ef-edge) calc(50% - .7px) calc(50% + .7px), transparent calc(50% + .7px));
+  background-repeat: no-repeat;
+  background-size:
+    58px 3px, 58px 3px, 58px 3px,
+    var(--ef-set-bevel) var(--ef-set-bevel),
+    calc(var(--ef-set-zone) - 2 * var(--ef-set-bevel) - var(--ef-set-flat)) 1px,
+    var(--ef-set-bevel) var(--ef-set-bevel);
+  /* ::after 的定位盒是「内边距盒」，比顶框低 1px。三条 3px 放在 top 4px（= 视觉居中），
+     底框线画在 bottom 1px；斜边从顶框斜到底框，尺寸 = 斜边宽 × 凹槽深。 */
+  background-position:
+    right 437px top 2px,   /* 品红 = 最左 */
+    right 371px top 2px,   /* 黄 */
+    right 305px top 2px,   /* 青 = 最右（与聊天页、应用一致：左→右 品红/黄/青） */
+    right calc(var(--ef-set-zone) - var(--ef-set-bevel)) top 0,
+    right calc(var(--ef-set-flat) + var(--ef-set-bevel)) bottom 1px,
+    right var(--ef-set-flat) top 0;
+}
+
+/* 被选中的设置条目：底色 / 描边取参考图（深青 #16343A + 青 #19CFFD），圆角保持应用原样
+   ★ 2026-09-29 D5：desktop 设置页的面板根是 div.y7bFDa_panel[role=dialog][data-dsh-surface="settings"]、
+   导航行类名 y7bFDa_navCell / y7bFDa_active（web 哈希 VOzbGW_* 在 desktop 全落空）。
+   加平台无关的 [data-dsh-surface="settings"] 作用域 + _navCell/_active 后缀匹配，与原 VOzbGW 并联，
+   两端都命中。实测 desktop 选中态原为宿主默认 rgb(23,50,58) 无青环、hover 原为宿主灰 rgb(35,37,36)。 */
+[data-dsh-surface="settings"] [class*="navCell"][class*="_active"],
+[class*="VOzbGW_navCell"][class*="VOzbGW_active"] {
+  background: rgb(22, 52, 58);
+  box-shadow: inset 0 0 0 1px var(--ef-cyan);
+}
+[data-dsh-surface="settings"] [class*="navCell"]:not([class*="_active"]):hover,
+[class*="VOzbGW_navCell"]:not([class*="VOzbGW_active"]):hover {
+  background: rgb(var(--ef-cyan-rgb) / .10);
+}
+
+/* 设置页里所有可点的方框（下拉、选择、卡片…）：悬停统一走侧栏按钮那支青蓝，
+   原来各自是一片灰 —— 见用户点名的「光标挪上去显示同样的蓝色」。
+   ★ D5：同样补 [data-dsh-surface="settings"] 作用域（desktop 的设置页根不是 VOzbGW_panel）。 */
+[class*="VOzbGW_panel"] button:hover,
+[data-dsh-surface="settings"] button:hover,
+[class*="VOzbGW_panel"] [role="button"]:hover,
+[data-dsh-surface="settings"] [role="button"]:hover,
+[class*="VOzbGW_panel"] [role="radio"]:hover,
+[data-dsh-surface="settings"] [role="radio"]:hover,
+[class*="VOzbGW_panel"] [role="switch"]:hover,
+[data-dsh-surface="settings"] [role="switch"]:hover,
+[class*="VOzbGW_panel"] [role="combobox"]:hover,
+[data-dsh-surface="settings"] [role="combobox"]:hover {
+  background-color: rgb(var(--ef-cyan-rgb) / .12);
+}
+/* （原来的「另类状态」整圈蓝描边已删：它的 [aria-expanded="true"] / [class*="_cardOpen"]
+   会命中宠物、创意工坊、归档管理里一大堆元素 —— 用户点名的误加蓝边就是这条。
+   现在按具体类名在 12c 节里逐项限定。） */
+
+/* 「模型能力」这类折叠面板头（Qzh-QG_header）：hover 青只铺到按钮内容盒，
+   而所在的 Qzh-QG_panel 有 12px 内边距 + 1px 边框 —— 左右各剩 13px 暗边吃不到蓝色
+   （用户点名的「悬浮显示蓝色不全」）。把按钮盒向左右各扩 12px 铺满内边距盒：
+   负 margin 进位、padding 同量回拉（2→14），文字与箭头坐标不变；
+   border-radius 9px = 面板圆角 10 - 边框 1，贴着内边框走，composite 仍是单层青。 */
+[class*="Qzh-QG_panel"] > button[class*="Qzh-QG_header"] {
+  margin-inline: -12px;
+  width: calc(100% + 24px);
+  padding-inline: 14px;
+  border-radius: 9px;
+}
+
+
+/* ========================== 14 折叠行收尾（v0.15） ========================== */
+
+/* 14a 行尾下拉键一律贴右边。原来只有带 summary（flex:1）的行能顶到最右；
+   上下文行的 source、展开后只剩标题的行都顶不到 —— 把行内最后一个 span 撑开即可。
+   必须排在第 12 节 span:nth-of-type(2/3) 之后（同特异度，靠顺序取胜）。 */
+[data-disclosure-row][data-expandable="true"] > :last-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+/* 文件路径那种是 <button>（内容默认居中），撑开后要拉回左对齐 */
+[data-disclosure-row][data-expandable="true"] > button:last-child {
+  text-align: left;
+  justify-content: flex-start;
+}
+
+/* 14b 展开态：应用会把行首图标换成它自己的下拉箭头（o3BgMG_chevron / XrJvXW_chevron），
+   于是「图标没了、箭头跑到了左边」。这里把箭头藏掉，用同一枚图标按卡片根的 data-tool 补回来
+   （遮罩染色，颜色跟着 currentColor 走；思考行已由 lcKema_leading 那套负责，排除掉）。 */
+[data-disclosure-row][aria-expanded="true"] > span:first-child > svg { display: none !important; }
+[data-disclosure-row][aria-expanded="true"] > span:first-child:not(:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"])) {
+  color: var(--ef-cyan);
+  --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M6.1%203.1Q6.6%207.8%2011.3%208.3Q6.6%208.8%206.1%2013.5Q5.6%208.8%200.9%208.3Q5.6%207.8%206.1%203.1Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M11.9%201Q12.2%203.7%2014.9%204Q12.2%204.3%2011.9%207Q11.6%204.3%208.9%204Q11.6%203.7%2011.9%201Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M12.5%209.4Q12.7%2011.4%2014.7%2011.6Q12.7%2011.8%2012.5%2013.8Q12.3%2011.8%2010.3%2011.6Q12.3%2011.4%2012.5%209.4Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E");
+}
+[data-disclosure-row][aria-expanded="true"] > span:first-child:not(:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"]))::before {
+  content: "";
+  /* 必须和折叠态同尺寸：折叠态那枚 svg 被第 12 节撑到 16px，这里给 14px 就变成「一展开图标变小」 */
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  background-color: currentColor;
+  -webkit-mask: var(--ef-row-icon) center / 16px 16px no-repeat;
+  mask: var(--ef-row-icon) center / 16px 16px no-repeat;
+}
+[data-slot="tool.call.toolview"] > [data-tool="run_code"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20fill-rule%3D%22evenodd%22%20clip-rule%3D%22evenodd%22%20d%3D%22M12.3368%201.53569L11.931%204.43172H14.8086V5.79673H11.7404L11.1962%209.67859H14.2839V11.0436H11.0056L10.4994%2014.6529L9.14873%2014.4643L9.62731%2011.0436H5.75876L5.25252%2014.6529L3.90186%2014.4643L4.38043%2011.0436H1.69141V9.67859H4.57104L5.11417%205.79673H2.21609V4.43172H5.30581L5.73724%201.34713L7.08995%201.53569L6.68414%204.43172H10.5527L10.9841%201.34713L12.3368%201.53569ZM5.94937%209.67859H9.81791L10.361%205.79673H6.49353L5.94937%209.67859Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+[data-slot="tool.call.toolview"] > [data-tool="pwsh"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2014%2014%22%20fill%3D%22none%22%3E%3Cpath%20transform%3D%22translate(0.6689%201.073)%22%20d%3D%22M11.4818%205.57813C11.4818%204.45301%2011.4807%203.66237%2011.4075%203.05908C11.3359%202.46953%2011.2024%202.13852%2010.9939%201.89441C10.9247%201.81341%2010.8493%201.73801%2010.7683%201.66882C10.5242%201.46033%2010.1932%201.32686%209.60364%201.25525C9.00034%201.18198%208.20974%201.18091%207.0846%201.18091L5.57813%201.18091C4.45301%201.18091%203.66238%201.18198%203.05908%201.25525C2.46953%201.32686%202.13852%201.46033%201.89441%201.66882C1.81341%201.73801%201.73801%201.81341%201.66882%201.89441C1.46033%202.13852%201.32686%202.46953%201.25525%203.05908C1.18198%203.66238%201.18091%204.45301%201.18091%205.57813L1.18091%206.2771C1.18091%207.40218%201.18197%208.19288%201.25525%208.79614C1.32687%209.38553%201.46036%209.71674%201.66882%209.96082C1.73797%2010.0417%201.81347%2010.1173%201.89441%2010.1864C2.13851%2010.3948%202.46965%2010.5275%203.05908%2010.5991C3.66238%2010.6724%204.45298%2010.6735%205.57813%2010.6735L7.0846%2010.6735C8.20977%2010.6735%209.00033%2010.6724%209.60364%2010.5991C10.1931%2010.5275%2010.5242%2010.3948%2010.7683%2010.1864C10.8493%2010.1173%2010.9247%2010.0417%2010.9939%209.96082C11.2024%209.71674%2011.3358%209.38553%2011.4075%208.79614C11.4808%208.19288%2011.4818%207.40218%2011.4818%206.2771L11.4818%205.57813ZM12.6627%206.2771C12.6627%207.37222%2012.6637%208.247%2012.5798%208.93799C12.4942%209.64284%2012.3133%2010.2359%2011.8928%2010.7282C11.7834%2010.8562%2011.6637%2010.9751%2011.5356%2011.0845C11.0434%2011.5049%2010.4511%2011.6867%209.74634%2011.7723C9.05525%2011.8563%208.17999%2011.8552%207.0846%2011.8552L5.57813%2011.8552C4.48273%2011.8552%203.60747%2011.8563%202.91638%2011.7723C2.21157%2011.6867%201.61933%2011.5049%201.12708%2011.0845C0.99901%2010.9751%200.879281%2010.8562%200.769898%2010.7282C0.349454%2010.2359%200.168506%209.64284%200.0828864%208.93799C-0.00101964%208.247%204.88512e-07%207.37222%206.47206e-07%206.2771L6.47206e-07%205.57813C6.47206e-07%204.48273%20-0.00106163%203.60747%200.0828864%202.91638C0.168502%202.21168%200.349594%201.61928%200.769898%201.12708C0.879302%200.998981%200.998981%200.879302%201.12708%200.769898C1.61928%200.349594%202.21168%200.168502%202.91638%200.0828864C3.60747%20-0.00106163%204.48273%206.47206e-07%205.57813%206.47206e-07L7.0846%206.47206e-07C8.17999%206.47206e-07%209.05525%20-0.00106163%209.74634%200.0828864C10.451%200.168505%2011.0434%200.349587%2011.5356%200.769898C11.6637%200.879302%2011.7834%200.998981%2011.8928%201.12708C12.3131%201.61928%2012.4942%202.21169%2012.5798%202.91638C12.6638%203.60747%2012.6627%204.48273%2012.6627%205.57813L12.6627%206.2771Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20transform%3D%22translate(0.6689%201.073)%22%20d%3D%22M6.02607%205.50955L6.44306%205.9274L3.84284%208.52762L3.425%208.11063L3.00715%207.69278L4.77253%205.9274L3.00715%204.16202L3.84284%203.32633L6.02607%205.50955Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20transform%3D%22translate(0.6689%201.073)%22%20d%3D%22M9.23789%207.35397L9.23789%208.53488L6.96238%208.53488L6.96238%207.35397L9.23789%207.35397Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+[data-slot="tool.call.toolview"] > [data-tool="read_image"] [data-disclosure-row][aria-expanded="true"] > span:first-child,
+[data-slot="tool.call.toolview"] > [data-tool="read"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M11.2426%204.80473V6.10551H4.75819V4.80473H11.2426Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M9.40858%207.84478V9.14557H4.75819V7.84478H9.40858Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M9.23438%200.546389C10.1941%200.546389%2010.9683%200.544914%2011.5859%200.611819C12.2161%200.680096%2012.7634%200.825745%2013.2393%201.17139C13.5172%201.3733%2013.7619%201.61812%2013.9639%201.896C14.3096%202.37183%2014.4551%202.91922%2014.5234%203.54932C14.5903%204.16686%2014.5889%204.94133%2014.5889%205.90088V10.0981C14.5889%2011.0576%2014.5903%2011.8321%2014.5234%2012.4497C14.4552%2013.0798%2014.3094%2013.6272%2013.9639%2014.103C13.7619%2014.381%2013.5172%2014.6257%2013.2393%2014.8276C12.7633%2015.1734%2012.2163%2015.3189%2011.5859%2015.3872C10.9683%2015.4541%2010.1942%2015.4536%209.23438%2015.4536H6.76563C5.80591%2015.4536%205.03168%2015.4541%204.41407%2015.3872C3.78385%2015.3189%203.23665%2015.1734%202.76074%2014.8276C2.48291%2014.6257%202.23802%2014.3809%202.03614%2014.103C1.69066%2013.6272%201.54483%2013.0798%201.47657%2012.4497C1.40973%2011.8321%201.41114%2011.0576%201.41114%2010.0981V5.90088C1.41113%204.94132%201.40966%204.16686%201.47657%203.54932C1.54488%202.91921%201.69042%202.37184%202.03614%201.896C2.2381%201.61807%202.4828%201.37333%202.76074%201.17139C3.23665%200.825682%203.78386%200.680109%204.41407%200.611819C5.03168%200.544905%205.80591%200.546389%206.76563%200.546389H9.23438ZM6.76563%201.896C5.77586%201.896%205.0876%201.89738%204.55957%201.95459C4.0443%202.01043%203.76214%202.11349%203.55469%202.26416C3.39135%202.38284%203.24761%202.52662%203.12891%202.68994C2.97821%202.89736%202.8752%203.17967%202.81934%203.69483C2.76214%204.22279%202.76075%204.91131%202.76074%205.90088V10.0981C2.76074%2011.0876%202.76221%2011.7762%202.81934%2012.3042C2.87516%2012.8194%202.97829%2013.1026%203.12891%2013.3101C3.24754%2013.4733%203.39147%2013.6172%203.55469%2013.7358C3.76213%2013.8865%204.04438%2013.9896%204.55957%2014.0454C5.0876%2014.1026%205.77586%2014.103%206.76563%2014.103H9.23438C10.2242%2014.103%2010.9124%2014.1026%2011.4404%2014.0454C11.9556%2013.9896%2012.2379%2013.8865%2012.4453%2013.7358C12.6086%2013.6172%2012.7525%2013.4733%2012.8711%2013.3101C13.0217%2013.1026%2013.1248%2012.8195%2013.1807%2012.3042C13.2378%2011.7762%2013.2393%2011.0876%2013.2393%2010.0981V5.90088C13.2393%204.91131%2013.2379%204.22279%2013.1807%203.69483C13.1248%203.17969%2013.0218%202.89736%2012.8711%202.68994C12.7524%202.52667%2012.6086%202.38281%2012.4453%202.26416C12.2379%202.11355%2011.9556%202.01041%2011.4404%201.95459C10.9124%201.8974%2010.2241%201.896%209.23438%201.896H6.76563Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+[data-slot="tool.call.toolview"] > [data-tool="edit"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M9.94076%201.34942C10.7047%200.90231%2011.6503%200.902415%2012.4143%201.34942C12.7061%201.52015%2012.9688%201.79118%2013.3104%202.13284C13.6521%202.47448%2013.9231%202.73721%2014.0939%203.02894C14.5408%203.79294%2014.5409%204.73856%2014.0939%205.50251C13.9231%205.79415%2013.652%206.05704%2013.3104%206.39861L6.65932%2013.0497C6.28068%2013.4284%206.00695%2013.7108%205.66543%2013.9097C5.32391%2014.1085%204.94315%2014.2074%204.42705%2014.3498L3.24394%2014.6761C2.77527%2014.8054%202.34538%2014.9262%202.00131%2014.9684C1.65196%2015.0112%201.17964%2015.0013%200.810764%2014.6325C0.441921%2014.2637%200.432107%2013.7913%200.47486%2013.442C0.517035%2013.0979%200.6379%2012.668%200.767181%2012.1993L1.09352%2011.0162C1.23588%2010.5001%201.33481%2010.1193%201.5336%209.77784C1.7325%209.43632%202.0149%209.1626%202.39355%208.78395L9.04466%202.13284C9.38625%201.79126%209.64911%201.52016%209.94076%201.34942ZM15.5427%2014.8398H7.55223L8.96707%2013.425H15.5427V14.8398ZM3.39382%209.78422C2.965%2010.213%202.84244%2010.3436%202.75709%2010.49C2.67183%2010.6366%202.61862%2010.8079%202.45733%2011.3925L2.13099%2012.5756C2.00183%2013.0439%201.92194%2013.3419%201.88863%2013.5536C2.10041%2013.5204%202.39872%2013.4416%202.86764%2013.3123L4.05075%2012.9859C4.63544%2012.8246%204.80669%2012.7715%204.95323%2012.6862C5.09968%2012.6008%205.23022%2012.4783%205.65905%2012.0494L10.721%206.98644L8.45577%204.72121L3.39382%209.78422ZM11.7%202.57079C11.3774%202.38198%2010.9777%202.38198%2010.6551%202.57079C10.5602%202.62647%2010.4487%202.72931%2010.0449%203.13311L9.45604%203.72094L11.7213%205.98617L12.3102%205.39833C12.7139%204.99457%2012.8168%204.88307%2012.8725%204.78818C13.0613%204.46561%2013.0612%204.06585%2012.8725%203.74326C12.8169%203.64827%2012.7146%203.53752%2012.3102%203.13311C11.9057%202.72863%2011.795%202.6264%2011.7%202.57079Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+[data-slot="tool.call.toolview"] > [data-tool="grep"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M11.894845%206.647401C11.894845%203.725463%209.534486%201.356779%206.623219%201.35657C3.711786%201.35657%201.351635%203.725338%201.351635%206.647401C1.351843%209.569296%203.711911%2011.938273%206.623219%2011.938273C9.534361%2011.938064%2011.894637%209.569171%2011.894845%206.647401ZM13.245462%206.647401C13.245254%2010.317935%2010.280401%2013.293613%206.623219%2013.293821C2.965871%2013.293821%200.000204%2010.31806%200%206.647401C0%202.976574%202.965746%200%206.623219%200C10.280526%200.000205%2013.245462%202.9767%2013.245462%206.647401Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M16.000417%2015.041079L15.044449%2016.000433L11.530434%2012.473588L12.486298%2011.514234L16.000417%2015.041079Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+[data-chat-flow-kind="context"] [data-disclosure-row][aria-expanded="true"] > span:first-child,
+[data-chat-flow-kind="system-prompt"] [data-disclosure-row][aria-expanded="true"] > span:first-child { --ef-row-icon: url("data:image/svg+xml,%3Csvg%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M11.9512%201.13281C12.401%201.20666%2012.8093%201.34164%2013.1738%201.60645C13.4282%201.79137%2013.6521%202.01609%2013.8369%202.27051C14.1574%202.71187%2014.2892%203.21614%2014.3506%203.78223C14.4105%204.33532%2014.4102%205.02658%2014.4102%205.87305V10.0273C14.4102%2010.8738%2014.4105%2011.5651%2014.3506%2012.1182C14.2892%2012.6843%2014.1574%2013.1885%2013.8369%2013.6299C13.652%2013.8843%2013.4282%2014.109%2013.1738%2014.2939C12.7324%2014.6146%2012.2273%2014.7462%2011.6611%2014.8076C11.1081%2014.8675%2010.4166%2014.8672%209.57031%2014.8672H6.43164C5.58533%2014.8672%204.89387%2014.8675%204.34082%2014.8076C3.77474%2014.7463%203.27046%2014.6144%202.8291%2014.2939C2.57453%2014.109%202.35003%2013.8844%202.16504%2013.6299C1.84444%2013.1885%201.71272%2012.6844%201.65137%2012.1182C1.59147%2011.5651%201.5918%2010.8738%201.5918%2010.0273V5.87305C1.5918%205.02655%201.59146%204.33533%201.65137%203.78223C1.71272%203.21606%201.84443%202.71191%202.16504%202.27051C2.35003%202.01596%202.57453%201.79141%202.8291%201.60645C3.19332%201.34202%203.60062%201.20669%204.0498%201.13281V2.56445C3.87191%202.61154%203.74906%202.66836%203.65137%202.73926C3.51583%202.83777%203.3964%202.95726%203.29785%203.09277C3.1794%203.25581%203.09143%203.4856%203.04297%203.93262C2.9931%204.39287%202.99219%204.99529%202.99219%205.87305V10.0273C2.99219%2010.905%202.99312%2011.5075%203.04297%2011.9678C3.09142%2012.4147%203.17943%2012.6446%203.29785%2012.8076C3.3964%2012.9431%203.51583%2013.0626%203.65137%2013.1611C3.81441%2013.2795%204.04437%2013.3676%204.49121%2013.416C4.95142%2013.4658%205.55411%2013.4668%206.43164%2013.4668H9.57031C10.4479%2013.4668%2011.0505%2013.4659%2011.5107%2013.416C11.9576%2013.3675%2012.1876%2013.2796%2012.3506%2013.1611C12.4861%2013.0626%2012.6056%2012.9431%2012.7041%2012.8076C12.8224%2012.6446%2012.9106%2012.4146%2012.959%2011.9678C13.0088%2011.5075%2013.0098%2010.905%2013.0098%2010.0273V5.87305C13.0098%204.99532%2013.0088%204.39286%2012.959%203.93262C12.9105%203.48579%2012.8225%203.2558%2012.7041%203.09277C12.6056%202.95727%2012.4861%202.83778%2012.3506%202.73926C12.2527%202.66816%2012.1296%202.61064%2011.9512%202.56348V1.13281Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M9.32227%2011.4141H4.95508V10.2148H9.32227V11.4141Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M11.0439%208.90039H4.95508V7.70117H11.0439V8.90039Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3Cpath%20d%3D%22M8.59961%203.75781L9.70996%202.64746L10.5586%203.49609L8.49512%205.55957C8.22173%205.83266%207.77816%205.83285%207.50488%205.55957L5.44141%203.49512L6.28906%202.64746L7.40039%203.75781V1.09668H8.59961V3.75781Z%22%20fill%3D%22%23000%22%3E%3C%2Fpath%3E%3C%2Fsvg%3E"); }
+
+/* 14c 错误条目展开后保持它自己的红点（应用平时就是用 dot 当图标），别换成别的形状 */
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"] [data-disclosure-row][aria-expanded="true"] > span:first-child {
+  color: var(--ef-alert);
+}
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"] [data-disclosure-row][aria-expanded="true"] > span:first-child::before {
+  -webkit-mask: none;
+  mask: none;
+  background-color: var(--ef-alert);
+  flex: 0 0 10px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+/* 14d 错误条目悬停 = 红（原来和正确条目一样走青底青框） */
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"]:hover {
+  background: rgb(var(--ef-alert-rgb) / .10);
+  border-color: rgb(var(--ef-alert-rgb) / .45);
+  border-left-color: var(--ef-alert);
+}
+/* （原来这里还给错误行单独铺了层红 .07，第 14h 之后卡片里的行一律不铺底：
+   卡片自己是红 .10，行内再叠一层就成了卡片里外深浅不一。） */
+
+/* 14e 代码卡展开后的代码块：蓝条只留在 typescript 标题行，下面的源码不再描蓝 */
+[data-slot="tool.call.toolview"] > [data-variant="code"] :is([class*="md-code-block"], pre) {
+  border-left-color: transparent !important;
+}
+[data-slot="tool.call.toolview"] > [data-variant="code"] [class*="bannerWrap"] {
+  border-left: 2px solid var(--ef-cyan-deep);
+  margin-left: -2px;
+}
+/* 出错的代码卡（data-state="error"）：那条蓝条跟着整张卡走红 */
+[data-slot="tool.call.toolview"] > [data-variant="code"][data-state="error"] [class*="bannerWrap"] {
+  border-left-color: var(--ef-alert);
+}
+
+/* 14f 思考行行首：应用那枚图标盒（span 包着的 iconIdle）里的 svg 已被第 12 节藏掉，
+   空盒子仍占 16px，把 ::before 那枚图标挤到左边 7px —— 整个盒子一起藏掉，图标回到正中；
+   同时把 ::before 从 14px 提到 16px，与其它行的 16px 图标同尺寸。 */
+:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"]) > span { display: none !important; }
+:is([class*="lcKema_leading"], [class*="_3GBCTG_leading"])::before {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  background-size: 16px 16px;
+}
+
+/* 14g 错误条目悬停时，行尾下拉键也走红（其余行仍是青） */
+[data-slot="tool.call.toolview"] > [data-tool][data-state="error"] [data-disclosure-row][data-expandable="true"]:hover::after {
+  border-color: var(--ef-alert);
+  opacity: 1;
+}
+
+/* 14h 卡片里的折叠行不再自己铺 hover 底：卡片本身已经铺了一层（青 .08 / 错误红 .10），
+   行内再叠一层就比卡片内边距那一圈深 ——「上下文条悬停蓝块没填满、右边留一条缝」就是这么来的。
+   现在颜色完全交给卡片，整张卡均匀一块。 */
+[data-slot="tool.call.toolview"] > [data-tool] [data-disclosure-row]:hover,
+:is([class*="lcKema_root"], [class*="_3GBCTG_root"]) [data-disclosure-row]:hover,
+:is([class*="o3BgMG_root"], [class*="pFy1Ka_root"]) [data-disclosure-row]:hover,
+[data-chat-flow-kind="context"] > div > [class*="root"] [data-disclosure-row]:hover,
+[data-chat-flow-kind="system-prompt"] > div > [class*="root"] [data-disclosure-row]:hover {
+  background-color: transparent;
+}
+
+/* 尊重减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+/* ---------------------------------------------------------------- 15 亮蓝主按钮 --- */
+/* 主按钮填充已改信号青 #19cffd（与发送键一致），前景必须用深色才有对比度（用户点名） */
+[class*="primaryButton"],
+[class*="_primary"]:not([class*="primaryButton"]):is(button) {
+  color: #0b1416 !important;
+}
+/* Agent 浏览器侧栏「打开真实页 / 弹出窗口」→ 亮蓝 + 深字 */
+button.dsh-ego-side-back {
+  background: var(--ef-cyan) !important;
+  border-color: rgba(255, 255, 255, .22) !important;
+  color: #0b1416 !important;
+}
+button.dsh-ego-side-back:hover {
+  background: var(--ef-cyan-bright) !important;
+}
+/* Agent 浏览器监测页：登录键与页签文字 → 亮蓝 + 深字（用户提供 classname，稳定非哈希） */
+button.dsh-ego-side-login-btn,
+.dsh-ego-side-login-btn {
+  background: var(--ef-cyan) !important;
+  border-color: rgba(255, 255, 255, .22) !important;
+  color: #0b1416 !important;
+}
+button.dsh-ego-side-login-btn:hover,
+.dsh-ego-side-login-btn:hover {
+  background: var(--ef-cyan-bright) !important;
+}
+.dsh-ego-side-tabtxt,
+.dsh-ego-side-tab {
+  color: #0b1416 !important;
+  background: var(--ef-cyan) !important;
+}
+/* 注意：容器是 .dsh-ego-side-tabs（多了 s），必须用类名全等匹配，
+   不能用 [class*=...] 通配，否则整条容器都被染蓝（用户报过一次） */
+.dsh-ego-side-tab:hover,
+.dsh-ego-side-tab.active:hover {
+  background: var(--ef-cyan-bright) !important;
+}
+/* 插件-插件管理-删除确认框的【确认删除/确认卸载】键：
+   应用规则 `.ZsMDKq_dangerButton { background: var(--dsw-alias-label-danger) !important }`，
+   皮肤没映射 --dsw-alias-label-danger → 变量未定义，底色按「无效期计算」退成透明，
+   露出深色弹窗底；文字又被本节 _primary 的黑字规则盖住 → 黑字压深底（用户报的 bug）。
+   显式给亮蓝底（--ef-cyan，与发送键/主按钮同色），黑字保留。 */
+button[class*="_primary_"][class*="dangerButton"] {
+  background: var(--ef-cyan) !important;
+  background-image: none !important;
+  border-color: var(--ef-cyan) !important;
+  color: #0b1416 !important;
+}
+button[class*="_primary_"][class*="dangerButton"]:hover:not(:disabled) {
+  background: var(--ef-cyan-bright) !important;
+}
+
+/* ============================================================================
+   16 r2 修正层（2026-09-28，web 端第二轮）
+   背景：内核升到 0.1.7-rc2 后重排；本层每块都可整块删除回滚
+   （改动前快照：design/wip/backup/patches.css.20260928-160257）
+   ========================================================================= */
+
+/* ---- 16.1【A6】输入框周围浮层菜单底板 → 不透明纯黑（用户要「底板直接调成黑」） ----
+   根因实测：浮层真底板 = ._material_ri079_21，其 background 取 var(--dsw-menu-surface-fill)
+   → 算出 rgba(67,69,74,.45) 半透明冷灰 + backdrop-filter 毛玻璃，跟面板内 #e9ebea 的字撞色。
+   修法：直接重定义 token（应用 CSS 里 --dsw-menu-surface-fill 只有这一个使用点），
+   不走哈希类选择器 —— 免得上层内核再升级时 ri079 哈希变掉。
+   影响面：只作用于 Menu 类浮层；聊天页 / 侧栏 / 卡片底色的 token 未动。 */
+/* ★ 铁律（本轮踩到）：皮肤服务端会**自动给每条规则前挂** `html[data-dsh-skin="endfield-baker"]`，
+   所以 patches.css 里**绝不能再自带这个前缀** —— 自带就变成 `html[...] html[...]`（嵌套 html 不存在）
+   → 规则永不匹配，看上去像「改了没生效」。下面所有规则都用裸选择器。 */
+body {
+  --dsw-menu-surface-fill: #000 !important;
+  --dsw-menu-backdrop-filter: none !important;
+}
+/* 兜底：直接压在浮层真底板上（ri079 是 0.1.7-rc2 实测哈希；token 那条是不依赖哈希的正解，
+   这条保证即使 token 在更近的祖先上被应用重新定义，黑板照样生效）。 */
+[class*="_material_ri079_"] {
+  background: #000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* ---- 16.2【B2】左侧栏七项 hover 变蓝（含「今日消费」复合行） ----
+   before 实测：六个导航行 hover 落到应用默认的 rgba(255,255,255,.06)（灰白薄雾，不是青）；
+     原因是皮肤里那条 `[data-pane="sidebar"] button[class*="entry"]:hover` 用的是旧侧栏类名，
+     rc2 的新侧栏行是 button.hHd-Xa_panelRow（行上没有任何 data-*）→ 那条规则从未命中。
+   after：整行铺皮肤青 12% + 左侧 2px 青色导轨 + 图标/文字转青。
+   坑：「今日消费」是复合行（外层卡片 + 内层主按钮 + 刷新 + 折叠），只给外层上色、
+     内层按钮强制透明，否则行里会冒出第二个小方块。 */
+/* 2026-09-29 D2：选择器从全等哈希 button.hHd-Xa_panelRow 改为后缀匹配 [class*="_panelRow"]——
+   desktop 的行类名是 button.n_2Q3W_panelRow（FINDINGS §4 D2），全等哈希在桌面端命中 0 个。
+   实测 desktop 恰好 6 个（= 插件/技能/MCP/任务看板/技能中心/SSH），后缀写法 web/desktop 通用。 */
+button[class*="_panelRow"] {
+  border-radius: 8px;
+  transition: background-color .13s ease, box-shadow .13s ease, color .13s ease;
+}
+button[class*="_panelRow"]:hover,
+button[class*="_panelRow"][class*="_active"] {
+  background-color: rgb(var(--ef-cyan-rgb) / .12);
+  box-shadow: inset 2px 0 0 var(--ef-cyan);
+  color: var(--ef-cyan);
+}
+button[class*="_panelRow"]:hover svg,
+button[class*="_panelRow"]:hover [class*="Glyph"] {
+  color: var(--ef-cyan);
+}
+div.cvtkAW_footCard,
+[data-dsh-plugin="usage"][data-dsh-part="foot-card"] {
+  border-radius: 8px;
+  transition: background-color .13s ease, box-shadow .13s ease;
+}
+div.cvtkAW_footCard:hover,
+[data-dsh-plugin="usage"][data-dsh-part="foot-card"]:hover {
+  background-color: rgb(var(--ef-cyan-rgb) / .12);
+  box-shadow: inset 2px 0 0 var(--ef-cyan);
+}
+div.cvtkAW_footCard button.cvtkAW_footMain,
+div.cvtkAW_footCard button.cvtkAW_footMain:hover,
+div.cvtkAW_footCard button.cvtkAW_footToggle,
+div.cvtkAW_footCard button.cvtkAW_footToggle:hover {
+  background-color: transparent;
+  box-shadow: none;
+}
+
+/* ---- 16.3【A3】中间「实际操作」行加一条小缩进台阶 ----
+   before 实测（视口 1264×805）：内容列一律 x=426.5 / w=680；思考卡与操作卡
+   （[data-slot="tool.call.toolview"] > [data-tool]）卡片盒左缘**同为 426.5** → 台阶 0px，
+   用户看不出「每小轮干了啥」。两者内层 [data-disclosure-row] 均 [428.5,y,677,34]，行族几何本就一致。
+   after：操作卡盒左缘 440.5、右缘仍 1106.5 → 14px 可读台阶，不产生横向滚动条。
+   margin-left + width:calc(100% - 缩进) 让右缘保持与父容器对齐；box-sizing 显式 border-box，
+   免得 content-box 下 2px 态边框把右缘推出 2px（若右缘对不上，去掉 width 只留 margin 即可）。 */
+:is([data-dsh-frame], [data-dsh-surface="root"]) {
+  --ef-op-indent: 14px;   /* A3 操作卡缩进量：唯一可调点（挂 [data-dsh-frame] 才能在作用域内生效） */
+}
+
+[data-slot="tool.call.toolview"] > :is([data-tool], [data-variant="code"]) {
+  box-sizing: border-box;
+  margin-left: var(--ef-op-indent, 14px);
+  width: calc(100% - var(--ef-op-indent, 14px));
+}
+
+/* ---- 16.4【A6 补充】「＋」命令面板等**没有 material 子层**的菜单壳 → 黑板 ----
+   16.1 的 token/material 两条只覆盖「有 ._material_ri079_21 子层」的浮层
+   （工作区选择器 / 访问模式 / 模型选择器）。左下角「＋」（添加文件或调用指令）那块
+   壳 = ._surface_ri079_1._3e4SsG_menu，内部**没有** material、也不取 --dsw-menu-surface-fill
+   → 底板实测 rgba(0,0,0,0) 全透明，面板里的字直接压在聊天内容上（最严重的一处撞色）。
+   这里用 :is()/:has() 把范围钉死在「自身是 menu/listbox」或「内部含 menu/listbox」的浮层壳上，
+   合成 DOM 自检过：含 listbox 的壳命中并变黑，不含的 ._surface_ri079_* 保持透明（不误伤）。 */
+[class*="_material_ri079_"] {
+  background: #000 !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+[class*="_surface_ri079_"]:is([role="menu"], [role="listbox"]),
+[class*="_surface_ri079_"]:has([role="menu"], [role="listbox"]) {
+  background-color: #000 !important;
+}
+
+
+
+/* ============================================================================
+   17 r3 修正层（2026-09-28 R3 轮，web 端；四个 workstream 片段合并落盘）
+   来源：design/wip/r3/{frame,rows,sidebar,hover}.css（各片段自带 before/after 实测注释）
+   回滚：整体删除本层，或用 design/wip/r3/backup/patches.css.pre-r3-merge 覆盖回去
+   未覆盖项：C1（设置页「内置插件→会话插件/全局插件」行）—— 未拿到样本，见 sidebar.md
+   ★ 铁律：皮肤服务端自动给每条规则挂 html[data-dsh-skin] 前缀，本层不得自带
+   ========================================================================= */
+/* --------- 以下来自 ws: frame --------- */
+/* =====================================================================
+   ws: frame | r3 修正层（A1R + A2bR）· 可直接追加到 patches.css 末尾「17 r3 修正层」
+   ★ 铁律：皮肤服务端自动挂 html[data-dsh-skin="endfield-baker"] 前缀，本块不得自带
+   ===================================================================== */
+
+/* ---------------------------------------------------------------------
+   ws: frame | 条目: A1R | 依赖: 无
+   before（Lead 活体实测，1264×805、data-rightbar-collapsed="true"、grid 第三列 0px）:
+     :is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) rect [695,0,569,805]、pointer-events:none、
+       border-left: 1px solid rgba(255,255,255,.11)      ← 应用自带，不是皮肤写的
+     :is([class*="P3OORG_panel"], [class*="OUqwTW_panel"])     rect [694,0,570,805]
+     design/wip/r3/p0-collapsed.png 逐点扫：y=200 / 400 / 600 在 x=695 各有 1 个孤立亮像素
+       （y=400 实测 (56,61,58)；左邻 x=694 与右邻 x=696 均为 (31,37,34)）
+   after(期望): 收起态两个元素的 border-left 宽度 = 0px（只把颜色改 transparent 会留下
+     1px 宽的半像素混合线，必须宽度归零）；展开态一字不动：
+     panel border-left = 1px solid rgba(104,104,104,.55)（= patches.css 第 11 节）
+   判定「收起」用两条互补选择器取并集，任一命中即视为收起（属性值万一不是 "true" 也不会落空）:
+     ① [data-rightbar-collapsed="true"]（宿主显式标记的收起态）
+     ② :not(:has([data-sidebar-right-open="true"]))（无「展开」标记，正向判定）
+     展开态 = 有 open 标记 ⇒ 两条都不命中 ⇒ 保持 patches.css 第 11 节的 1px 描边
+   --------------------------------------------------------------------- */
+:is([data-dsh-frame][data-rightbar-collapsed="true"], [data-dsh-surface="root"]:has([data-rightbar-collapsed="true"])) :is([class*="P3OORG_panel"], [class*="OUqwTW_panel"]),
+:is([data-dsh-frame][data-rightbar-collapsed="true"], [data-dsh-surface="root"]:has([data-rightbar-collapsed="true"])) :is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]),
+:is([data-dsh-frame], [data-dsh-surface="root"]):not(:has([data-sidebar-right-open="true"])) :is([class*="P3OORG_panel"], [class*="OUqwTW_panel"]),
+:is([data-dsh-frame], [data-dsh-surface="root"]):not(:has([data-sidebar-right-open="true"])) :is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) {
+  border-left-width: 0 !important;
+  border-left-style: none !important;
+}
+
+/* ---------------------------------------------------------------------
+   ws: desktop-leftover | 条目: D1 | 依赖: 无   【2026-09-29 桌面端实修】
+   before（Lead 在 DesktopUI 里用 CDP 实测，1279×752@2、data-rightbar-collapsed="true"）：
+     div.LdcXKW_panelBody  rect x=703 w=576 h=712
+       border-left: 1px solid rgba(255,255,255,.11)   ← 本文件第 6 节
+         [data-slot="rightbar"] [class*="panel"] { border-left: 1px solid var(--ef-line) } 命中
+     同一行还命中 div.LdcXKW_panel（外层，border-left 本来就是 transparent，无观感）
+   after(期望)：面板底板不再画竖线（宽度归零，不是只改颜色：1px 透明边仍会留半像素亮线）。
+   ★ 为什么 web 上你没有这根线、desktop 上有（两条独立原因，缺一不可）：
+     ① 类名不同：web = P3OORG_panel / P3OORG_panelBody，desktop = LdcXKW_panel / LdcXKW_panelBody
+        → 上面 A1R 那四条 [class*="P3OORG_*"] **在 desktop 一条都不匹配**；
+     ② desktop 没有 data-dsh-frame 属性（收起标记直接挂 div.ZTP-Xa_frame 的
+        data-rightbar-collapsed），带 [data-dsh-frame] 前缀的选择器同样全落空。
+     故这里只认两件两个平台都稳的东西：祖先 [data-slot="rightbar"] + 类名后缀 _panel。
+   ★ 不能写成 [data-sidebar-right-panel]：那是 desktop 独有的锚点，写进去 web 侧就永远吃不到
+     这条「无展开标记 ⇒ 不画线」的保护；也不能给 web 加 !important 之外的差异，避免两边观感分叉。
+   --------------------------------------------------------------------- */
+[data-slot="rightbar"] [class*="_panel"] {
+  border-left-width: 0 !important;
+  border-left-style: none !important;
+}
+
+/* ---------------------------------------------------------------------
+   ws: frame | 条目: A2bR | 依赖: 无
+   DOM（读 dsh-client-ui-conversation/lib/client.js 的 CSS Module + slot 定义得到，非猜测）:
+     header.wSkVaW_header                       display:grid
+       ├ titleRow.wSkVaW_titleRow               grid-column:2; display:flex
+       │   ├ titleCluster.wSkVaW_titleCluster    flex:1; min-width:0      ← 对话标题
+       │   ├ headerActions.wSkVaW_headerActions  flex:none; gap:8px       ← 子智能体 / 智能体团队 / 后台任务
+       │   ├ headerUtilities.wSkVaW_headerUtilities flex:none; gap:8px; margin-left:20px
+       │   │                                                                 ← 打开方式(文件资源管理器/pwsh/bash) + ⋯ + 监视器
+       │   └ headerCorner.wSkVaW_headerCorner    flex:none; margin-left:8px; margin-right:-16px
+       │                                                                     ← 右侧栏开关 = .P3OORG_iconButton 28×28
+       └ tabs.wSkVaW_tabs                       grid-column:1/-1; margin-top:10px  ← 对话 / 轨迹
+   slot → 插件归属（全库 client.js 扫描结果，用于确认「是哪几个」）:
+     conversation.session.header.actions   = dsh-client-ui-subagent / dsh-experimental-client-ui-agent-team / dsh-client-ui-jobs
+     conversation.session.header.utilities = dsh-client-ui-open-in-app（文件资源管理器/pwsh/bash 的「打开」）
+     conversation.session.header.corner    = dsh-client-ui-sidebar-right（右侧栏开关）
+   before（Lead 截屏 design/wip/r3/p0-header-check.png = 968×77 真渲染，逐行墨迹带）:
+     第一行（标题 + chip + 打开 + 三图标）墨迹带 y=14..37 → 视觉中心 ≈ 25.5
+     第二行（页面签 对话/轨迹）     墨迹带 y=53..64 → 视觉中心 ≈ 58.5
+     → 功能键组整体比页签行高 33px；开着「8 个子智能体」时标题被 chip 组挤到 0 宽
+   after(期望): headerUtilities + headerCorner 脱离第一行文档流 → 钉到顶栏右下（与页签行同水平带）；
+     titleCluster（flex:1）因此夺回 width(utilities + corner + gap) ≈ 170px，headerActions
+     顺势右移到让位边界（收起态 = 标头图左缘 554px，展开态 = 顶栏右缘 14px）。
+   ⚠ 下面 4 个旋钮是「按截屏像素 + 插件 CSS 实测尺寸推定」的值，活体验收时按 frame.md 的
+     测量片段校正这一处即可；未校正前不要把 A2bR 记成 PASS。
+   --------------------------------------------------------------------- */
+:is([data-dsh-frame], [data-dsh-surface="root"]) {
+  --ef-hdrbar-bottom: 4px;    /* 功能键组底边距顶栏底边（推定：让 28px 按钮的视觉中心落在 y≈57，对齐页签行 58.5） */
+  --ef-hdrbar-right: 14px;    /* 展开态：功能键组右缘距顶栏右缘（推定） */
+  --ef-hdr-corner-w: 28px;    /* headerCorner 单枚宽度 = .P3OORG_iconButton 28×28（插件 CSS 实测） */
+}
+
+/* (1) 两组功能键脱离第一行文档流，贴顶栏右下 */
+:is([data-dsh-frame], [data-dsh-surface="root"]) [data-slot="main.conversation"] header [class*="headerUtilities"],
+:is([data-dsh-frame], [data-dsh-surface="root"]) [data-slot="main.conversation"] header [class*="headerCorner"] {
+  position: absolute;
+  bottom: var(--ef-hdrbar-bottom);
+  margin: 0;
+  z-index: 4;                 /* 高于 header > * 的 z-index:1（tabs / titleRow）*/
+  align-items: center;
+}
+/* (2) 展开态：右对齐顶栏右缘；corner 在最右，utilities 让开 corner 宽度 + gap */
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"])
+  [data-slot="main.conversation"] header [class*="headerCorner"] {
+  right: var(--ef-hdrbar-right);
+}
+:is([data-dsh-frame], [data-dsh-surface="root"]):has([data-sidebar-right-open="true"])
+  [data-slot="main.conversation"] header [class*="headerUtilities"] {
+  right: calc(var(--ef-hdrbar-right) + var(--ef-hdr-corner-w) + 8px);
+}
+/* (3) 收起态：顶栏右侧被标头图占掉（顶栏内容高 75px × --ef-art-ratio）→ 整体左移到图左侧，
+       与 titleRow 的 padding-right 用同一个表达式，保证两组功能键右缘对齐 */
+:is([data-dsh-frame], [data-dsh-surface="root"]):not(:has([data-sidebar-right-open="true"]))
+  [data-slot="main.conversation"] header [class*="headerCorner"],
+:is([data-dsh-frame][data-rightbar-collapsed="true"], [data-dsh-surface="root"]:has([data-rightbar-collapsed="true"]))
+  [data-slot="main.conversation"] header [class*="headerCorner"] {
+  right: calc(var(--ef-art-ratio) * 75px + 14px);
+}
+:is([data-dsh-frame], [data-dsh-surface="root"]):not(:has([data-sidebar-right-open="true"]))
+  [data-slot="main.conversation"] header [class*="headerUtilities"],
+:is([data-dsh-frame][data-rightbar-collapsed="true"], [data-dsh-surface="root"]:has([data-rightbar-collapsed="true"]))
+  [data-slot="main.conversation"] header [class*="headerUtilities"] {
+  right: calc(var(--ef-art-ratio) * 75px + 14px + var(--ef-hdr-corner-w) + 8px);
+}
+
+/* --------- 以下来自 ws: rows --------- */
+/* ============================================================
+   ws: rows | R3 | 条目 A4 + A5
+   空间 space="r3rows"，视口 1264×805，会话 session-96b23f93-44eb-4dd1-9327-74618551aa09
+   本文件所有 before 值均为「皮肤生效态」实测（先断言 data-dsh-skin=endfield-baker）；
+   after 值用「页面内注入本块」的方式实测（patches.css 未改，故只能注入量）。
+   ★ 铁律：皮肤服务端自动挂 html[data-dsh-skin] 前缀，本文件的块不得自带
+   ============================================================ */
+
+/* ---- ws: rows | 条目: A4 | 依赖: 无 ----------------------------------------
+   before（实测）：
+     加载技能卡 = [data-slot="tool.call.toolview"] > [data-tool="skill"]（类族 iWrAna_*）
+       卡片盒 [440.5, y, 666, 26] / 内层行 .iWrAna_row 高 24 / padding 0 0
+       / 行首图标 [452.5→ 442.5, 16×16] / 标题 x=464.5（leading margin-right 6px）
+     基准工具卡（同轮 pwsh/memory_project…，类族 o3BgMG_*）
+       卡片盒 [440.5, y, 666, 36] / 内层行 [data-disclosure-row] 高 34 / padding 5px 10px
+       / 图标 x=452.5 / 标题 x=476.5（leading margin-right 8px）
+     基准思考卡（lcKema_root）[426.5, y, 680, 36] / 内层 [data-disclosure-row] 34 / padding-left 10px
+     差异根因：技能行**不带** [data-disclosure-row]，因此吃不到 patches.css 311-315
+     （第 4 节）那套 5px/10px 内边距 → 卡片盒矮 10px、图标/文字整体左移 10px。
+   after(期望)：卡片盒 36（Δh=0）/ 行 padding 5px 10px / 图标 x=452.5 / 标题 x=476.5
+     / 卡片盒左缘 440.5（与工具卡 Δ0）/ 描边 2px 青 + 1px 白 11% / 圆角 2px / 底色不变
+     / 无下拉箭头（技能行本来就没有，保留语义） */
+[data-slot="tool.call.toolview"] > [data-tool="skill"] > :is([data-expandable="true"], [class*="row"]) {
+  box-sizing: border-box;
+  padding: 5px 10px;
+  min-height: 34px;
+}
+[data-slot="tool.call.toolview"] > [data-tool="skill"] > [data-expandable="true"] > :first-child {
+  margin-right: 8px;   /* 技能行 leading 是 6px，工具卡是 8px；补齐后标题 x 与工具卡同为 476.5 */
+}
+
+/* ---- ws: rows | 条目: A5 | 依赖: 无 ----------------------------------------
+   before（实测）：
+     皮肤第 3 节的用户气泡配方 [class*="userRow"] [class*="bubble"]（patches.css 207-234）
+     误命中了应用的 hover 提示气泡 ._bubble_ugtpz_1（attrs: role="tooltip" data-side=bottom
+     data-align=center，是 .xzv4MW_actions 的**子节点**）。该气泡应用原样式是 position: fixed，
+     被皮肤改成 position: relative → 变成行内流元素 → 撑宽 actions 行：
+       行宽 28 → 97.09（61.09 气泡宽 + 8 gap = +69.09），复制按钮左缘 1078.5 ↔ 1009.41 来回跳。
+     真鼠标指针停在按钮上 → 按钮左移 69px 脱离指针 → 气泡卸载 → 按钮弹回 → 指针又落上 → 无限闪烁。
+     实测 20 帧 @35ms：hover 标志 0/1 交替，按钮 x ∈ {1078.5, 1009.41}，tooltip 在 DOM 里进进出出。
+   after(期望)：tooltip 保持应用原意 position: fixed（脱离文档流）→ actions 行宽恒 28、
+     按钮 rect 恒 [1078.5, y, 28, 28]、hover 前后 Δ(x,y,w,h) 全 0；
+     顺带把被误伤的 tooltip 外观（背景 --dsw-alias-tooltip-bg / 前景 / 3px 7px 内边距 / 圆角 / 黄三角）还给应用。
+   ★ 只针对 role="tooltip"，不动用户气泡本体（本块不修改 .xzv4MW_* 用户气泡） */
+[role="tooltip"][class*="bubble"] {
+  position: fixed !important;
+  padding: 3px 7px !important;
+  border: 0 !important;
+  border-radius: var(--dsw-radius-sm, 8px) !important;
+  background: var(--dsw-alias-tooltip-bg, #141615) !important;
+  color: var(--dsw-static-neutral-bluish-00, #fff) !important;
+  font-size: 13px !important;
+  line-height: 20px !important;
+  box-shadow: none !important;
+}
+[role="tooltip"][class*="bubble"]::after {
+  content: none !important;   /* 去掉皮肤给用户气泡加的 11px 信号黄切角三角 */
+}
+
+/* --------- 以下来自 ws: sidebar --------- */
+/* ============================================================================
+   ws: sidebar | R3 片段（可直接追加到 patches.css 末尾「17 r3 修正层」）
+   本文件只含「追加覆盖块」；★ 铁律：皮肤服务端自动挂 html[data-dsh-skin] 前缀，本块不得自带
+   参考基准 = 未选中任务按钮（会话行）：
+     [data-dsh-responsive-part="sidebar-entry"][class*="sessionRow"]   → patches.css 1119~1135 / 1195~1240
+       height  calc(68.95px * --ef-bk)         (=33.10px @ --ef-bk:0.48)
+       margin  calc(2.5px*--) 3.96% calc(2.5px*--) 9.04%
+       padding-left calc(11.93px * --ef-bk)    (= 5.73px)
+       border  1px solid var(--ef-line)
+       radius  calc(4.12px * --ef-bk)          (= 1.98px)
+       bg      #292827 + baker-card-texture.png (100% 100%) + baker-sub-faint.png
+       hover   bg #434140
+       图标槽  calc(49.08px*--ef-bk) 方 / radius calc(2.74px*--) / #353534 / baker-sub-icon.svg
+       标题    margin-left calc(21.58px*--) / font-size calc(20.88px*--) / weight 400 / #e3e1e1
+       行尾    [class*="time"] font-size calc(19px*--) / rgb(227 225 225 / .5)
+   New Baker（New Baker 按钮）尺寸保持原样：rect 必须仍是 [26,73,228,38]，
+   因此内部件按 38 / 33.096 = 1.148 等比放大，外框 margin/width 一个字都不动。
+   ========================================================================== */
+
+/* ws: sidebar | 条目: B1R | 依赖: 无
+   before(实测 2026-09-28 22:41, url ?bust=r3sb-2245, skin=endfield-baker):
+     rect [26,73,228,38] / display flex / padding 8px 12px / margin 3px 14px
+     background-color rgba(25,207,253,.07) / background-image none
+     border 1px solid rgba(25,207,253,.35) / border-radius 8px / box-shadow none
+     justify-content center / align-items center / font-size 14px / font-weight 500
+     ::before 18px×14px url(assets/new-session.png) contain, margin-right 8px
+   after(期望): 与未选中任务按钮同一套底纹+布局，尺寸不变 [26,73,228,38]
+   ★ 只在「侧栏展开态」生效：收起态（56px 图标栏）的 36×36 圆钮规则在 patches.css 903~911，
+     那条带 !important，本块用 :not([data-sidebar-collapsed="true"]) 让路，不碰它。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"] {
+  box-sizing: border-box;
+  height: 38px;
+  min-height: 38px;
+  /* 左右内缩沿用任务行左内边距（×1.148），上下压到 4px 让 27px 图标槽正好落在 28px 内容盒里 */
+  padding: 4px 12px 4px calc(11.93px * var(--ef-bk) * 1.148);
+  /* 底纹：与未选中任务按钮同一套（rect 底 + 材质 + 右段 faint） */
+  background-color: #292827;
+  background-image: url("assets/baker-card-texture.png"), url("assets/baker-sub-faint.png");
+  background-repeat: no-repeat, no-repeat;
+  background-position: left top, calc(297.93px * var(--ef-bk)) 0.2px;
+  background-size: 100% 100%, calc(100% - 297.93px * var(--ef-bk)) 100%;
+  /* 描边/圆角：任务行同一套（灰线 + 2.27px 小圆角） */
+  border: 1px solid var(--ef-line);
+  border-radius: calc(4.12px * var(--ef-bk) * 1.148);
+  box-shadow: none;
+  /* 布局：任务行是「左图标槽 + 标题」，所以从居中改成左对齐 */
+  justify-content: flex-start;
+}
+
+/* 图标槽 = 任务行的 [class*="slot"]（#353534 方框 + baker-sub-icon.svg），等比放大到 27.06px。
+   原来这里是 18×14 的 new-session.png 裸图标；换成任务行的槽位后，
+   New Baker 的「图标 + 名称」与任务行完全同构（=用户原话「直接替换任务名称」）。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"]::before {
+  content: "";
+  flex: 0 0 auto;
+  align-self: center;
+  width: calc(49.08px * var(--ef-bk) * 1.148);
+  height: calc(49.08px * var(--ef-bk) * 1.148);
+  margin: 0 calc(21.58px * var(--ef-bk) * 1.148) 0 0;
+  border-radius: calc(2.74px * var(--ef-bk) * 1.148);
+  background-color: #353534;
+  background-image: url("assets/baker-sub-icon.svg");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: calc(31.5px * var(--ef-bk) * 1.148) calc(25.5px * var(--ef-bk) * 1.148);
+}
+
+/* 名称排版 = 任务行 [class*="title"]（weight 400 / #e3e1e1 / 11.51px）
+   ★ :not([class*="Mask"]) 必须保留：.hHd-Xa_newSessionLabelMask 的类名也含 newSessionLabel，
+     少了排除就会让 ::after 渲染两遍（R2 坑，见 patches.css 791~795）。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"])::after {
+  content: "New Baker";
+  font-family: var(--ef-baker-font);
+  font-size: calc(20.88px * var(--ef-bk) * 1.148);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: .02em;
+  color: #e3e1e1;
+}
+
+/* 行尾快捷键 = 任务行行尾 [class*="time"]（小号、暗色、贴右）
+   放在 margin-left:auto 上，不挤占「图标槽 + 名称」这一段的任务行布局 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"] [class*="newSessionShortcut"] {
+  position: relative;
+  z-index: 1;
+  margin-left: auto;
+  font-family: var(--ef-baker-font);
+  font-size: calc(19px * var(--ef-bk) * 1.148);
+  color: rgb(227 225 225 / .5);
+}
+
+/* hover 沿用任务行的底板提亮（#292827 → #434140），外加皮肤青描边做可辨识反馈。
+   注意 patches.css 781~786 的 hover 用的是 `background:` 简写（会把 background-image 清成 none），
+   这里显式重写整条 background，避免 hover 时底纹消失。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"]:hover,
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) button[class*="newSession"]:hover {
+  background-color: #434140;
+  background-image: url("assets/baker-card-texture.png"), url("assets/baker-sub-faint.png");
+  background-repeat: no-repeat, no-repeat;
+  background-position: left top, calc(297.93px * var(--ef-bk)) 0.2px;
+  background-size: 100% 100%, calc(100% - 297.93px * var(--ef-bk)) 100%;
+  border-color: rgb(var(--ef-cyan-rgb) / .45);
+  box-shadow: none;
+}
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"]:hover [class*="newSessionLabel"]:not([class*="Mask"])::after,
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"]:hover [class*="newSessionShortcut"] {
+  color: #fff;
+}
+
+/* ---------------------------------------------------------------------------
+   条目: C1（设置 → 内置插件 → 会话插件/全局插件 行 hover 底板）—— 未拿到样本，本轮不落规则。
+   原因与对照实验数据见 sidebar.md「C1」一节；给出可行选择器后再补块。
+   --------------------------------------------------------------------------- */
+
+/* --------- 以下来自 ws: hover --------- */
+/* =====================================================================
+   ws: hover | R3 统一 hover 配方（底板 + 白字）| 依赖: 无
+   用户口径（原话）：「把所有目前没有加上蓝底 hover 的其他 hover 都做得再明显一点：
+     首先是 icon 或者字体变成白色，其次是下面的底板颜色统一用一个更浅一点的灰色」
+   现场枚举（真鼠标 hover + getComputedStyle，视口 1264×805，会话页
+     「继续优化UI细节与hover效果」，data-dsh-skin=endfield-baker）共 58 个可见可交互元素：
+     聊天顶栏 9 / 左侧栏 18 / 右侧栏 12 / 输入区 4 / 黑板菜单条目 15。
+   本块覆盖其中 40 个「原本 hover 不可见或几乎不可见」的元素（清单见 hover.md）。
+   before 实测（应用默认 hover 底板，肉眼几乎不可见）：
+     · 多数按钮：background-color rgba(255,255,255,.06)   ← 黑板(#000)上合成 = rgb(15,15,15)
+     · 轨迹 tab / 新建会话(brand) / 工作区行图标 / ＋菜单首项：hover 完全无变化
+     · 展开底部面板：rgba(255,255,255,.05)（偏离 .06）
+     · 顶栏「子智能体」：只有文字变亮，svg 图标仍停在 rgb(135,142,141)
+   after(期望)：hover 后 background-color 一律 = var(--ef-hover-plate) = rgba(255,255,255,.14)，
+     color 一律 = var(--ef-hover-fg) = #fff（含 svg/[class*=Glyph]，实测这些 svg 用 currentColor，
+     没有写死 fill/stroke）；几何零变化（只写 background-color / color，绝不碰尺寸/内边距/描边）。
+   ★ 铁律：皮肤服务端自动挂 html[data-dsh-skin] 前缀，本块不得自带
+   ---------------------------------------------------------------------
+   【配方变量】唯一可调点：改这两行就整批生效
+     --ef-hover-plate：统一底板。取 .14 的实测依据 —— 黑板上合成 rgb(36,36,36)，
+       相对应用默认的 rgb(15,15,15) 是 3.7× 的亮度台阶（相对亮度 .0048 → .0177），
+       肉眼一眼可辨；白字压在上面仍是 15.5:1（远超 4.5:1）。
+     --ef-hover-fg：图标/文字统一转纯白 #fff。
+   --------------------------------------------------------------------- */
+body {
+  --ef-hover-plate: rgba(255, 255, 255, .14);
+  --ef-hover-fg: #fff;
+}
+
+/* ---- R3-hover-1 聊天顶栏（9 个 button 中覆盖 8 个；「对话」tab 是 aria-selected=true 的青色选中态，跳过）----
+   before: 6 个图标钮 rgba(255,255,255,.06)；「展开底部面板」.05；「子智能体/智能体团队」无底板；
+           「子智能体」hover 只把文字变亮、svg 仍 rgb(135,142,141)；「轨迹」tab hover 完全无变化
+   after(期望): bg rgba(255,255,255,.14) + color/svg #fff，rect 不变
+   坑：`[role="tab"][aria-selected="true"]` 是青色选中态（color rgb(25,207,253) + inset 青下划线），
+      必须排除，否则 hover 灰底会盖掉选中态 */
+[data-slot="main.conversation"] header button:hover:not([aria-selected="true"]):not([class*="primary"]),
+[data-slot="main.conversation"] header [role="button"]:hover:not([aria-selected="true"]):not([class*="primary"]) {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+[data-slot="main.conversation"] header button:hover:not([aria-selected="true"]):not([class*="primary"]) svg,
+[data-slot="main.conversation"] header button:hover:not([aria-selected="true"]):not([class*="primary"]) [class*="Glyph"],
+[data-slot="main.conversation"] header [role="button"]:hover:not([aria-selected="true"]) svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- R3-hover-2 左侧边栏（逐个钉住 9 族，覆盖 10 个元素；「今日消费」卡片内层 2 个按钮是 B2 的青色卡片内层，显式排除）----
+   before: 收起侧边栏/搜索会话/视图选项/添加工作区/检查更新/远程访问/设置 全是 rgba(255,255,255,.06)；
+           「新建会话」品牌行 + 工作区行三个图标钮 hover 完全无变化（只有文字 135→233）
+   after(期望): bg rgba(255,255,255,.14) + color/svg #fff，rect 不变
+   ★ 边界：button.hHd-Xa_panelRow（B2 青色 7 项）、[data-dsh-part="new-session"] / hHd-Xa_newSession（B1）、
+     cvtkAW_footMain / cvtkAW_footToggle（B2 青色卡片内层）一律不在本块选择器内 —— 不碰。 */
+[data-pane="sidebar"] button.hHd-Xa_brand:hover,
+[data-pane="sidebar"] button.hHd-Xa_iconButton:hover,
+[data-pane="sidebar"] button:is([class*="bhn1Oq_searchButton"], [class*="_9lTDKa_searchButton"]):hover,
+[data-pane="sidebar"] button:is([class*="bhn1Oq_iconButton"], [class*="_9lTDKa_iconButton"]):hover,
+[data-pane="sidebar"] button:is([class*="YDXeBa_iconButton"], [class*="hIlkoa_iconButton"]):hover,
+[data-pane="sidebar"] button[class*="WYT-ka_trigger"]:hover,
+[data-pane="sidebar"] button[class*="fThDlq_trigger"]:hover,
+[data-pane="sidebar"] button[class*="VOzbGW_trigger"]:hover {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+[data-pane="sidebar"] button.hHd-Xa_brand:hover svg,
+[data-pane="sidebar"] button.hHd-Xa_iconButton:hover svg,
+[data-pane="sidebar"] button[class*="bhn1Oq_"]:hover svg,
+[data-pane="sidebar"] button:is([class*="YDXeBa_iconButton"], [class*="hIlkoa_iconButton"]):hover svg,
+[data-pane="sidebar"] button[class*="WYT-ka_trigger"]:hover svg,
+[data-pane="sidebar"] button[class*="fThDlq_trigger"]:hover svg,
+[data-pane="sidebar"] button[class*="VOzbGW_trigger"]:hover svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- R3-hover-3 右侧边栏（:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) 内，覆盖 5 个；浏览器页签条 3 个 + 面板头 2 个）----
+   before: 页签关闭/新标签页/分栏/全屏/收起右侧边栏 全是 rgba(255,255,255,.06)
+   after(期望): bg rgba(255,255,255,.14) + color/svg #fff，rect 不变
+   ★ 边界：.dsh-ego-side-*（ego 浏览器插件 UI，patches.css 已用 !important 给青底/灰底，不属于「没有蓝底 hover」）
+     与 aria-selected="true" 的选中页签，显式排除。 */
+:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) button:hover:not([aria-selected="true"]):not([class*="dsh-ego-side"]),
+:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) [role="button"]:hover:not([aria-selected="true"]):not([class*="dsh-ego-side"]) {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) button:hover:not([aria-selected="true"]):not([class*="dsh-ego-side"]) svg,
+:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) button:hover:not([aria-selected="true"]):not([class*="dsh-ego-side"]) [class*="Glyph"],
+:is([class*="P3OORG_panelBody"], [class*="OUqwTW_panelBody"]) [role="button"]:hover:not([aria-selected="true"]) svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- R3-hover-4 输入区（[data-composer-card] + :is([class*="uV2eYG_row"], [class*="RlGAzG_row"])，覆盖 3 个：＋ / 访问模式 / 选择模型）----
+   before: 「访问模式」「选择模型」rgba(255,255,255,.06)；「＋」自带的深底板 rgba(35,37,36,.85) hover 只到 rgb(43,45,44)，
+           文字/图标 rgb(176,183,181) 完全不变
+   after(期望): bg rgba(255,255,255,.14)（合成到灰输入卡上 = 明显更浅）+ color/svg #fff，rect 不变
+   ★ 边界：uV2eYG_primary（发送/停止生成，青底 25,207,253 → 亮青 111,228,255）是主按钮，已有可见 hover，排除。
+   坑：patches.css 876 给 [data-composer-card] button 定过 border-radius:999px，本块**不碰圆角**（几何零变化）。 */
+[data-composer-card] button:hover:not([class*="primary"]),
+[data-composer-card] [role="button"]:hover:not([class*="primary"]),
+:is([class*="uV2eYG_row"], [class*="RlGAzG_row"]) button:hover:not([class*="primary"]) {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+[data-composer-card] button:hover:not([class*="primary"]) svg,
+[data-composer-card] button:hover:not([class*="primary"]) [class*="Glyph"],
+:is([class*="uV2eYG_row"], [class*="RlGAzG_row"]) button:hover:not([class*="primary"]) svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- R3-hover-5 输入区黑板菜单内部条目（用户点名的「黑板 hover 几乎不可见」，覆盖 15 条）----
+   实测三块黑板（A6 后底板 = rgb(0,0,0)）：
+     · 左下角「＋」命令面板 _surface_ri079_1._3e4SsG_menu  内 [_3e4SsG_item role=option] ×9
+     · 访问模式 _list_gzo7u_7  内 [_item_gzo7u_90 role=menuitem] ×4
+     · 选择模型 _7KE1Ra_menu    内 [_7KE1Ra_cell role=menuitem] ×2
+   before: 常态 rgba(0,0,0,0)，hover rgba(255,255,255,.06) → 黑板上合成只有 rgb(15,15,15)，几乎看不见
+   after(期望): hover bg rgba(255,255,255,.14) → 黑板上合成 rgb(36,36,36)，白字 15.5:1，rect 不变
+   坑：`＋` 面板首项 _3e4SsG_active 常态就带 .06（aria-selected=true），hover 前后都是 .06（NO CHANGE）；
+       访问模式已选项 _selected_gzo7u_216 常态全透明 —— 本块只加 hover 底板，不动它们的选中态。
+   用 role 选择器（不依赖哈希），特异性 (0,3,0) > 应用 `.…:hover` (0,2,0) */
+[role="menu"] :is([role="menuitem"], [role="option"]):hover,
+[role="listbox"] :is([role="menuitem"], [role="option"]):hover,
+[class*="_surface_ri079_"] :is([role="menuitem"], [role="option"]):hover {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+[role="menu"] :is([role="menuitem"], [role="option"]):hover svg,
+[role="menu"] :is([role="menuitem"], [role="option"]):hover [class*="Glyph"],
+[role="listbox"] :is([role="menuitem"], [role="option"]):hover svg,
+[class*="_surface_ri079_"] :is([role="menuitem"], [role="option"]):hover svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- 17.6【B1R 校准】New Baker 标签排版对齐「工作区未选中任务行」----
+   before(Lead 活体实测)：标签 [class*="newSessionLabel"]:not(Mask) 为 text-align:center / flex:0 1 auto
+     → 文案居中（x=146 / w=61），与任务行「名称紧贴图标槽左对齐」不同构。
+   参照：未选中任务行标题 .YDXeBa_title = x76 / w142 / text-align:start / flex:1 1 0%
+   after(期望)：标签 flex:1 1 0% + text-align:start → 左对齐、紧贴图标槽（x≈76）。
+   仅补排版两项，不碰底纹/尺寸/圆角（那些在 sidebar 片段里已验）。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"]) {
+  flex: 1 1 0%;
+  text-align: start;
+}
+
+/* ============================================================================
+   18 鱼片第二次目视评审后的修正（2026-09-29）
+   ========================================================================= */
+
+/* ---- 18.1【A4b】加载技能行：行首图标常显 + 下拉箭头移到行尾 ----
+   before(Lead 实测)：技能行 .iWrAna_row [335,y,309,34]，带 data-expandable=true / aria-expanded=false；
+     .iWrAna_leading(16×16) 里同时装着
+       ① .iWrAna_iconIdle（技能图标 14×14，color rgb(25,207,253)）
+       ② svg.iWrAna_chevron.iWrAna_chevronHover（应用的下拉箭头 14×14，display:block）
+     两者 rect 完全相同 (346,y,14,14) → 箭头盖在图标上（用户看到的「左边是箭头、图标没了」）；行尾也没有箭头。
+   参照：带 [data-disclosure-row] 的行由 patches.css 1360/1361/1364 那套处理，技能行不带该属性 → 吃不到。
+   after(期望)：行首只剩技能图标（含 hover 全程可见），行尾出现与其他折叠行同款的 7×7 箭头、展开时翻转。 */
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"]) svg[class*="chevron"],
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"]) [class*="chevronHover"] { display: none !important; }
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"]) [class*="iconIdle"] { opacity: 1 !important; }
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"])[data-expandable="true"]::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  margin-left: 10px;
+  margin-right: 2px;
+  border-right: 1.5px solid var(--dsw-alias-label-tertiary);
+  border-bottom: 1.5px solid var(--dsw-alias-label-tertiary);
+  transform: rotate(45deg) translate(-1px, -1px);
+  transition: transform .15s, border-color .15s;
+  opacity: .7;
+}
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"])[data-expandable="true"][aria-expanded="true"]::after {
+  transform: rotate(-135deg) translate(-1px, -1px);
+}
+:is([class*="iWrAna_row"], [class*="Xpfrra_row"])[data-expandable="true"]:hover::after {
+  border-color: var(--ef-cyan);
+  opacity: 1;
+}
+
+/* ---- 18.2【C1 重做】「会话插件 / 全局插件」hover 底板 = 只包字体一圈（整段替换 17.7 的整行底板）----
+   before(Lead 实测)：标签按钮 .qSYn7G_groupToggle [444,201,76,22]（含左侧箭头 + 标题），
+     标题 span .qSYn7G_groupTitle [464,201,56,22]；应用自带 hover = 按钮上 rgba(25,207,253,.12) + 直角。
+   17.7 曾把底板铺成整行 548×36 → 鱼片反馈「太大」。
+   after(期望)：底板只包住标题文字并稍微外扩（右 8px、上下各 3px），圆角 6px；
+     左边缘 = 标题左缘 464 → 天然避开左侧箭头(444..464，不撞)；hover 触发点仍是按钮本身。 */
+[class*="groupToggle"] [class*="groupTitle"] {
+  position: relative;
+}
+[class*="groupToggle"] [class*="groupTitle"]::before {
+  content: "";
+  position: absolute;
+  inset: -3px -8px;   /* 左右各 8px 对称（鱼片 2026-09-29 要求）：底板左缘 = 标题左缘 464 - 8 = 456，
+                          实测左侧箭头 svg 是 x444..456 → 正好贴着箭头右缘、不重叠 */
+  border-radius: 6px;
+  background-color: transparent;
+  transition: background-color .13s ease;
+  pointer-events: none;
+}
+[class*="groupToggle"]:hover [class*="groupTitle"]::before {
+  background-color: rgb(var(--ef-cyan-rgb) / .16);
+}
+[class*="groupToggle"]:hover [class*="groupTitle"] {
+  color: var(--ef-cyan);
+}
+[class*="groupToggle"],
+[class*="groupToggle"]:hover {
+  background-color: transparent !important;
+}
+
+/* ---- 18.3【hover 收敛】左上角主图标（品牌行）不该有 hover ----
+   before：17 节的 hover 配方把 [data-pane="sidebar"] button.hHd-Xa_brand 也纳入了 →
+     hover 时整条品牌行铺 rgba(255,255,255,.14)、文字与 svg 变白。
+   实测常态：bg rgba(0,0,0,0) / color rgb(233,235,234) / svg 同色。
+   after(期望)：hover 时回到常态（底色透明、文字与图标回到常态色）。 */
+[data-pane="sidebar"] button.hHd-Xa_brand:hover {
+  background-color: transparent !important;
+  color: rgb(233, 235, 234) !important;
+}
+[data-pane="sidebar"] button.hHd-Xa_brand:hover svg,
+[data-pane="sidebar"] button.hHd-Xa_brand:hover [class*="Glyph"] {
+  color: rgb(233, 235, 234) !important;
+}
+
+/* ---- 18.4【hover 补齐】模型 / 推理等级下级菜单（role="menuitemradio"）----
+   before(Lead 实测)：点开右下角「选择模型」→ 上级菜单里点「模型」展开下级，
+     下级每一行 = button._7KE1Ra_option（role="menuitemradio"，240×34，
+     外层 section._7KE1Ra_group > ._7KE1Ra_groupTitle 是供应商分组标题，
+     整个下级挂在 [role="menu"] 的 ._7KE1Ra_groups 里）。
+   17 节的配方只写了 role="menuitem" / role="option" → **menuitemradio 一个都没匹配到**，
+     所以鱼片说的「进一步筛选模型/思考强度的下级菜单没加 hover」。
+   after(期望)：与上级菜单同款 —— hover 时 bg = var(--ef-hover-plate)、文字/图标 = #fff；
+     分组标题（_7KE1Ra_groupTitle）不是可点行，不给 hover。 */
+[role="menu"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover,
+[role="listbox"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover,
+[class*="_surface_ri079_"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover {
+  background-color: var(--ef-hover-plate);
+  color: var(--ef-hover-fg);
+}
+[role="menu"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover svg,
+[role="menu"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover [class*="Glyph"],
+[role="listbox"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover svg,
+[class*="_surface_ri079_"] :is([role="menuitem"], [role="option"], [role="menuitemradio"], [role="menuitemcheckbox"]):hover svg {
+  color: var(--ef-hover-fg);
+}
+
+/* ---- 18.5【B1R 二次校准】New Baker 文字下移，与快捷键提示下缘对齐 ----
+   before(Lead 像素扫描 lead-nb-ink.png，x 76..137 / 150..241 逐行亮度)：
+     标签盒 [76,81,200,22]；「New Baker」墨迹只在 y 83..91 → **贴行盒顶部**，下方空 12px。
+     快捷键提示 .hHd-Xa_newSessionShortcut 盒 [148,84,93,16]、font-size 10.47px、**line-height 22px**
+       → 墨迹 y≈88..96（居中）。
+     即标签文字比提示高约 5px。根因：标签元素 font-size 为 0、line-height 22px 的 strut，
+       而 ::after 自带 line-height:1（=11.51px）→ 行内盒按基线贴顶，没有居中。
+   after(实测迭代)：先试把 ::after 的 line-height 提到 22px（与提示同值）→ 墨迹只从 83..91 挪到 85..93，
+     因为行盒同时被撑高 4px（22→26）抵消了一半；
+     改用相对位移最可控：83..91 + 5px → 88..96，与快捷键提示墨迹的下缘 96 对齐。
+   ★ 只做纵向位移，不动字号/颜色/水平位置（文字左缘仍是 76），也不撑行盒。 */
+:is([data-dsh-frame]:not([data-sidebar-collapsed="true"]), [data-dsh-surface="root"]:not(:has([data-sidebar-collapsed="true"]))) [data-dsh-part="new-session"] [class*="newSessionLabel"]:not([class*="Mask"])::after {
+  position: relative;
+  top: 5px;
+}
+
+/* ---- 19【D6·鱼片点名】内置浏览器覆盖层（查询用量 / 余额）补底板 ----
+   before 实测（2026-09-29 desktop CDP，target=dsh-app）：
+     设置页「查询用量」(a.PF9Dra_linkButton → https://platform.deepseek.com/usage) 在**应用内**
+     弹出内置浏览器层，结构：
+       div.vPH_UG_overlay[role=dialog][aria-modal=true]  rect[0,0,1279,752]  bg rgba(19,21,20,0) ← 整层全透明
+         header.vPH_UG_header[data-window-drag]          rect[1,41,1277,48]  bg transparent
+           .vPH_UG_controls > span.vPH_UG_trafficLights + button.vPH_UG_back（「返回 DeepSeek Harness」）
+         div.vPH_UG_viewport                             rect[1,89,1277,662] bg transparent（DOM 里为空，
+           网页本体由原生视图盖在这块区域上，Page.captureScreenshot 拍不到）
+     后果：顶栏 41..89 透出主界面 —— 返回键直接压在侧栏 brand 标志上，窗口边缘也漏底。
+     鱼片原话：「查询用量和余额这两个按钮打开之后的界面好像也不太对的样子，可能需要加个底板」。
+   after：顶栏 #151716 实底 + 发丝分隔线；viewport/整层用应用底色 rgb(19,21,20) 兜底；返回键入 BAKER 青系。
+   ⚠ vPH_UG 是构建哈希（skill 坑 7），内核升级可能漂移 —— 这层没有 data-* 钩子，
+     命中失效时先现场量类名（CDP 查 [class*="_viewport"]），再改下面三条。 */
+[class*="vPH_UG_overlay"] {
+  background: rgb(19, 21, 20) !important;
+}
+[class*="vPH_UG_header"] {
+  background: rgb(21, 23, 22) !important;
+  border-bottom: 1px solid var(--ef-line);
+}
+[class*="vPH_UG_viewport"] {
+  background: rgb(19, 21, 20) !important;
+}
+[class*="vPH_UG_back"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: rgb(233, 235, 234);
+  border-radius: 6px;
+  transition: background-color .13s ease, color .13s ease;
+}
+[class*="vPH_UG_back"]:hover {
+  background: rgb(var(--ef-cyan-rgb) / .12);
+  color: var(--ef-cyan);
+}
+
+/* Fullscreen rightbar must fully cover the underlying workspace. */
+[data-sidebar-right-panel="fullscreen"][data-sidebar-right-open="true"] {
+  background-color: #131514 !important;
+  z-index: 100 !important;
+}
+[data-sidebar-right-panel="fullscreen"][data-sidebar-right-open="true"] > [class*="_panelBody"] {
+  background-color: #131514 !important;
+}
+
+/* Question takeover: keep its header plain, not conversation artwork. */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]),
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) header {
+  background: #060807 !important;
+}
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) header::before,
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) header::after {
+  content: none !important;
+  background: none !important;
+}
+
+/* One outer question card border, with a header/body separator. */
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) {
+  border: 1px solid var(--ef-line-strong) !important;
+}
+:is([class*="Mbwy4a_card"], [class*="mAtvLq_card"]) > header {
+  border: 0 !important;
+  border-bottom: 1px solid var(--ef-line-strong) !important;
+}

@@ -8,7 +8,8 @@ import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { buildPayload, collectSkills } from '../src/collect.ts'
-import { SkillPanel } from '../src/client/SkillPanel.tsx'
+import { PanelController } from '../src/client/panel/controller.ts'
+import { SkillPanel } from '../src/client/panel/SkillPanel.tsx'
 import type { ListPayload } from '../src/client/api.ts'
 
 const TMP = mkdtempSync(join(tmpdir(), 'skill-ws-test-'))
@@ -114,6 +115,7 @@ describe('SkillPanel workspace presentation and filtering', () => {
               description: 'Skill in A',
               level: 'project-dsh',
               path: '/path/ws-a/.dsh/skills/proj-skill-a/SKILL.md',
+              fileState: 'editable',
               modelInvocable: true,
               userInvocable: true,
               workspaceRoot: '/path/ws-a',
@@ -125,6 +127,7 @@ describe('SkillPanel workspace presentation and filtering', () => {
               description: 'Skill in B',
               level: 'project-dsh',
               path: '/path/ws-b/.dsh/skills/proj-skill-b/SKILL.md',
+              fileState: 'editable',
               modelInvocable: true,
               userInvocable: true,
               workspaceRoot: '/path/ws-b',
@@ -148,14 +151,14 @@ describe('SkillPanel workspace presentation and filtering', () => {
     const root = createRoot(container)
 
     await act(async () => {
-      root.render(createElement(SkillPanel, { api: fakeApi as never, onClose: () => {} }))
+      root.render(createElement(SkillPanel, { api: fakeApi as never, controller: new PanelController() }))
     })
     await act(async () => {
       await Promise.resolve()
     })
 
     // Dropdown filter rendered
-    const select = container.querySelector('#dsh-skill-workspace-filter') as HTMLSelectElement
+    const select = container.querySelector('select') as HTMLSelectElement
     expect(select).not.toBeNull()
     expect(select.options.length).toBe(3) // All + ws-a + ws-b
 
