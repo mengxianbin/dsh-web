@@ -4,12 +4,14 @@ import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-workspace'
+import { join } from 'node:path'
 import z from 'schemastery'
 import { mountOnce } from './mount-once.ts'
 import { resolveDshHome } from './dsh-home.ts'
 import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
 import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
+import { TaskbotBossGate } from './host/boss-gate.ts'
 import { SteerAckTracker } from './host/steer-ack.ts'
 
 export const name = 'dsh-session-dispatch'
@@ -86,6 +88,12 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
         bindings: store,
         // The attention ledger: sessionClass records + default-pin application.
         attention,
+        // Boss gate + halt wake (dispatch-gate-halt-wake-1121): reads the
+        // taskbot checkpoint ($DSH_HOME/taskbot-state.json — same file the
+        // SKILL in-position reading and the watchdog use), refuses bot-worker
+        // dispatches while a stale halt wedge is provable, and clears a
+        // leftover halt so the self-heal chain re-arms.
+        bossGate: new TaskbotBossGate({ statePath: join(dshHome, 'taskbot-state.json') }),
       }),
       // Delivery onto an existing Session: queue by default, steer on request.
       makeSessionSendRoute({ sessions }, { steerAck }),

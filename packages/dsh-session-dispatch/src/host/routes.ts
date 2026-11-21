@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import { decideBossGate, type BossGateDecision, type DispatchBossGate } from './boss-gate.ts'
 import { readBoundedJson, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 
@@ -154,6 +155,12 @@ export interface DispatchServices {
   readonly bindings?: DispatchBindingStore
   /** Attention ledger; when absent, dispatches record no class and apply no pin default. */
   readonly attention?: DispatchAttentionApi
+  /**
+   * Boss-presence gate + halt wake (dispatch-gate-halt-wake-1121). When
+   * absent, dispatches are never gated and no wake runs — the optional shape
+   * keeps pre-gate deployments and tests byte-identical.
+   */
+  readonly bossGate?: DispatchBossGate
 }
 
 /** Body-parse verdict. */
@@ -288,6 +295,41 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
         writeJson(res, 404, { ok: false, error: `workspace not found: ${workspaceId}` })
         return
       }
+      // Boss gate + halt wake (dispatch-gate-halt-wake-1121): one checkpoint
+      // snapshot decides both halves, in this exact order — the verdict MUST
+      // be computed from the pre-wake snapshot, because clearing halt first
+      // would void the halt conjunct and let the very first wedge dispatch
+      // through. The wake then fires on any halt snapshot, rejected or not:
+      // the refused dispatch is itself the "new work arrived" event that
+      // unlocks the existing self-heal chain (guard-check → watchdog →
+      // dispatchTakeover opens the next boss). Never throws: the gate is a
+      // reader, not an owner of the dispatch path.
+      let gate: BossGateDecision | undefined
+      let haltCleared = false
+      if (services.bossGate !== undefined) {
+        const reading = await services.bossGate.check()
+        gate = decideBossGate(reading, sessionClass, Date.now())
+        if (gate.halt) {
+          haltCleared = await services.bossGate.wakeIfHalted()
+          if (haltCleared) {
+            console.warn(`[dispatch-gate] stopFlag=halt cleared (wake) — self-heal chain re-arms; class=${sessionClass ?? 'human'} taskRef=${taskRef ?? '-'}`)
+          }
+        }
+        if (gate.verdict === 'reject') {
+          console.warn(`[dispatch-gate] reject reason=${gate.reason} class=${sessionClass ?? 'human'} taskRef=${taskRef ?? '-'}`)
+          writeJson(res, 428, {
+            ok: false,
+            error: `boss gate: no boss in position (${gate.reason}). Open a boss first (单任务施工入口分支一: POST /api/session-dispatch with sessionClass=bot-boss) or retry once the halt wake has re-armed the self-heal chain; human-class dispatches are never gated.`,
+            bossGate: { verdict: gate.verdict, reason: gate.reason, haltCleared },
+          })
+          return
+        }
+        if (gate.verdict === 'degraded') {
+          console.warn(`[dispatch-gate] degraded reason=${gate.reason} — allowing dispatch without a boss verdict (fail-open with trace)`)
+        } else {
+          console.log(`[dispatch-gate] allow reason=${gate.reason} class=${sessionClass ?? 'human'} taskRef=${taskRef ?? '-'}`)
+        }
+      }
       // One critical section per taskRef: 409 gate -> session create -> ledger append.
       const proceed = async (): Promise<void> => {
         if (taskRef !== undefined && services.bindings !== undefined) {
@@ -374,6 +416,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
               bindingRecorded: false,
               bindingError: errorDetail(error),
               ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+              ...(gate === undefined ? {} : { bossGate: { verdict: gate.verdict, reason: gate.reason, ...(haltCleared ? { haltCleared: true } : {}) } }),
             }, { 'cache-control': 'no-store' })
             return
           }
@@ -382,6 +425,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           ok: true,
           sessionId,
           ...(attentionError === undefined ? {} : { attentionRecorded: false, attentionError }),
+          ...(gate === undefined ? {} : { bossGate: { verdict: gate.verdict, reason: gate.reason, ...(haltCleared ? { haltCleared: true } : {}) } }),
         }, { 'cache-control': 'no-store' })
       }
       if (taskRef !== undefined && services.bindings !== undefined) {
