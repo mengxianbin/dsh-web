@@ -9,8 +9,9 @@ carry an opaque `taskRef` to record a durable task-to-session binding in the
 quick ledger (`$DSH_HOME/dispatch-bindings.json`); while that taskRef still
 has a live session the same dispatch is refused with `409`, and
 `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
-`POST /api/session-send` queues one prompt onto an existing Session
-(queue-only delivery; the wire shape has no delivery-mode field).
+`POST /api/session-send` delivers one prompt onto an existing Session
+(queue by default; an optional `mode` field steers into the running turn's
+next step boundary).
 `POST /api/session-stop` cancels an existing Session's active turn — the
 pending inbox survives, so the Session can be woken again through
 session-send. Every

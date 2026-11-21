@@ -7,8 +7,8 @@ DSH Web 的纯 REST 会话派发：`POST /api/session-dispatch` 通过 Host 自�
 携带不透明的 `taskRef`，在快账（`$DSH_HOME/dispatch-bindings.json`）中持久记录
 任务到会话的绑定；该 taskRef 仍有活会话时同样的派发被 `409` 拒绝，
 `GET /api/session-dispatch/bindings` 提供带实时活性的账面条目。
-`POST /api/session-send` 向既有会话排入一条提示词（queue-only 投递，请求体不
-暴露投递 mode 字段）。`POST /api/session-stop` 取消既有会话的当前 turn——排队
+`POST /api/session-send` 向既有会话投递一条提示词（默认 queue；可选 `mode`
+字段可 steer 注入运行中 turn 的下一步边界）。`POST /api/session-stop` 取消既有会话的当前 turn——排队
 输入保留，会话可再经 session-send 唤醒。每次派发还会向注意力账本（`$DSH_HOME/session-attention.json`）
 声明一个 `sessionClass`（默认 `human`；bot 值班会话为 `bot-boss`；bot 派发的任务
 工作为 `bot-worker`；旧字面 `bot` 归一为 `bot-worker`），账本对每个
