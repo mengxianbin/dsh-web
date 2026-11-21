@@ -2,11 +2,12 @@
  * Session attention classification (triclass origin: "human", "bot-boss",
  * "bot-worker") plus the once-per-Session default-pin pass that consumes it.
  *
- * The class answers who a Session serves, not who typed first:
- * human-dispatched task Sessions are `human`, bot duty Sessions (rotation
- * shifts, watchdog takeovers) are `bot-boss`, bot-dispatched task Sessions
- * are `bot-worker` (user ruling, 2026-10-29, superseding the earlier
- * two-value human|bot split that labeled duty Sessions `human`). Callers
+ * The class answers what shape a Session is, not who typed first (rulings:
+ * 2026-11-21 form criterion, superseding the 2026-10-29 origin criterion
+ * and the earlier two-value human|bot split): long-running task-book
+ * Sessions are `bot-worker` whoever initiated them, duty Sessions
+ * (rotation shifts, watchdog takeovers) are `bot-boss`, conversational
+ * Sessions are `human`. Callers
  * declare the class on `POST /api/session-dispatch`; anything undeclared —
  * a Session created in the UI, or a Session that predates this ledger — is
  * classified `human`, which fails toward attention: an unwanted pin is one
