@@ -456,20 +456,24 @@ export function makeAttentionRoute(attention: DispatchAttentionApi): WebRoute {
   }
 }
 
-/** One validated session-send request. Deliberately mode-free: delivery is queue-only. */
+/** Delivery modes the send wire accepts; the default when absent is `queue`. */
+export type SessionSendMode = 'queue' | 'steer'
+
+/** One validated session-send request. `mode` defaults to `queue` so a caller that predates the field keeps the queue semantic exactly. */
 export interface SessionSendRequest {
   readonly sessionId: string
   readonly prompt: string
+  readonly mode: SessionSendMode
 }
 
 /** Body-parse verdict for the send route. */
 export type SessionSendBodyResult = { readonly ok: true; readonly value: SessionSendRequest } | { readonly ok: false; readonly error: string }
 
 /**
- * Validate one raw session-send body. Pure, and queue-only by construction:
- * the wire shape has no delivery-mode field, so no caller input can ever
- * select a different delivery semantic. Every rejection names the offending
- * field.
+ * Validate one raw session-send body. Pure. The `mode` field is optional and
+ * must be exactly `queue` or `steer` when present; an absent field defaults
+ * to `queue`, so the pre-mode wire keeps its queue-only behavior. Every
+ * rejection names the offending field.
  * @param body - parsed JSON body (unknown from the wire).
  * @returns the validated request, or the first field error.
  */
@@ -478,7 +482,7 @@ export function parseSessionSendBody(body: unknown): SessionSendBodyResult {
     return { ok: false, error: 'body must be a JSON object' }
   }
   const record = body as Record<string, unknown>
-  const { sessionId, prompt } = record
+  const { sessionId, prompt, mode } = record
   if (typeof sessionId !== 'string' || sessionId.trim() === '') {
     return { ok: false, error: 'sessionId must be a non-empty string' }
   }
@@ -488,7 +492,10 @@ export function parseSessionSendBody(body: unknown): SessionSendBodyResult {
   if (prompt.length > PROMPT_MAX_CHARS) {
     return { ok: false, error: 'prompt exceeds the 900000-character send limit' }
   }
-  return { ok: true, value: { sessionId: sessionId.trim(), prompt } }
+  if (mode !== undefined && mode !== 'queue' && mode !== 'steer') {
+    return { ok: false, error: 'mode must be "queue" or "steer"' }
+  }
+  return { ok: true, value: { sessionId: sessionId.trim(), prompt, mode: mode ?? 'queue' } }
 }
 
 /** Session service surface the send route consumes (the prompt half of the dispatch surface). */
@@ -497,13 +504,31 @@ export interface SessionSendServices {
 }
 
 /**
- * POST /api/session-send — queue one prompt onto an existing Session, the
- * REST mirror of typing into a live session's composer. The prompt is
- * delivered with the fixed queue semantic: a busy Session consumes it as a
- * fresh turn after the current one, an idle Session starts a turn at once.
- * No mode field exists on the wire and no code path can steer.
+ * Optional ACK sink the send route notifies after a `steer` delivery is
+ * accepted, carrying the delivery timestamp so the sink can pair it with the
+ * model's first response. Fail-open: the route never waits on it and never
+ * fails a delivery because of it.
  */
-export function makeSessionSendRoute(services: SessionSendServices): WebRoute {
+export interface SteerAckSink {
+  delivered(sessionId: string, requestId: string, deliveredAt: number): void
+}
+
+/** Route options: the ACK sink is optional so queue-only wiring stays a one-liner. */
+export interface SessionSendRouteOptions {
+  readonly steerAck?: SteerAckSink
+}
+
+/**
+ * POST /api/session-send — deliver one prompt onto an existing Session, the
+ * REST mirror of typing into a live session's composer. Two delivery modes:
+ * `queue` (the default, and the only behavior the pre-mode wire had) makes a
+ * busy Session consume the prompt as a fresh turn after the current one and
+ * an idle Session start a turn at once; `steer` injects the prompt at the
+ * current turn's next step boundary (busy Session reads it inside the turn
+ * it is already running), falling back to the wake-turn path when the
+ * Session is idle or stopped.
+ */
+export function makeSessionSendRoute(services: SessionSendServices, options: SessionSendRouteOptions = {}): WebRoute {
   return {
     kind: 'exact',
     path: `${SESSION_SEND_API_PREFIX}`,
@@ -525,18 +550,26 @@ export function makeSessionSendRoute(services: SessionSendServices): WebRoute {
         writeJson(res, 400, { ok: false, error: parsed.error })
         return
       }
-      const { sessionId, prompt } = parsed.value
+      const { sessionId, prompt, mode } = parsed.value
+      const requestId = `session-send-${randomUUID()}`
       const signal = new AbortController().signal
       try {
         await services.sessions.prompt({
-          requestId: `session-send-${randomUUID()}`,
+          requestId,
           sessionId,
-          mode: 'queue',
+          mode,
           content: [{ type: 'text', text: prompt }],
         }, signal)
       } catch (error) {
         writeJson(res, statusForError(error), { ok: false, error: errorDetail(error) })
         return
+      }
+      if (mode === 'steer') {
+        try {
+          options.steerAck?.delivered(sessionId, requestId, Date.now())
+        } catch {
+          // ACK bookkeeping is observational: never fail the delivery over it.
+        }
       }
       writeJson(res, 200, { ok: true, sessionId }, { 'cache-control': 'no-store' })
     },

@@ -2,6 +2,8 @@
 
 Status: implemented
 
+> Partially superseded by [2026-11-21-session-send-steer-mode](2026-11-21-session-send-steer-mode.md): the wire now carries an optional `mode` field (`queue` default, `steer` opt-in). The queue-only closure below stays authoritative for field-less callers, which behave exactly as before.
+
 ## Problem
 
 Programmatic dispatch could create a Session and queue its first prompt, but nothing could talk to a Session that was already running. Cross-session delivery — one session's output being exactly what another session needs — existed only as manual typing in the web composer or as single-shot CDP injection, which breaks whenever the layout shifts and cannot batch. Callers needed the composer's send as a plain REST call against an existing sessionId.

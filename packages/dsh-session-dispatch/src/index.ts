@@ -10,6 +10,7 @@ import { resolveDshHome } from './dsh-home.ts'
 import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
 import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
+import { SteerAckTracker } from './host/steer-ack.ts'
 
 export const name = 'dsh-session-dispatch'
 export const inject = ['webServer', 'sessionController', 'workspaceRegistry']
@@ -32,9 +33,12 @@ export const Config: z<Config> = z.object({
  * binding in the quick ledger (`$DSH_HOME/dispatch-bindings.json`) and is
  * refused with 409 while that taskRef still has a live session;
  * `GET /api/session-dispatch/bindings` serves the ledger with live aliveness.
- * `POST /api/session-send` queues one prompt onto an existing Session with
- * the fixed queue semantic (the wire shape has no delivery-mode field, so no
- * caller input can steer). `POST /api/session-stop` cancels an existing
+ * `POST /api/session-send` delivers one prompt onto an existing Session:
+ * `queue` (the default, the pre-field wire semantic) waits for the current
+ * turn, `steer` injects at the current turn's next step boundary (idle or
+ * stopped Sessions keep the wake-turn path). Every delivered `steer` is
+ * ACK-tracked from delivery to the model's first response as one structured
+ * `[steer-ack]` line. `POST /api/session-stop` cancels an existing
  * Session's active turn — the pending inbox survives, so the Session can be
  * woken again through session-send — and logs one structured audit line for
  * the optional caller-supplied `actor` (audit-only, never steering). Every dispatch also declares its `sessionClass`
@@ -67,6 +71,9 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
     // Structural view of the Host session service: the real controller
     // brands requestId/sessionId, which the routes mint as plain strings.
     const sessions = ctx.sessionController as unknown as DispatchSessionApi
+    // ACK bookkeeping for delivered steers: the route records delivery, the
+    // session/event stream below supplies injection + first response.
+    const steerAck = new SteerAckTracker()
     const routes = [
       ...makeDispatchRoutes({
         sessions,
@@ -80,8 +87,8 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
         // The attention ledger: sessionClass records + default-pin application.
         attention,
       }),
-      // Delivery onto an existing Session: queue-only by construction.
-      makeSessionSendRoute({ sessions }),
+      // Delivery onto an existing Session: queue by default, steer on request.
+      makeSessionSendRoute({ sessions }, { steerAck }),
       // Turn cancellation on an existing Session: inbox-preserving abort.
       makeSessionStopRoute({ sessions }),
     ]
@@ -91,6 +98,9 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
     // gets the human default here. The membership gate lives in the ledger,
     // so subagent children, side threads, and forks are never pinned.
     const disposeEvents = ctx.on('session/event', (session, event) => {
+      // ACK pairing runs first and is fail-open inside the tracker; it must
+      // not be skipped by the attention gate below.
+      steerAck.observe(String(session.id), event)
       if (event.type !== 'user/message') return
       if (event.data.source.kind !== 'user') return
       void attention.ensureFirstMessage(String(session.id)).catch(() => {})

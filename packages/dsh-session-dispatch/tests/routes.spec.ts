@@ -485,9 +485,9 @@ function sendReq(body: unknown, opts: { loopback?: boolean; url?: string } = {})
 }
 
 describe('parseSessionSendBody', () => {
-  it('accepts a minimal request and trims sessionId', () => {
+  it('accepts a minimal request, trims sessionId, and defaults mode to queue', () => {
     expect(parseSessionSendBody({ sessionId: ' session-1 ', prompt: 'hello' }))
-      .toEqual({ ok: true, value: { sessionId: 'session-1', prompt: 'hello' } })
+      .toEqual({ ok: true, value: { sessionId: 'session-1', prompt: 'hello', mode: 'queue' } })
   })
 
   it('rejects a non-object body', () => {
@@ -511,9 +511,15 @@ describe('parseSessionSendBody', () => {
       .toMatchObject({ ok: false, error: expect.stringContaining('900000') })
   })
 
-  it('drops a caller-supplied mode field instead of carrying it into the request', () => {
+  it('carries an explicit mode through and rejects an unknown one by name', () => {
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 'steer' }))
+      .toEqual({ ok: true, value: { sessionId: 's', prompt: 'x', mode: 'steer' } })
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 'queue' }))
+      .toEqual({ ok: true, value: { sessionId: 's', prompt: 'x', mode: 'queue' } })
     expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 'whatever' }))
-      .toEqual({ ok: true, value: { sessionId: 's', prompt: 'x' } })
+      .toMatchObject({ ok: false, error: expect.stringContaining('mode') })
+    expect(parseSessionSendBody({ sessionId: 's', prompt: 'x', mode: 7 }))
+      .toMatchObject({ ok: false, error: expect.stringContaining('mode') })
   })
 })
 
@@ -532,12 +538,29 @@ describe('session-send route', () => {
     expect(request.content).toEqual([{ type: 'text', text: 'look at this' }])
   })
 
-  it('is queue-only: a caller-supplied mode field never reaches the prompt call', async () => {
+  it('defaults to queue when the wire carries no mode field (pre-mode callers unchanged)', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x' }))
+    expect(captured.status).toBe(200)
+    expect(captures.requests.map(request => request.mode)).toEqual(['queue'])
+  })
+
+  it('passes an explicit steer mode through to the prompt call', async () => {
     const captures = fakeSendServices()
     const handler = makeSessionSendRoute(captures).handler!
     const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x', mode: 'steer' }))
     expect(captured.status).toBe(200)
-    expect(captures.requests.map(request => request.mode)).toEqual(['queue'])
+    expect(captures.requests.map(request => request.mode)).toEqual(['steer'])
+  })
+
+  it('rejects an unknown mode with 400 before touching the session service', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 's', prompt: 'x', mode: 'yolo' }))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({ ok: false, error: expect.stringContaining('mode') })
+    expect(captures.requests).toHaveLength(0)
   })
 
   it('never creates a session: the services surface exposes no create path', async () => {

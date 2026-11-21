@@ -88,23 +88,29 @@ startup pass.
 
 ### `POST /api/session-send`
 
-Queue one prompt onto an existing Session — the REST mirror of typing into a
+Deliver one prompt onto an existing Session — the REST mirror of typing into a
 live session's composer (cross-session delivery: one session's output becomes
 another session's input). Body (JSON, at most 1 MiB):
 
 | field | type | required | meaning |
 |-------|------|----------|---------|
 | `sessionId` | string | yes | Target existing Session (created earlier, still alive) |
-| `prompt` | string | yes | Message queued behind the current turn, exactly like a composer send |
+| `prompt` | string | yes | The message to deliver |
+| `mode` | string | no | `"queue"` (default) or `"steer"`; any other value is a 400 naming the field |
 
-Delivery is queue-only by construction: the wire shape has no delivery-mode
-field, so no caller input can steer; a busy Session consumes the message as a
-fresh turn after the current one, an idle Session starts a turn at once.
-Responses: `200 { ok, sessionId }`, `400` invalid body or `session/*` Host
-rejection (missing, archived, or disposed session), `403` non-loopback, `405`
-wrong method. Pointer discipline for long bodies: commit the text to git
-first and send only the path plus a one-line instruction — the 900,000
-character cap is a ceiling, not the intended shape.
+Delivery semantics: `queue` — the default, and the exact behavior of the
+pre-field wire — makes a busy Session consume the message as a fresh turn
+after the current one and an idle Session start a turn at once. `steer`
+injects the message at the current turn's next step boundary, so a busy
+Session reads it inside the turn it is already running; an idle or stopped
+Session keeps the wake-turn path (the prompt opens a new turn). Each
+delivered `steer` is ACK-tracked from delivery to the model's first response
+that read it, emitted as one structured `[steer-ack]` line.
+Responses: `200 { ok, sessionId }`, `400` invalid body (including an unknown
+`mode`) or `session/*` Host rejection (missing, archived, or disposed
+session), `403` non-loopback, `405` wrong method. Pointer discipline for long
+bodies: commit the text to git first and send only the path plus a one-line
+instruction — the 900,000 character cap is a ceiling, not the intended shape.
 
 ### `POST /api/session-stop`
 
