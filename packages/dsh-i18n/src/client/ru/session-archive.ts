@@ -101,6 +101,8 @@ export const ru: Record<string, string> = {
   'arch.reason.missing-seam': 'Текущая среда SDK не поддерживает операцию',
   'arch.reason.busy': 'Выполняется другая операция',
   'arch.reason.error': 'Операция не удалась',
+  'arch.reason.seal-required': 'Сессия не закрыта (проверка сентинела сохранения не пройдена); пропущено шлюзом архивации',
+  'arch.reason.identity-denied': 'У актора нет прав архивировать эту сессию (отклонено таблицей решений)',
   'arch.preview.title': 'Просмотр сессии',
   'arch.preview.messages': 'Всего сообщений: {n}',
   'arch.preview.empty': 'Нет содержимого диалога для показа',

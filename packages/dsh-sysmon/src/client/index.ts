@@ -38,14 +38,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 
   /**
-   * Type-only shim for the two resident seats the pinned SDK cohort
-   * (dsh-client-ui-conversation ^0.1.2-rc.1) predates, but which the
-   * harness it runs against declares and renders. Mirrors the harness
-   * declarations verbatim (`ui-conversation` apply.ts); delete once the
-   * repo's SDK cohort reaches a conversation build that carries them.
+   * Type-only shim for the resident seat the pinned SDK cohort still
+   * predates, but which the harness it runs against declares and renders.
+   * Mirrors the harness declarations verbatim (`ui-conversation` apply.ts).
+   * The `conversation.header.leading` mirror is gone: the 0.2.1-rc.3
+   * conversation build now declares that seat itself (owner prop and all),
+   * and a second, narrower declaration collides with it (TS2717).
    */
   interface SlotMap {
-    'conversation.header.leading': { kind: 'single'; scope: 'root' }
     'conversation.composer.dock.trailing': { kind: 'list'; scope: 'session' }
   }
 }

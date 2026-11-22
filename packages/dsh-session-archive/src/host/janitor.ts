@@ -1287,7 +1287,7 @@ export class ArchiveService {
     // stamp first, ledger fallback — archive-at-host-time-1114), so these
     // candidates are the ones the next real cycle will compute.
     const deleteSeeds = this.config.autoDeleteEnabled
-      ? autoDeleteSeedCandidates(seedRows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
+      ? autoDeleteSeedCandidates(built.rows, { retainDays: this.config.autoDeleteDays, now, runStartedAt: now, protectedIds: protectedSet })
       : []
     const plan = planDelete(built.rows, deleteSeeds.map((seed) => seed.id), this.protectedReason(undefined, built.rows))
     let deleteBytes = 0

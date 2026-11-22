@@ -142,7 +142,13 @@ describe('DSH community-market manifest compatibility', () => {
     const dshPeers = Object.keys(peers).filter(name => name === '@deepseek-ai/dsh' || name.startsWith('@deepseek-ai/dsh-'))
     expect(dshPeers.length).toBeGreaterThan(10)
     for (const name of dshPeers) {
-      expect(peers[name], name).toMatch(/^\^0\.2\.1-rc\.1$/)
+      // The aggregate host peer carries the FAMILY support line instead: this
+      // repo's family-dsh-engines contract requires a `>=<semver>` peer for
+      // `@deepseek-ai/dsh`, and app-boot's preflight satisfies an open-ended
+      // `>=` range at least as permissively as a caret; the plugin's own
+      // dsh-* peers stay carets on the baseline tuple.
+      const shape = name === '@deepseek-ai/dsh' ? /^>=0\.2\.1-rc\.3$/ : /^\^0\.2\.1-rc\.3$/
+      expect(peers[name], name).toMatch(shape)
     }
   })
 })

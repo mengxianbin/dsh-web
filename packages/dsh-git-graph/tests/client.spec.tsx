@@ -327,7 +327,7 @@ describe('BranchChip', () => {
     }
   })
 
-  it('user does not see the hero chip move when the hero row changes (#1972)', async () => {
+  it('user sees the hero chip written back before the options group when the row appends it (#1972)', async () => {
     const stack = document.createElement('div')
     const heroRow = document.createElement('div')
     heroRow.className = 'heroWorkspaceRow'
@@ -352,11 +352,12 @@ describe('BranchChip', () => {
       heroRow.append(anchor)
       await act(async () => { await Promise.resolve() })
 
-      // Then the chip stays where the row put it: the placement must not write
-      // back into the row it watches, because that write re-queues the
-      // observer's own callback and starves the renderer (#1972)
+      // Then the guarded placement writes it back once — immediately before
+      // the trailing options group — and stops: the observer only writes
+      // while the chip sits anywhere else, so its own `insertBefore` cannot
+      // re-queue the callback and starve the renderer (#1972)
       expect(anchor.parentElement).toBe(heroRow)
-      expect(anchor.nextElementSibling).toBeNull()
+      expect(anchor.nextElementSibling).toBe(options)
     } finally {
       stack.remove()
     }

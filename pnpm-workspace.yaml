@@ -13,12 +13,25 @@ linkWorkspacePackages: true
 # 全家桶收敛 @deepseek-ai/schemastery 单版本：rc.5 系（ui-settings 等）钉
 # ~3.18.5、caret 系解析到 3.19.0，双实例的 declare global 互染会让 dsh-usage
 # 的 Config 声明发射报 TS2883/TS2742（linked-build 连败根因之一）。
-# cordis 同理收敛 4.0.2：caret（^4.0.2）会解析到 4.1.0，peer 变体会让
-# ui-slots 落成与 hidden hoist 不同的物理实例——各包 declare module 互看不见
-# （LocaleNamespaceMap 键不可见 TS2345）。
+# cordis 同理收敛（精确钉、不放 caret）：caret（^4.0.2）会解析到 4.1.0，peer
+# 变体会让 ui-slots 落成与 hidden hoist 不同的物理实例——各包 declare module
+# 互看不见（LocaleNamespaceMap 键不可见 TS2345）。钉位随 v0.4.12 基线上调到
+# 4.0.5（基线 dsh-agents 直接 import type { Volatile }，cordis 4.0.2 无此导出
+# → TS2305；4.0.5 仍 <4.1.0，防漂语义不变）。
 overrides:
   '@deepseek-ai/schemastery': 3.19.0
-  '@deepseek-ai/cordis': 4.0.2
+  '@deepseek-ai/cordis': 4.0.5
+  # rollout-verify 的 cohort 纯度要求根锁把家族键全部钉在 scaffold floor
+  # （0.2.1-rc.3）：rc.3 之后上游给这 7 个包补发过 0.2.1-rc.5，caret
+  # （^0.2.1-rc.3 允许同 tuple 预发布）会漂到 rc.5 → lockfileCohortViolations
+  # 报红。精确钉回 rc.3（caret range 仍被满足）；cohort 上调时同步改。
+  '@deepseek-ai/dsh-agent-default-model': 0.2.1-rc.3
+  '@deepseek-ai/dsh-agent': 0.2.1-rc.3
+  '@deepseek-ai/dsh-llm': 0.2.1-rc.3
+  '@deepseek-ai/dsh-atomic-write': 0.2.1-rc.3
+  '@deepseek-ai/dsh-config-editor': 0.2.1-rc.3
+  '@deepseek-ai/dsh-app-boot': 0.2.1-rc.3
+  '@deepseek-ai/dsh-hmr': 0.2.1-rc.3
 
 allowBuilds:
   # The cloudflared postinstall downloads the platform binary (the auto-tunnel

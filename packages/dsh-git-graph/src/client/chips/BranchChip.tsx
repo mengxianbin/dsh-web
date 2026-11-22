@@ -174,24 +174,12 @@ export function BranchChip(props: BranchChipProps) {
   // The row ends with an options group that carries `margin-left: auto`, so an
   // appended chip lands at the far right of the selector row. Keep the portaled
   // chip immediately before that group: directly after the agent-preset seat.
-  //
-  // The seat is asserted after every commit instead of being watched with a
-  // MutationObserver on the row: the observer's own `insertBefore` re-queued
-  // its callback, and that feedback loop starved the renderer of a blank
-  // session (issue #1972). React appends portal children last, so a commit
-  // that moves the chip is the only thing that needs a re-assertion.
-  useLayoutEffect(() => {
-    if (!heroSeat || heroRow === null) return
-    const anchor = chipRef.current
-    if (anchor === null || anchor.parentElement !== heroRow) return
-    const trailing = findHeroTrailingGroup(heroRow)
-    if (trailing === null || anchor.nextElementSibling === trailing) return
-    heroRow.insertBefore(anchor, trailing)
-  })
-
-  // The row ends with an options group that carries `margin-left: auto`, so an
-  // appended chip lands at the far right of the selector row. Keep the portaled
-  // chip immediately before that group: directly after the agent-preset seat.
+  // The placement is watched with a MutationObserver whose write is guarded
+  // (it no-ops once the chip already sits before the group), so the observer's
+  // own `insertBefore` cannot re-queue its callback — the starvation of a blank
+  // session (fork issue #1972) came from an unguarded write, not from watching
+  // the row; React appends portal children last, so the guarded observer also
+  // catches the append a post-commit assertion would miss.
   useLayoutEffect(() => {
     if (!heroSeat || heroRow === null) return undefined
     const place = (): void => {
