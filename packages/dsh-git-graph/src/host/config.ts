@@ -13,8 +13,21 @@
  * @module @linxin666/dsh-client-ui-git-graph/host/config
  */
 
-import type { Volatile } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
+
+/**
+ * Stable reference to a volatile config field — verbatim cosmokit shape
+ * (`Volatile` + `VolatileSnapshot`), redeclared locally because the workspace
+ * override pins cordis 4.0.2 (which does not re-export it; 4.0.5 does) and
+ * cosmokit is not a direct dependency here. `get()` returns the recursively
+ * readonly snapshot, which is exactly what schemastery's `.volatile()` emits,
+ * so schema output stays assignable to these fields.
+ */
+export type VolatileSnapshot<T> = T extends object ? { readonly [K in keyof T]: VolatileSnapshot<T[K]> } : T
+
+export interface Volatile<T> {
+  get(): VolatileSnapshot<T>
+}
 
 /** Plugin config as the runtime reads it: one live reference per field. */
 export interface Config {

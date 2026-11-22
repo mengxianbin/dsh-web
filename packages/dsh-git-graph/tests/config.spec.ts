@@ -6,8 +6,7 @@
  * being volatile silently leaves the settings page and drops every write.
  */
 import { describe, expect, it } from 'vitest'
-import type { Volatile } from '@deepseek-ai/cordis'
-import { Config, effectiveConfig } from '../src/host/config.ts'
+import { Config, effectiveConfig, type Volatile } from '../src/host/config.ts'
 
 /** The shared reference protocol the Loader's `updateVolatile` writes through. */
 const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write')

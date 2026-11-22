@@ -6,7 +6,7 @@
  * a same-origin asynchronous view over that service.
  */
 
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-commands'
 import z from '@deepseek-ai/schemastery'
@@ -46,6 +46,20 @@ import { mountOnce } from './mount-once.ts'
 import { createGoalVerificationGate, type GoalFace } from './host/verification-gate.ts'
 import { normalizeCatalog, type ModelCatalogView, type VerificationSettings } from './core/verification.ts'
 import { probeWorkspaceChanges } from './host/workspace-evidence.ts'
+
+/**
+ * Stable reference to a volatile config field — verbatim cosmokit shape
+ * (`Volatile` + `VolatileSnapshot`), redeclared locally because the workspace
+ * override pins cordis 4.0.2 (which does not re-export it; 4.0.5 does) and
+ * cosmokit is not a direct dependency here. `get()` returns the recursively
+ * readonly snapshot, which is exactly what schemastery's `.volatile()` emits,
+ * so schema output stays assignable to these fields.
+ */
+export type VolatileSnapshot<T> = T extends object ? { readonly [K in keyof T]: VolatileSnapshot<T[K]> } : T
+
+export interface Volatile<T> {
+  get(): VolatileSnapshot<T>
+}
 
 /** Order of the announcement section within the shared tool-guidance band. */
 const SECTION_ORDER = PLUGIN_TOOL_SECTION_ORDERS['task-board']

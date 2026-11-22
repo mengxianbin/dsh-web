@@ -13,7 +13,7 @@
  * go, the tools unregister and the published summary clears) without a remount
  * or a restart.
  */
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 // Type-only: pulls the host web server's Context merge (ctx.webServer) this
 // half registers its setup routes on.
@@ -32,6 +32,20 @@ import { createGitHubSetup } from './host/setup.ts'
 import type { GitHubSyncService } from './host/service.ts'
 import { mountOnce } from './mount-once.ts'
 import { EXTENSION_TOOL_SECTION_ORDER, visibleToolText } from './tool-surface.ts'
+
+/**
+ * Stable reference to a volatile config field — verbatim cosmokit shape
+ * (`Volatile` + `VolatileSnapshot`), redeclared locally because the workspace
+ * override pins cordis 4.0.2 (which does not re-export it; 4.0.5 does) and
+ * cosmokit is not a direct dependency here. `get()` returns the recursively
+ * readonly snapshot, which is exactly what schemastery's `.volatile()` emits,
+ * so schema output stays assignable to these fields.
+ */
+export type VolatileSnapshot<T> = T extends object ? { readonly [K in keyof T]: VolatileSnapshot<T[K]> } : T
+
+export interface Volatile<T> {
+  get(): VolatileSnapshot<T>
+}
 
 /**
  * npm identity shared by every install source of this package. The host

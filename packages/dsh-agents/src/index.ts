@@ -14,7 +14,7 @@
  *
  * @module @linxin666/dsh-agents
  */
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -31,6 +31,20 @@ import { readService } from './host/services.ts'
 import { TeamService, type TeamServiceContext } from './team/index.ts'
 import { installTeamTools, type TeamToolInstallation } from './tools/index.ts'
 import { PLUGIN_TOOL_SECTION_ORDERS, visibleToolText } from './tool-surface.ts'
+
+/**
+ * Stable reference to a volatile config field — verbatim cosmokit shape
+ * (`Volatile` + `VolatileSnapshot`), redeclared locally because the workspace
+ * override pins cordis 4.0.2 (which does not re-export it; 4.0.5 does) and
+ * cosmokit is not a direct dependency here. `get()` returns the recursively
+ * readonly snapshot, which is exactly what schemastery's `.volatile()` emits,
+ * so schema output stays assignable to these fields.
+ */
+export type VolatileSnapshot<T> = T extends object ? { readonly [K in keyof T]: VolatileSnapshot<T[K]> } : T
+
+export interface Volatile<T> {
+  get(): VolatileSnapshot<T>
+}
 
 /** Services this row needs before it mounts. The workspace registry, command dispatcher and agent registry are resolved optionally: a deployment that lacks one still mounts, and a run that needs the missing face fails closed with a named code. The Team runtime faces are optional for the same reason — M1's ledger, routes and member brief keep working without them. */
 export const inject = ['systemPrompt', 'typertGateway', 'webServer']

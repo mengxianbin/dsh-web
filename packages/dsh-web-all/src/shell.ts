@@ -52,13 +52,27 @@
  * to gate: /api/dsh-web-all/rows and its ledger were removed with the
  * subpath-row mount.
  */
-import type { Context, Volatile } from '@deepseek-ai/cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
 import { listDegraded, recordDegraded } from './degraded.ts'
 import { RETIRED_PLUGINS as RETIRED_PLUGINS_GENERATED } from './retired-plugins.generated.ts'
 import { shellState } from './state.ts'
+
+/**
+ * Stable reference to a volatile config field — verbatim cosmokit shape
+ * (`Volatile` + `VolatileSnapshot`), redeclared locally because the workspace
+ * override pins cordis 4.0.2 (which does not re-export it; 4.0.5 does) and
+ * cosmokit is not a direct dependency here. `get()` returns the recursively
+ * readonly snapshot, which is exactly what schemastery's `.volatile()` emits,
+ * so schema output stays assignable to these fields.
+ */
+export type VolatileSnapshot<T> = T extends object ? { readonly [K in keyof T]: VolatileSnapshot<T[K]> } : T
+
+export interface Volatile<T> {
+  get(): VolatileSnapshot<T>
+}
 
 /** Required services: none — the shell must activate before anything else. */
 export const inject = [] as const
