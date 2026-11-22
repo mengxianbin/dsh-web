@@ -1,4 +1,5 @@
 /**
+ * i18n-allow: ja target-script dictionary - CJK kanji is this locale's own copy, not an untranslated leak
  * The ja (Japanese) dictionary for the betterSidebar namespace.
  *
  * Mirrors the key set of `zh` in `locales.ts`. The sidebar's `t()`

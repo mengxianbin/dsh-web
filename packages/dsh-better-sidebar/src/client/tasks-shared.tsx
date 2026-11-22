@@ -269,7 +269,7 @@ export function TaskLine(props: {
       role="button"
       tabIndex={0}
       className={css.taskLine}
-      title={tasks.map(task => `${task.subject}（${t(taskStatusKey(task.status))}）`).join('\n')}
+      title={tasks.map(task => `${task.subject}（${t(taskStatusKey(task.status))}）`).join('\n')} // i18n-allow: fullwidth parens are shared zh-style tooltip typography, not untranslated copy
       onClick={(event) => {
         event.stopPropagation()
         props.onOpenTask(primary.id, event.currentTarget)

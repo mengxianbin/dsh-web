@@ -1,4 +1,5 @@
 /**
+ * i18n-allow: zh-TW target-script dictionary - CJK is this locale's own copy, not an untranslated leak
  * The zh-HK (Traditional Chinese — Hong Kong) dictionary for the betterSidebar
  * namespace.
  *
