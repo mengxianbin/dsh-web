@@ -54,6 +54,8 @@ export interface FakeHost {
   }
   sources(): InventorySources
   ledger: LedgerDocument
+  /** Requests `buildInventory` passed to the feed, in call order (row-cut flags). */
+  feedRequests: unknown[]
 }
 
 export function createFakeHost(options: {
@@ -134,6 +136,7 @@ export function createFakeHost(options: {
   const host: FakeHost = {
     home,
     feedItems,
+    feedRequests: [],
     liveIds: options.liveIds ?? [],
     persistedIds,
     brokenIds,
@@ -142,7 +145,8 @@ export function createFakeHost(options: {
     sources() {
       return {
         feed: {
-          async list() {
+          async list(request: unknown) {
+            host.feedRequests.push(request)
             return { items: feedItems }
           },
         },
@@ -252,7 +256,8 @@ export function writeProjcacheSessionFile(home: string, id: string, entry: { tit
  * objects, so callers can monkey-patch methods between get() calls. */
 export function fakeContext(host: FakeHost): unknown {
   const sessionController = {
-    async list() {
+    async list(request: unknown) {
+      host.feedRequests.push(request)
       return { items: host.feedItems }
     },
     async inspect(sessionId: string) {
