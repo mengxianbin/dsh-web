@@ -15,7 +15,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Session, appendPluginRecord } from '@deepseek-ai/dsh-session'
 import { SessionId } from '@deepseek-ai/dsh-session/types'
 import { SEAL_RECORD, sessionSealProjection } from '../src/host/seal-projection.ts'
-import { computeSealInWorker, createSealStateSync } from '../src/host/seal-state.ts'
+import { SealComputeError, computeSealInWorker, createSealStateSync } from '../src/host/seal-state.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SealCheckResult } from '../src/core/types.ts'
 import { assistantMsg, createFakeHost, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
@@ -165,7 +165,8 @@ describe('createSealStateSync', () => {
 
   it('operator records a changed verdict and stamps UNKNOWN when the compute itself fails', async () => {
     // Given a mounted sync whose first turn end records UNSEALED, When the next
-    // compute throws like a dead worker, Then the state reads UNKNOWN decode-fail.
+    // compute throws like a dead worker, Then the state reads UNKNOWN worker-error
+    // (an infra cause), never the transcript claim decode-fail.
     const { ctx, session, stateOf, registered } = makeHarness()
     const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'UNSEALED', detail: 'sentinel-pending' }))
     const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
@@ -178,7 +179,31 @@ describe('createSealStateSync', () => {
     compute.mockImplementation(() => { throw new Error('worker exploded') })
     turnEnd(ctx, session, 2)
     await vi.waitFor(() => {
-      expect(stateOf()).toEqual({ verdict: 'UNKNOWN', detail: 'decode-fail' })
+      expect(stateOf()).toEqual({ verdict: 'UNKNOWN', detail: 'worker-error' })
+    })
+    sync.stop()
+    await ctx.fiber.dispose()
+  })
+
+  it('operator keeps decode-fail for a transcript the worker could not read and names an infra rejection', async () => {
+    // Given a mounted sync, When the worker RETURNS a genuine decode failure,
+    // Then the record keeps decode-fail; when the compute instead REJECTS with
+    // a named infra cause, Then the record carries that cause, not decode-fail.
+    const { ctx, session, stateOf, registered } = makeHarness()
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'UNKNOWN', detail: 'decode-fail' }))
+    const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(ctx, session, 1)
+    await vi.waitFor(() => { expect(stateOf()).toEqual({ verdict: 'UNKNOWN', detail: 'decode-fail' }) })
+
+    compute.mockImplementation(() => {
+      throw new SealComputeError('seal-state: worker script not found next to the plugin module', 'worker-missing')
+    })
+    turnEnd(ctx, session, 2)
+    await vi.waitFor(() => {
+      expect(stateOf()).toEqual({ verdict: 'UNKNOWN', detail: 'worker-missing' })
     })
     sync.stop()
     await ctx.fiber.dispose()
