@@ -36,6 +36,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /**
+ * Services this half reads directly (`ctx.locale`, `ctx.slots`). Without this
+ * export cordis gives the fiber an empty inject list and every `ctx.locale` /
+ * `ctx.slots` access throws `cannot get property "…" without inject`, which
+ * fails the plugin — and, under the host boot gate, the whole web boot.
+ * `uiSession` is deliberately absent: it is consumed through the deferred
+ * `ctx.inject(['uiSession'], …)` face in `frozenOpen.ts`, not a direct read.
+ */
+export const inject = ['slots', 'locale']
+
+/**
  * Client plugin body: register the dictionaries and the two row occupants.
  * @param ctx - client root context.
  */
