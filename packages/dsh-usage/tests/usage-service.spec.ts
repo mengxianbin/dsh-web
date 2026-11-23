@@ -59,7 +59,7 @@ const CREDENTIALS_KIMI_KEY = {
   resolve: async () => ({ value: 'unused' }),
 }
 
-function makeCtx(services: Record<string, unknown> = {}) {
+function makeCtx(services: Record<string, unknown> = {}, host: Record<string, unknown> = {}) {
   const sessionListeners: Array<(session: object, event: unknown) => void> = []
   const ctx = {
     on: (event: string, cb: (session: object, event: unknown) => void) => {
@@ -67,6 +67,9 @@ function makeCtx(services: Record<string, unknown> = {}) {
       return () => {}
     },
     get: (name: string) => services[name],
+    // Host-level faces the cordis Context exposes as properties rather than
+    // through get(): the describe-sweep cache fingerprints ctx.loader.
+    ...host,
   }
   return {
     ctx: ctx as never,
@@ -848,6 +851,80 @@ describe('DSH 0.1.7 foreign settings resolution (#1739)', () => {
     expect(snapshot?.balanceSupported).toBe(false)
     expect(snapshot?.balance).toBeUndefined()
     await service.stop()
+  })
+})
+
+/** A describe() sweep row resolving the deepseek route's pi-ai profile. */
+const sweepPiAiRow = () => ({
+  ns: 'llm-pi-ai',
+  value: { providers: { deepseek: { baseURL: 'https://api.deepseek.com' } } },
+})
+
+/** A Loader face whose entry config the version fingerprint reads. */
+function makeSweepLoader() {
+  const entry = {
+    options: { id: 'llm' },
+    fiber: {
+      uid: 1,
+      state: 2,
+      config: { providers: { deepseek: { baseURL: 'https://api.deepseek.com' } } },
+    },
+  }
+  return { entry, loader: { entries: () => [entry] } }
+}
+
+describe('usage/overview settings sweep cache (#1123)', () => {
+  it('two overview() calls sweep settings.describe() only once while the config version stands', () => {
+    // Given a live deepseek route, a settings describe sweep, and a Loader the
+    // version fingerprint can read
+    const settings = { describe: vi.fn(() => [sweepPiAiRow()]) }
+    const { loader } = makeSweepLoader()
+    const { ctx } = makeCtx({ llm: LLM_DEEPSEEK, settings }, { loader })
+    const service = new UsageService(ctx, OPTIONS)
+
+    // When the overview is assembled twice with no config change between
+    const first = service.overview()
+    const second = service.overview()
+
+    // Then the first assembly swept once and every later read was a cache hit
+    expect(settings.describe).toHaveBeenCalledTimes(1)
+    expect(settings.describe).toHaveBeenCalledWith({ redactSecrets: false })
+    expect(first.providers.find((p) => p.provider === 'deepseek')?.balanceSupported).toBe(true)
+    expect(second.providers.find((p) => p.provider === 'deepseek')?.balanceSupported).toBe(true)
+  })
+
+  it('a Loader config change invalidates the cached rows so the next overview sweeps again', () => {
+    // Given a warm cache built from one config version
+    const settings = { describe: vi.fn(() => [sweepPiAiRow()]) }
+    const { entry, loader } = makeSweepLoader()
+    const { ctx } = makeCtx({ llm: LLM_DEEPSEEK, settings }, { loader })
+    const service = new UsageService(ctx, OPTIONS)
+
+    service.overview()
+    expect(settings.describe).toHaveBeenCalledTimes(1)
+
+    // When a config write lands (the fingerprint input changes)
+    entry.fiber.config = { providers: { deepseek: { baseURL: 'https://api.deepseek.com/v2' } } }
+
+    // Then the next overview sweeps fresh instead of serving the stale rows
+    const view = service.overview()
+    expect(settings.describe).toHaveBeenCalledTimes(2)
+    expect(view.providers.find((p) => p.provider === 'deepseek')?.balanceSupported).toBe(true)
+  })
+
+  it('without a Loader face every overview read falls back to the uncached sweep', () => {
+    // Given no ctx.loader — the version fingerprint cannot be computed
+    const settings = { describe: vi.fn(() => [sweepPiAiRow()]) }
+    const { ctx } = makeCtx({ llm: LLM_DEEPSEEK, settings })
+    const service = new UsageService(ctx, OPTIONS)
+
+    // When two overviews run, each route read sweeps as it did before the cache
+    service.overview()
+    service.overview()
+
+    // Then describe() ran per read (two route reads per overview) — fail-open
+    // to the current path, never a version this function cannot compute
+    expect(settings.describe).toHaveBeenCalledTimes(4)
   })
 })
 

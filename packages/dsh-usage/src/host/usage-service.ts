@@ -166,6 +166,92 @@ function deepMerge(base: unknown, patch: unknown): unknown {
   return result
 }
 
+/** The settings service face this service reads: legacy get plus the 0.1.7 sweep. */
+interface SettingsFace {
+  get?(ns: unknown): unknown
+  describe?(options?: unknown): Array<{ ns: string; value: unknown }>
+}
+
+/** One cached `settings.describe()` sweep: its rows plus the config version they answer for. */
+interface DescribeSweep {
+  version: string
+  rows: Array<{ ns: string; value: unknown }>
+}
+
+/**
+ * Per-context sweep cache, keyed by the host context so a replaced settings
+ * service (or an unrelated fixture) never inherits another context's rows.
+ */
+const describeSweeps = new WeakMap<Context, DescribeSweep>()
+
+/** One Loader row as the version token reads it: profile identity plus the live fiber's config face. */
+interface LoaderEntryView {
+  options?: { id: string }
+  fiber?: { uid?: number | null; state?: number; config?: unknown; effectiveConfig?: unknown }
+}
+
+/**
+ * A cheap token for the config state a `describe()` sweep projects its
+ * `ns`/`value` rows from: the Loader entry set in order, each entry's id,
+ * fiber identity, lifecycle state, and resolved config with volatile
+ * references unwrapped (the same projection `plainConfig` applies). Config
+ * writes, mounts, unmounts, and state flips all change the token, and the
+ * token covers a superset of the rows describe keeps (raw Loader rows
+ * include the include-children and duplicate ids describe filters out), so
+ * a mismatch can only cost an extra sweep, never serve a stale row. An
+ * unreadable Loader or an unserializable config yields `undefined` and the
+ * caller falls through to the uncached path: a version this function
+ * cannot compute never changes what the caller sees.
+ * @param ctx - host context exposing the Loader.
+ * @returns the config version token, or `undefined` when none can be computed.
+ */
+function describeVersion(ctx: Context): string | undefined {
+  try {
+    const loader = (ctx as unknown as {
+      root?: { loader?: { entries(): Iterable<LoaderEntryView> } }
+      loader?: { entries(): Iterable<LoaderEntryView> }
+    }).root?.loader
+      ?? (ctx as unknown as { loader?: { entries(): Iterable<LoaderEntryView> } }).loader
+    if (loader === undefined || typeof loader.entries !== 'function') return undefined
+    const parts: string[] = []
+    for (const entry of loader.entries()) {
+      const fiber = entry.fiber
+      parts.push(
+        String(entry.options?.id ?? ''),
+        String(fiber?.uid ?? ''),
+        String(fiber?.state ?? ''),
+        JSON.stringify(fiber === undefined ? null : unwrapVolatiles(fiber.effectiveConfig ?? fiber.config)),
+      )
+    }
+    return parts.join('\u0001')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The `settings.describe()` rows for this context, served from the
+ * config-versioned cache while the token still matches and swept fresh on a
+ * mismatch — the cache can only skip a sweep, never substitute rows a fresh
+ * sweep would not produce. The settings service's own write and reload
+ * paths still sweep (and emit `settings/document-updated`) on their own
+ * schedule; this only drops the overview's redundant per-route sweeps over
+ * one unchanged configuration.
+ * @param ctx - host context exposing the Loader.
+ * @param settings - the settings service whose sweep is being cached.
+ * @returns the descriptor rows, or undefined when the service has no sweep.
+ */
+function describeSweep(ctx: Context, settings: SettingsFace): unknown {
+  if (typeof settings.describe !== 'function') return undefined
+  const version = describeVersion(ctx)
+  if (version === undefined) return settings.describe({ redactSecrets: false })
+  const hit = describeSweeps.get(ctx)
+  if (hit?.version === version) return hit.rows
+  const rows = settings.describe({ redactSecrets: false })
+  if (Array.isArray(rows)) describeSweeps.set(ctx, { version, rows })
+  return rows
+}
+
 /**
  * Read a foreign settings namespace's resolved value (the llm adapter
  * profiles, the agent default model). Resolves across pre-0.1.7 settings.get(),
@@ -175,17 +261,14 @@ function deepMerge(base: unknown, patch: unknown): unknown {
 function readNamespace(ctx: Context, ns: string): unknown {
   try {
     // 1. Try legacy settings.get(ns) or 0.1.7 settings.describe()
-    const settings = service<{
-      get?(ns: unknown): unknown
-      describe?(options?: unknown): Array<{ ns: string; value: unknown }>
-    }>(ctx, 'settings')
+    const settings = service<SettingsFace>(ctx, 'settings')
     if (settings !== undefined) {
       if (typeof settings.get === 'function') {
         const value = settings.get(ns)
         if (value !== undefined) return unwrapVolatiles(value)
       }
       if (typeof settings.describe === 'function') {
-        const descriptors = settings.describe({ redactSecrets: false })
+        const descriptors = describeSweep(ctx, settings)
         if (Array.isArray(descriptors)) {
           const match = descriptors.find((d) =>
             d.ns === ns
