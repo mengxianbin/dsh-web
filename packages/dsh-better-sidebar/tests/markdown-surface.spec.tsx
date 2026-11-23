@@ -202,6 +202,22 @@ afterEach(() => {
 })
 
 describe('the markdown preview surface', () => {
+  it('user pages the markdown preview from its scrollport', () => {
+    // Given a markdown file open on the preview surface.
+    const mounted = mountEditor('# Title\n\nBody text that scrolls.\n', '/p/docs/README.md')
+    // When the reader focuses the preview's scroll body.
+    const scroller = mounted.container.querySelector<HTMLElement>('[class*="editorMd"]')
+    if (scroller === null) throw new Error('the markdown preview renders its scroll body')
+    scroller.focus()
+    // Then the scroll body carries the pane's keyboard stop, so the browser
+    // pages it natively on the arrow / page keys (the chat scrollport's rule).
+    // Before the fix the preview had no focusable element at all, so those
+    // keys had nothing to scroll.
+    expect(scroller.tabIndex).toBe(0)
+    expect(document.activeElement).toBe(scroller)
+    mounted.unmount()
+  })
+
   it('slugs rendered headings like GitHub, keeps authored ids, and reserves them first', () => {
     const mounted = mountEditor([
       '## Hello, World!',

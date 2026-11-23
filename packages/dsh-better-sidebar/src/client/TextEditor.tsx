@@ -1032,10 +1032,16 @@ export function TextEditor(props: FileViewerProps) {
           revision={props.mtimeMs ?? 0}
         />
       )}
+      {/* Focusable scrollport: with the scroller itself focused the browser
+          pages it natively on the arrow / PageUp / PageDown keys (the chat
+          scrollport's way). The preview had no keyboard stop at all, so those
+          keys had no focused scroller and did nothing. One stop per pane: the
+          CodeMirror host is hidden while this surface shows. */}
       {markdown && mode === 'preview' && (
         <div
           className={css.editorMd}
           ref={previewRef}
+          tabIndex={0}
           onMouseUp={handlePreviewMouseUp}
           onScroll={(event) => {
             const el = event.currentTarget

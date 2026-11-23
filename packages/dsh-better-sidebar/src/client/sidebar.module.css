@@ -2275,7 +2275,9 @@ body[data-dsh-sidebar-dragging] .bottomPanel {
 .editorModeButton:focus-visible,
 .editorDownloadLink:focus-visible,
 .editorPptxButton:focus-visible,
-.editorDocxZoomRange:focus-visible {
+.editorDocxZoomRange:focus-visible,
+.editorMd:focus-visible,
+.largeFileBody:focus-visible {
   outline: 2px solid var(--dsw-alias-interactive-bg-hover-accent);
   outline-offset: -1px;
 }

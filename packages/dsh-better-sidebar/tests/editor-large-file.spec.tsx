@@ -128,6 +128,30 @@ describe('TextEditor over-limit preview', () => {
     }
   })
 
+  it('user pages the read-only large-file preview from its scroll body', async () => {
+    // Given an over-limit file open on the paged read-only preview.
+    attachLocale(new FakeLocale())
+    readPage.mockResolvedValue({
+      kind: 'text', text: PAGE, offset: 0, nextOffset: SIZE, eof: true, size: SIZE, encoding: 'utf8',
+    })
+    const { container, unmount } = renderRoot(
+      createElement(TextEditor, viewerProps({ size: SIZE, largeFile: { size: SIZE } })),
+    )
+    try {
+      await flush()
+      // When the reader focuses the preview's scroll body.
+      const body = bodyOf(container)
+      body.focus()
+      // Then the scroll body carries the pane's keyboard stop, so the arrow /
+      // page keys page the list natively. Before the fix this path had no
+      // focusable element at all, so those keys did nothing.
+      expect(body.tabIndex).toBe(0)
+      expect(document.activeElement).toBe(body)
+    } finally {
+      unmount()
+    }
+  })
+
   it('keeps the CodeMirror editor and its save button for an editable load', async () => {
     attachLocale(new FakeLocale())
     // (d) The contrast that gives the assertions above their meaning: the same

@@ -2,6 +2,10 @@
 
 > 本文档收录 dsh-better-sidebar 的完整发布历史（最新版摘要见 [README](README_ZH.md)；同步发布于 [GitHub Releases](https://github.com/omdsh-dev/DSH-better-sidebar/releases)）。
 
+### Unreleased
+
+- **文件预览支持键盘滚动（上下键 / PageUp / PageDown）**：预览面的滚动容器此前不可聚焦——点开文件后点击内容，焦点不会落到滚动口上，浏览器没有「已聚焦的滚动容器」可翻，方向键与翻页键完全无效（鼠标滚轮正常）。现在 Markdown 预览与分页大文件 / JSONL 预览的滚动容器本身成为该面板的键盘停靠点（`tabIndex`，与聊天转录滚动口同一规则：聚焦后由浏览器原生翻页，不自写 keydown），键盘聚焦时按共享焦点环样式显示 accent 描边；编辑模式不受影响（CodeMirror 自持焦点），HTML 预览是独立 iframe 文档。`tests/markdown-surface.spec.tsx` 与 `tests/editor-large-file.spec.tsx` 各增 1 例守护。
+
 ### v0.28.1
 
 - 🛡 **并发同键冷读合并（OOM 修复）**：全量重启后会话全部转为 detached，12 条 `/sidebar/*` 路由共享的 cwd 解析会对同一会话各做一次宿主冷观察（整份日志读 + 解码；39MB 级会话 × 44 个并发请求 ≈ 1.7GB → OOM）。现在 `cwdOf()` 把**同一会话 + 同一客户端 cwd 提示**的并发请求合并为一次真实读，其余 await 同一结果；不引入 TTL（宿主本身按持久化 revision 缓存已完成冷读），客户端提示参与 key 以免跨提示串味。`tests/smoke.spec.ts` 新增「12 并发 → 1 次冷读」与「不同提示不合并」两例。

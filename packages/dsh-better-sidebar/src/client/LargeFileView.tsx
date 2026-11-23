@@ -176,9 +176,13 @@ export function LargeFileView(props: {
       {pager.atCap && (
         <div className={css.editorBanner}>{t('previewRowLimit', { rows: maxRows })}</div>
       )}
+      {/* Focusable scrollport: the paged reader takes the pane's keyboard
+          stop so the arrow / page keys scroll it natively (the preview
+          surface's rule; no CodeMirror host exists on this path). */}
       <div
         className={clsx(css.largeFileBody, records && css.largeFileRecords)}
         ref={bodyRef}
+        tabIndex={0}
         onScroll={onScroll}
       >
         {pager.error !== null && <div className={css.editorError}>{pager.error}</div>}
