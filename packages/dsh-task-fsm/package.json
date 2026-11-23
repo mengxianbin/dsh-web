@@ -1,0 +1,83 @@
+{
+  "name": "dsh-task-fsm",
+  "version": "0.1.0",
+  "description": "Task FSM for DSH Web (pure-worker-design-1123): task-fsm-state.json machine authority, state x event transition table with G1-G6 guards, queue tiers (red/yellow) with hover sub-reasons, frozen session marks and archive layering. Host routes + browser row seats; no npm release — install with `dsh plugin --profile <name> add link:<repo>/packages/dsh-task-fsm`.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "packageManager": "pnpm@11.24.0",
+  "license": "Apache-2.0",
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.1-rc.3"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "lib/**/*.d.ts.map",
+    "src",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsdown",
+    "watch": "tsdown --watch",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --pretty false",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "schemastery": "^3.18.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.1-rc.3",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-client-connection": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.2.1-rc.3",
+    "@deepseek-ai/dsh-host-webserver": "^0.2.1-rc.3",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.1",
+    "jsdom": "29.1.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.8"
+  }
+}

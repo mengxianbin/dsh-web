@@ -1,0 +1,125 @@
+/* dsh-task-fsm browser-half styles: leading freeze mark + hover lines. */
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  font-size: 12px;
+  line-height: 1;
+  cursor: default;
+  user-select: none;
+}
+
+.lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.tier {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.tierBadge {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.tier[data-tier='red'] .tierBadge {
+  background: color-mix(in srgb, #e5484d 22%, transparent);
+  color: #ff8589;
+}
+
+.tier[data-tier='yellow'] .tierBadge {
+  background: color-mix(in srgb, #f5a623 22%, transparent);
+  color: #f5c26b;
+}
+
+.tierExample {
+  opacity: 0.75;
+}
+
+.freezeReason {
+  opacity: 0.9;
+  word-break: break-all;
+}
+
+.quad {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+}
+
+.quad dt {
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.quad dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+/* ── Frozen-open takeover (frozen-open-1123, design §3.5 点开形态) ─────────
+   The composer-chain replacement shown for a frozen/locked session: a dashed
+   readonly card (no inputs, no buttons) carrying the freeze reason, the task
+   state snapshot and the two wake triggers. Non-frozen sessions never elect
+   this entry, so this whole block is invisible to them. */
+.frozen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.5));
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base, rgba(128, 128, 128, 0.06));
+  color: var(--dsw-alias-label-secondary, #9a9a9a);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.frozenTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  font-weight: 600;
+}
+
+.frozenReason {
+  word-break: break-all;
+}
+
+.frozenState {
+  opacity: 0.9;
+}
+
+.frozenQuad {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.frozenQuad dt {
+  opacity: 0.6;
+}
+
+.frozenQuad dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.frozenWake {
+  opacity: 0.75;
+  font-size: 12px;
+}

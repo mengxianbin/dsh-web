@@ -14,6 +14,15 @@ import {
   refineFailureCode,
   resolveConfig,
 } from '../src/config.ts'
+import { HEARTBEAT_DEFAULT_PATH, STALL_HEARTBEAT_GRACE_MS, STALL_TURN_OPEN_MS } from '../src/stall.ts'
+
+/** The stall block an unconfigured resolve lands on (watchdog-parity defaults). */
+const DEFAULT_STALL = {
+  watch: true,
+  heartbeatGraceMs: STALL_HEARTBEAT_GRACE_MS,
+  turnOpenMs: STALL_TURN_OPEN_MS,
+  heartbeatPath: HEARTBEAT_DEFAULT_PATH,
+}
 
 describe('resolveConfig', () => {
   it('defaults to shadow mode so the plugin only logs until the switch flips', () => {
@@ -23,6 +32,7 @@ describe('resolveConfig', () => {
       staggerMs: STAGGER_DEFAULT_MS,
       conditions: { revive: REVIVE_CODES, wall: WALL_CODES },
       conditionOverrides: [],
+      stall: DEFAULT_STALL,
     })
   })
 
@@ -34,6 +44,7 @@ describe('resolveConfig', () => {
       staggerMs: 30_000,
       conditions: { revive: REVIVE_CODES, wall: WALL_CODES },
       conditionOverrides: [],
+      stall: DEFAULT_STALL,
     })
     expect(warn).not.toHaveBeenCalled()
   })
@@ -44,6 +55,32 @@ describe('resolveConfig', () => {
     expect(warn).toHaveBeenCalledWith(1_000, STAGGER_MIN_MS)
     expect(resolveConfig({ staggerMs: Number.NaN }, vi.fn()).staggerMs).toBe(STAGGER_MIN_MS)
     expect(resolveConfig({ staggerMs: STAGGER_MIN_MS }, vi.fn()).staggerMs).toBe(STAGGER_MIN_MS)
+  })
+
+  it('resolves the stall probes on with watchdog-parity defaults (缺项①②)', () => {
+    expect(resolveConfig({}).stall).toEqual(DEFAULT_STALL)
+    // A present key replaces its value wholesale (config moves the value, not the ruling).
+    expect(
+      resolveConfig({
+        stallWatch: false,
+        stallHeartbeatGraceMs: 60_000,
+        stallTurnOpenMs: 5_000,
+        stallHeartbeatPath: 'D:/tmp/state.json',
+      }).stall,
+    ).toEqual({
+      watch: false,
+      heartbeatGraceMs: 60_000,
+      turnOpenMs: 5_000,
+      heartbeatPath: 'D:/tmp/state.json',
+    })
+    // Degenerate values (negative / NaN / blank path) fall back to the defaults.
+    expect(
+      resolveConfig({
+        stallHeartbeatGraceMs: -1,
+        stallTurnOpenMs: Number.NaN,
+        stallHeartbeatPath: '   ',
+      }).stall,
+    ).toEqual(DEFAULT_STALL)
   })
 })
 
