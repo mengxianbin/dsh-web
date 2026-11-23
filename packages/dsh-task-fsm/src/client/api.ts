@@ -18,7 +18,7 @@
 export interface FsmQueueView {
   tier: 'none' | 'red' | 'yellow'
   reason: string
-  label: '红' | '黄' | '不入' | '—'
+  label: '红' | '黄' | '不入' | '—' // i18n-allow: type-level mirror of host core/queue.ts design-row terms (runtime copy owned by the host half)
   example: string
 }
 
@@ -26,7 +26,7 @@ export interface FsmQueueView {
 export interface FsmSubReasons {
   what: string
   why: string
-  who: '人' | 'worker' | 'host' | '—'
+  who: '人' | 'worker' | 'host' | '—' // i18n-allow: type-level mirror of host-served owner vocabulary (zh-first package, locales fall back to zh)
   next: string
 }
 
