@@ -13,7 +13,10 @@
  * first. Excluded causes (human abort, session resume/fork markers, goal
  * block/complete) are never continued — they only write a `stop-parked`
  * evidence line. Every detection and decision is one structured JSON log
- * line. `mode: 'shadow'` (the default) suppresses only the send — the full
+ * line. Two stall probes join the same line shape (pure-worker-migration-1123
+ * §三 缺项①②, design §7.4): owner-heartbeat staleness and turnOpen silence
+ * emit `stall-detected`/`stall-cleared` readings feeding FSM E13 — evidence
+ * only, no send, no kill. `mode: 'shadow'` (the default) suppresses only the send — the full
  * decision account still runs so the ruled parameters can be tuned against a
  * real night of logs; `mode: 'live'` queues the nudge through the host session
  * controller. Host-only package: no `dsh.client` face.
@@ -23,7 +26,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
-import z from 'schemastery'
 import {
   DURABILITY_WARN_RE,
   PARKED_TURN_END_REASONS,
@@ -38,6 +40,7 @@ import { MechanismHealth, readHostReviveHalted, removeReviveHealth } from './hea
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
+import { StallTracker, makeHeartbeatReader, type StallRecord } from './stall.ts'
 import { makeStatusRoute } from './host/routes.ts'
 import { attributeProbeFailure, probeRoute, type ProbeResult } from './v2-probe.ts'
 import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
@@ -230,6 +233,63 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       ctx.logger.info(`dsh-session-revive ${JSON.stringify({ mode: resolved.mode, ...record })}`)
     }
 
+    // ── Stall probes (pure-worker-migration-1123 §三 缺项①②, design §7.4) ──
+    // The two watchdog death causes absorbed into revive before the boss
+    // retires: owner-heartbeat staleness (15 min grace, dual-name checkpoint
+    // read) and turnOpen silence (30 min, turnOpen 第二轴). Evidence-first —
+    // each crossing logs one `stall-detected` reading (next: E13, the FSM
+    // 断链 event this death feeds), each recovery one `stall-cleared`; no
+    // send, no kill, no quota/breaker/wave state. One deadline-armed timer
+    // below is the only scheduling this adds.
+    const stall = new StallTracker(
+      { heartbeatGraceMs: resolved.stall.heartbeatGraceMs, turnOpenStallMs: resolved.stall.turnOpenMs },
+      makeHeartbeatReader(resolved.stall.heartbeatPath),
+      () => Date.now(),
+    )
+    const logStall = (records: readonly StallRecord[]): void => {
+      for (const record of records) log(record)
+    }
+    /** One timer for the earliest stall deadline; event passes re-arm it. */
+    let stallTimer: ReturnType<typeof setTimeout> | undefined
+    let stallDeadline = 0
+    const armStall = (): void => {
+      if (!resolved.stall.watch) return
+      const deadline = stall.nextCheckAt()
+      // Already armed at or before the needed time: keep the earlier wake
+      // (the sweep re-arms); only an EARLIER deadline replaces the timer.
+      if (stallTimer !== undefined && stallDeadline <= deadline) return
+      if (stallTimer !== undefined) clearTimeout(stallTimer)
+      stallDeadline = deadline
+      stallTimer = setTimeout(() => {
+        stallTimer = undefined
+        logStall(stall.sweep(Date.now()))
+        armStall()
+      }, Math.max(0, deadline - Date.now()))
+    }
+    armStall()
+    // Mount seeding: a turn already open before this plugin mounted still
+    // counts — the boot sweep's tier-1 checkpoint projection names it, and
+    // the silence clock starts at seed time (never retroactive).
+    if (resolved.stall.watch) {
+      void makeListRows(ctx.sessionController as unknown as SweepListApi)(abort.signal)
+        .then((rows) => {
+          for (const row of rows) {
+            const boundary = row.projections?.values.turnBoundary as { openTurnStartSeq?: number | null } | undefined
+            if (typeof boundary?.openTurnStartSeq === 'number' && Number.isFinite(boundary.openTurnStartSeq)) {
+              stall.seedTurn(String(row.sessionId), Date.now())
+            }
+          }
+          armStall()
+          return rows
+        })
+        .catch((error: unknown) => {
+          // Seed failure only costs the pre-mount turn coverage; the heartbeat
+          // probe and every event-driven turn still run (fail soft, loud line).
+          log({ kind: 'log', at: Date.now(), event: 'stall-seed-failed', detail: { error: String(error).slice(0, 300) } })
+          armStall()
+        })
+    }
+
     // 拍板⑮: five-fact mechanism health (插件激活 / mode=live / status 端点
     // 可读 / 断路器无连跳 / 无 HALT). The status builder is shared with the
     // route so 「端点可读」tests the exact payload the endpoint serves; the
@@ -327,8 +387,12 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           if (target.baseURL === undefined) {
             result = { ok: false, error: 'route base URL unresolved', attribution: 'route-unresolved' }
           } else {
+            // Sequential by design: one probe at a time through the global
+            // fetch slot (the in-flight guard owns the cadence, not latency).
+            // eslint-disable-next-line no-await-in-loop
             result = await probeRoute(target.baseURL)
             if (!result.ok && result.attribution === undefined) {
+              // eslint-disable-next-line no-await-in-loop
               result = { ...result, attribution: await attributeProbeFailure() }
             }
           }
@@ -359,6 +423,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
               detail: outcome.detail,
             }),
           )
+          return outcome
         })
         .catch((error: unknown) => {
           applyV2(machine.onChainResult({ sessionId, ok: false, detail: String(error).slice(0, 200) }))
@@ -403,6 +468,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
           )
           .then(() => {
             log({ kind: 'log', at: Date.now(), event: 'nudge-sent', sessionId, ...(code === undefined ? {} : { detail: { cause: code } }) })
+            return undefined
           })
           .catch((error: unknown) => {
             // The send never ran: clear the machine's in-flight marker so the
@@ -475,6 +541,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
 
     const offEvent = ctx.on('session/event', (session: Session, event: SessionEvent) => {
       const sessionId = String(session.id)
+      // Stall probes ride this same stream: turn boundaries open/close and
+      // every event refreshes a silence clock; the armed timer does the rest.
+      logStall(stall.onEvent(sessionId, event.type, typeof event.time === 'number' ? event.time : Date.now()))
+      armStall()
       if (event.type === 'turn/end') {
         const at = typeof event.time === 'number' ? event.time : Date.now()
         const reason = event.data.reason
@@ -633,6 +703,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       }
     })
     const offDisposed = ctx.on('session/disposed', (session: Session) => {
+      logStall(stall.onDisposed(String(session.id)))
+      armStall()
       policy.forget(String(session.id))
       // v2: the session is gone - drop its in-flight attempt and deferred
       // decision; the account (counters, export row) survives disposal.
@@ -737,6 +809,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       if (wakeTimer !== undefined) clearTimeout(wakeTimer)
       if (v2WakeTimer !== undefined) clearTimeout(v2WakeTimer)
       if (probeTimer !== undefined) clearTimeout(probeTimer)
+      if (stallTimer !== undefined) clearTimeout(stallTimer)
       for (const timer of sendTimers) clearTimeout(timer)
       sendTimers.clear()
       abort.abort()

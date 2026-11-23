@@ -1,4 +1,5 @@
 import z from 'schemastery'
+import { HEARTBEAT_DEFAULT_PATH, STALL_HEARTBEAT_GRACE_MS, STALL_TURN_OPEN_MS } from './stall.ts'
 
 /**
  * Plugin config shape. Schemastery validates shape only (absent keys pass
@@ -23,6 +24,19 @@ export interface Config {
   reviveCodes?: string[]
   /** Replace the wall-class code list (拍板账⑨); absent keeps the ruled {@link WALL_CODES} default. */
   wallCodes?: string[]
+  /**
+   * Stall probes on/off (pure-worker-migration-1123 §三 缺项①②, default true):
+   * the owner-heartbeat and turnOpen death causes revive absorbed from the
+   * retiring watchdog. `false` withdraws only the probes — the ruled
+   * error-code account above is untouched either way.
+   */
+  stallWatch?: boolean
+  /** Heartbeat staleness grace in ms (default 900_000 = watchdog `--grace-ms`). */
+  stallHeartbeatGraceMs?: number
+  /** Open-turn silence threshold in ms (default 1_800_000 = watchdog `--turn-open-stall-ms`). */
+  stallTurnOpenMs?: number
+  /** Taskbot checkpoint path (default `~/.dsh/taskbot-state.json`). */
+  stallHeartbeatPath?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -31,6 +45,10 @@ export const Config: z<Config> = z.object({
   staggerMs: z.number(),
   reviveCodes: z.array(z.string()),
   wallCodes: z.array(z.string()),
+  stallWatch: z.boolean(),
+  stallHeartbeatGraceMs: z.number(),
+  stallTurnOpenMs: z.number(),
+  stallHeartbeatPath: z.string(),
 })
 
 /**
@@ -53,6 +71,20 @@ export interface ResolvedConfig {
   conditions: ConditionLists
   /** Config keys that replaced a ruled default (empty = pure code defaults in force). */
   conditionOverrides: string[]
+  /** Stall-probe tunables (stall.ts carries the ruled defaults; see {@link Config}). */
+  stall: ResolvedStall
+}
+
+/** Resolved stall-probe tunables (pure-worker-migration-1123 §三 缺项①②). */
+export interface ResolvedStall {
+  /** Probes armed (default true; `false` withdraws only the probes). */
+  watch: boolean
+  /** Heartbeat staleness grace (ms, default 900_000). */
+  heartbeatGraceMs: number
+  /** Open-turn silence threshold (ms, default 1_800_000). */
+  turnOpenMs: number
+  /** Taskbot checkpoint path (default `~/.dsh/taskbot-state.json`). */
+  heartbeatPath: string
 }
 
 // ── Ruled parameters (design session-auto-revival-design-1102 §四; 实施不改值 —
@@ -238,6 +270,14 @@ export function nudgeTextFor(code: string | undefined): string {
 }
 
 /**
+ * Finite-and-nonnegative config number, else the ruled fallback (stall
+ * knobs: absent / NaN / negative all land on the watchdog-parity default).
+ */
+function finiteOr(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
+/**
  * Apply defaults and clamps to one config validation pass.
  * `mode` defaults to `shadow`: the plugin only writes structured logs until
  * the turn-on switch is explicitly set to `live`.
@@ -263,13 +303,30 @@ export function resolveConfig(
   const conditionOverrides: string[] = []
   if (config.reviveCodes !== undefined) conditionOverrides.push('reviveCodes')
   if (config.wallCodes !== undefined) conditionOverrides.push('wallCodes')
+  // Stall probes: absent config keeps the ruled watchdog-parity defaults; a
+  // present value replaces it wholesale (config moves where the value lives).
+  const stall: ResolvedStall = {
+    watch: config.stallWatch ?? true,
+    heartbeatGraceMs: finiteOr(config.stallHeartbeatGraceMs, STALL_HEARTBEAT_GRACE_MS),
+    turnOpenMs: finiteOr(config.stallTurnOpenMs, STALL_TURN_OPEN_MS),
+    heartbeatPath:
+      typeof config.stallHeartbeatPath === 'string' && config.stallHeartbeatPath.trim() !== ''
+        ? config.stallHeartbeatPath
+        : HEARTBEAT_DEFAULT_PATH,
+  }
   return {
     enabled: config.enabled ?? true,
     mode: config.mode ?? 'shadow',
     staggerMs,
     conditions,
     conditionOverrides,
+    stall,
   }
+}
+
+/** Render one effective/ruled code list for the startup notice. */
+function showList(set: ReadonlySet<string>): string {
+  return set.size === 0 ? '<empty>' : [...set].join(',')
 }
 
 /**
@@ -283,11 +340,10 @@ export function resolveConfig(
  */
 export function conditionOverrideNotice(resolved: ResolvedConfig): string | undefined {
   if (resolved.conditionOverrides.length === 0) return undefined
-  const show = (set: ReadonlySet<string>): string => (set.size === 0 ? '<empty>' : [...set].join(','))
   return (
     `dsh-session-revive: condition lists overridden by profile config [${resolved.conditionOverrides.join(', ')}] — ` +
-    `effective revive=[${show(resolved.conditions.revive)}] wall=[${show(resolved.conditions.wall)}]; ` +
-    `ruled defaults revive=[${show(REVIVE_CODES)}] wall=[${show(WALL_CODES)}]. ` +
+    `effective revive=[${showList(resolved.conditions.revive)}] wall=[${showList(resolved.conditions.wall)}]; ` +
+    `ruled defaults revive=[${showList(REVIVE_CODES)}] wall=[${showList(WALL_CODES)}]. ` +
     'Config only moves where the list lives: changing values still requires a design §4.1 stats re-run.'
   )
 }
