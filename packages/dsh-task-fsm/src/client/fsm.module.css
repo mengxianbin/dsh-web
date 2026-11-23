@@ -67,3 +67,59 @@
   margin: 0;
   word-break: break-all;
 }
+
+/* ── Frozen-open takeover (frozen-open-1123, design §3.5 点开形态) ─────────
+   The composer-chain replacement shown for a frozen/locked session: a dashed
+   readonly card (no inputs, no buttons) carrying the freeze reason, the task
+   state snapshot and the two wake triggers. Non-frozen sessions never elect
+   this entry, so this whole block is invisible to them. */
+.frozen {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px dashed var(--dsw-alias-border-l2, rgba(128, 128, 128, 0.5));
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base, rgba(128, 128, 128, 0.06));
+  color: var(--dsw-alias-label-secondary, #9a9a9a);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.frozenTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  font-weight: 600;
+}
+
+.frozenReason {
+  word-break: break-all;
+}
+
+.frozenState {
+  opacity: 0.9;
+}
+
+.frozenQuad {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.frozenQuad dt {
+  opacity: 0.6;
+}
+
+.frozenQuad dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.frozenWake {
+  opacity: 0.75;
+  font-size: 12px;
+}

@@ -1,12 +1,14 @@
 /**
- * dsh-task-fsm browser half — seats two root-scoped Session-row occupants:
+ * dsh-task-fsm browser half — seats four occupants:
  * `sidebar.session.row.leading` (the ❄️/🔒 freeze mark, title = freeze
  * reason) and `sidebar.session.row.hover` (queue tier + §4.2 four-piece
- * sub-reasons + freeze reason line). Both read the host projection over
- * GET /api/task-fsm/session once per page; absent record or unreachable
- * endpoint renders nothing (quiet absence). Declares no settings section and
- * binds no Session — the owner share is the row's id only (ui-workspace
- * contract: occupants must not retain the Session).
+ * sub-reasons + freeze reason line) read the host projection over
+ * GET /api/task-fsm/session; `conversation.composer` elects the frozen
+ * read-only takeover and `conversation.input.overlay` carries its
+ * freshness watcher (frozen-open-1123, §3.5 点开形态). Absent record or
+ * unreachable endpoint renders nothing (quiet absence). Declares no
+ * settings section and binds no Session — the owner share is the row's id
+ * only (ui-workspace contract: occupants must not retain the Session).
  * @module @linxin666/dsh-task-fsm/client
  */
 
@@ -17,6 +19,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { FsmHoverLines } from './FsmHoverLines.tsx'
 import { FsmFreezeMark } from './FsmFreezeMark.tsx'
+import { wireFrozenOpen } from './frozenOpen.ts'
 import { NS, en, setRuntimeTranslate, zh } from './locales.ts'
 
 /** Occupant ids (distinct per seat — one id each, no collisions). */
@@ -82,4 +85,8 @@ export function apply(ctx: ClientContext): void {
       return () => {}
     }
   })
+
+  // Frozen-open (frozen-open-1123): the composer takeover, its watcher and
+  // the pending-interaction publish bridge.
+  wireFrozenOpen(ctx)
 }

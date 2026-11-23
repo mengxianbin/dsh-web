@@ -18,6 +18,8 @@ export const zh = {
   'fsm.locked': '已锁定',
   'fsm.freeze.reason': '冻结原因',
   'fsm.frozen.readonly': '会话已冻结 · 只读快照（不解冻）',
+  'fsm.frozen.state': '任务状态',
+  'fsm.frozen.wake': '唤醒：前置终态到达 / 配额空（两触发自动解冻）',
 } as const
 
 export const en = {
@@ -31,6 +33,8 @@ export const en = {
   'fsm.locked': 'Locked',
   'fsm.freeze.reason': 'Freeze reason',
   'fsm.frozen.readonly': 'Session frozen · read-only snapshot',
+  'fsm.frozen.state': 'Task state',
+  'fsm.frozen.wake': 'Wake: prerequisite terminal / quota free (two triggers, auto-thaw)',
 } as const
 
 export type FsmKey = keyof typeof zh
