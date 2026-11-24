@@ -11,8 +11,21 @@
  * not a change); a failed fetch never notifies either — the last known state
  * stays authoritative until a success replaces it (fail-safe: a transient
  * error cannot thaw a frozen takeover).
+ *
+ * `refreshFsmViewOutcome` is the same forced fetch carrying the HTTP verdict
+ * (fsm-poll-404-1124): exactly 404 means the session has no FSM record, which
+ * is the watcher's stop-polling signal; 5xx / network / timeout resolve with
+ * `notFound: false` so a transient failure never silences a live watcher.
  * @module @linxin666/dsh-task-fsm/client/api
  */
+
+/** Verdict of one forced refresh (the watcher's 404-stop seam). */
+export interface FsmRefreshOutcome {
+  /** Fresh view on a resolved success; null when absent or unreachable. */
+  readonly view: FsmSessionView | null
+  /** Exactly HTTP 404 — no FSM record for this session (stop-polling signal). */
+  readonly notFound: boolean
+}
 
 /** Queue verdict projection served by GET /api/task-fsm/session. */
 export interface FsmQueueView {
@@ -42,7 +55,7 @@ export interface FsmSessionView {
 }
 
 const cache = new Map<string, FsmSessionView | null>()
-const inflight = new Map<string, Promise<FsmSessionView | null>>()
+const inflight = new Map<string, Promise<FsmRefreshOutcome>>()
 const subscribers = new Set<(sessionId: string, view: FsmSessionView | null) => void>()
 
 /** Test seam: drop the page cache and every subscriber between cases. */
@@ -97,23 +110,30 @@ export function fsmCachedSessionIds(): string[] {
   return [...cache.keys()]
 }
 
-async function fetchFsmView(sessionId: string): Promise<FsmSessionView | null> {
+async function fetchFsmView(sessionId: string): Promise<FsmRefreshOutcome> {
   try {
     const response = await fetch(`/api/task-fsm/session?id=${encodeURIComponent(sessionId)}`, {
       headers: { accept: 'application/json' },
       signal: AbortSignal.timeout(5_000),
     })
+    if (response.ok) {
+      const body = await response.json() as { ok?: boolean; found?: boolean; view?: FsmSessionView }
+      const view = body.ok === true && body.found === true && body.view !== undefined ? body.view : null
+      cache.set(sessionId, view)
+      notifyFsmViews(sessionId, view)
+      return { view, notFound: false }
+    }
     // A non-2xx answer is NOT cached (transient server trouble retries on
-    // the next lookup) and does NOT notify (last known state stays).
-    if (!response.ok) return null
-    const body = await response.json() as { ok?: boolean; found?: boolean; view?: FsmSessionView }
-    const view = body.ok === true && body.found === true && body.view !== undefined ? body.view : null
-    cache.set(sessionId, view)
-    notifyFsmViews(sessionId, view)
-    return view
+    // the next lookup) and does NOT notify (last known state stays). Exactly
+    // 404 = the session is not in the FSM store (the host's only 404 for
+    // this route); every other status stays fail-open: it never claims
+    // "no record", so a 5xx can never stop the watcher's poll.
+    return { view: null, notFound: response.status === 404 }
   } catch {
+    // Network failure / timeout: fail-open (notFound stays false — keep the
+    // cadence) while caching the quiet absence for hover lookups.
     cache.set(sessionId, null)
-    return null
+    return { view: null, notFound: false }
   } finally {
     inflight.delete(sessionId)
   }
@@ -128,10 +148,10 @@ export function lookupFsmView(sessionId: string): Promise<FsmSessionView | null>
   const hit = cache.get(sessionId)
   if (hit !== undefined) return Promise.resolve(hit)
   const pending = inflight.get(sessionId)
-  if (pending !== undefined) return pending
+  if (pending !== undefined) return pending.then((outcome) => outcome.view)
   const request = fetchFsmView(sessionId)
   inflight.set(sessionId, request)
-  return request
+  return request.then((outcome) => outcome.view)
 }
 
 /**
@@ -143,6 +163,19 @@ export function lookupFsmView(sessionId: string): Promise<FsmSessionView | null>
  * @returns the freshly fetched view, or null when absent/unreachable.
  */
 export function refreshFsmView(sessionId: string): Promise<FsmSessionView | null> {
+  return refreshFsmViewOutcome(sessionId).then((outcome) => outcome.view)
+}
+
+/**
+ * Force a fresh fetch and carry the HTTP verdict alongside the view — the
+ * frozen watcher's poll seam (fsm-poll-404-1124). Same fetch, cache and
+ * in-flight sharing as {@link refreshFsmView}; only the 404 distinction is
+ * added so the caller can stop polling a session with no FSM record while
+ * every other failure keeps the cadence (fail-open).
+ * @param sessionId - the row's session id.
+ * @returns the fresh view plus the exact-404 stop-polling signal.
+ */
+export function refreshFsmViewOutcome(sessionId: string): Promise<FsmRefreshOutcome> {
   const pending = inflight.get(sessionId)
   if (pending !== undefined) return pending
   const request = fetchFsmView(sessionId)
