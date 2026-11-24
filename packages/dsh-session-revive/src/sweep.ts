@@ -56,7 +56,7 @@ export interface SweepRow {
  */
 export interface SweepListApi {
   list(
-    request: { includeArchived: boolean; trimHeavyProjections: boolean },
+    request: { includeArchived: boolean; includeSubagents: boolean; trimHeavyProjections: boolean },
     signal?: AbortSignal,
   ): Promise<{ readonly items: readonly SweepRow[] }>
 }
@@ -68,16 +68,23 @@ export interface SweepListApi {
  * tests exercise — because passing the envelope through fails closed at the
  * first `for...of` (`rows is not iterable`, observed on the 2026-11-08 boot)
  * and the sweep screens nothing.
+ *
+ * `includeSubagents: true` (design revive-child-rescue-1124 件2 / gap 2):
+ * the harness list defaults to filtering `origin=subagent` rows (registry
+ * pre-exclusion + header predicate), so without the flag neither the boot
+ * sweep nor the mount-time stall seeding — both bound to this one
+ * `listRows` source — ever sees a child session. Children ride the same
+ * confirm chain and the same four gates; no quota exemption is introduced.
  * @param controller - structural list face of the session controller.
- * @returns the ruled row-scope listing (archived excluded, heavy projections
- *   trimmed) with the envelope unwrapped into rows.
+ * @returns the ruled row-scope listing (archived excluded, subagent rows
+ *   restored, heavy projections trimmed) with the envelope unwrapped into rows.
  */
 export function makeListRows(
   controller: SweepListApi,
 ): (signal: AbortSignal) => Promise<readonly SweepRow[]> {
   return async (signal) => {
     const listed = await controller.list(
-      { includeArchived: false, trimHeavyProjections: true },
+      { includeArchived: false, includeSubagents: true, trimHeavyProjections: true },
       signal,
     )
     return listed.items

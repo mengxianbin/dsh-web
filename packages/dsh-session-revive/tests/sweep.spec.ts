@@ -78,7 +78,7 @@ describe('controller list binding (makeListRows)', () => {
     await expect(listRows(new AbortController().signal)).resolves.toEqual(rows)
   })
 
-  it('passes the ruled row-scope request (archived excluded, heavy projections trimmed)', async () => {
+  it('passes the ruled row-scope request (archived excluded, subagent rows restored, heavy projections trimmed)', async () => {
     const seen: unknown[] = []
     const controller: SweepListApi = {
       list: async (request) => {
@@ -87,7 +87,37 @@ describe('controller list binding (makeListRows)', () => {
       },
     }
     await makeListRows(controller)(new AbortController().signal)
-    expect(seen).toEqual([{ includeArchived: false, trimHeavyProjections: true }])
+    expect(seen).toEqual([{ includeArchived: false, includeSubagents: true, trimHeavyProjections: true }])
+  })
+
+  it('carries a subagent child row through the same confirm chain (design 件2)', async () => {
+    const controller: SweepListApi = {
+      list: async () => ({
+        items: [row('sub-child', { projections: TB_OPEN }), row('top', { projections: TB_OPEN })],
+      }),
+    }
+    const { deps, sinks } = makeDeps(makeListRows(controller))
+    deps.readEvents = async () => [ev('turn/start')]
+    await runBootSweep(deps)
+    expect(failures(sinks)).toHaveLength(0)
+    expect(sinks.decided.map((d) => d.sessionId).sort()).toEqual(['sub-child', 'top'])
+    expect(summary(sinks)?.detail).toMatchObject({ rows: 2, candidates: 2, revived: 2 })
+  })
+
+  it('gates a subagent child row on the same chain — parked, never bypassed', async () => {
+    const controller: SweepListApi = {
+      list: async () => ({ items: [row('sub-child', { projections: TB_OPEN })] }),
+    }
+    const { deps, sinks } = makeDeps(makeListRows(controller))
+    deps.readEvents = async () => [ev('turn/start')]
+    deps.decide = (sessionId, at, contextTokens) => {
+      sinks.decided.push({ sessionId, at, contextTokens })
+      return [{ kind: 'decision', at, sessionId, chainId: sessionId, action: 'skip', reason: 'breaker-trip' }]
+    }
+    await runBootSweep(deps)
+    expect(failures(sinks)).toHaveLength(0)
+    expect(sinks.decided).toEqual([{ sessionId: 'sub-child', at: 1000, contextTokens: undefined }])
+    expect(summary(sinks)?.detail).toMatchObject({ rows: 1, candidates: 1, revived: 0, parked: 1 })
   })
 
   it('drives the sweep end to end through the envelope without failing', async () => {
