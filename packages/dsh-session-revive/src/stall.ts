@@ -70,6 +70,24 @@ export interface StallRecord {
   detail: StallDetail
 }
 
+/**
+ * 件3 案 A (ask `case3-pick` 2026-11-24): which detected stalls are
+ * send-worthy — `turn-open-stall` only, with a session id. The
+ * `owner-heartbeat-stall` half keeps its evidence-only ruling (narrow
+ * exemption ask `subprocess-exempt`) and never reaches the send account.
+ * @param records - one sweep/event batch.
+ * @returns the ruled death crossings (session + crossing time).
+ */
+export function ruledStallDeaths(records: readonly StallRecord[]): Array<{ sessionId: string; at: number }> {
+  const deaths: Array<{ sessionId: string; at: number }> = []
+  for (const record of records) {
+    if (record.event === 'stall-detected' && record.detail.cause === 'turn-open-stall' && record.sessionId !== undefined) {
+      deaths.push({ sessionId: record.sessionId, at: record.at })
+    }
+  }
+  return deaths
+}
+
 /** Ruled defaults (watchdog flag parity — values live here, config may move them). */
 export const STALL_HEARTBEAT_GRACE_MS = 900_000
 /** turnOpen 第二轴 (decision-log 2026-11-06): open turn + silence ≥ 30 min. */

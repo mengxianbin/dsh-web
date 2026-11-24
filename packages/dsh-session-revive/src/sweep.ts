@@ -44,6 +44,10 @@ export interface SweepRow {
   readonly sessionId: string
   readonly running: boolean
   readonly agentAvailable: boolean
+  /** Summary-header projection: present on subagent children (design 件1 child index). */
+  readonly origin?: 'subagent'
+  /** Summary-header projection: direct parent of a subagent child. */
+  readonly parentSessionId?: string
   readonly projections?: { readonly values: Readonly<Record<string, unknown>> }
 }
 
@@ -75,18 +79,25 @@ export interface SweepListApi {
  * sweep nor the mount-time stall seeding — both bound to this one
  * `listRows` source — ever sees a child session. Children ride the same
  * confirm chain and the same four gates; no quota exemption is introduced.
+ *
+ * `onRow` (件1 child index): every listed row is noticed here — the one
+ * choke point both consumers share — so the send dispatch can later route a
+ * child nudge through the parent-authorized delivery seam.
  * @param controller - structural list face of the session controller.
+ * @param onRow - optional per-row notice (header capture for child routing).
  * @returns the ruled row-scope listing (archived excluded, subagent rows
  *   restored, heavy projections trimmed) with the envelope unwrapped into rows.
  */
 export function makeListRows(
   controller: SweepListApi,
+  onRow?: (row: SweepRow) => void,
 ): (signal: AbortSignal) => Promise<readonly SweepRow[]> {
   return async (signal) => {
     const listed = await controller.list(
       { includeArchived: false, includeSubagents: true, trimHeavyProjections: true },
       signal,
     )
+    if (onRow !== undefined) for (const row of listed.items) onRow(row)
     return listed.items
   }
 }

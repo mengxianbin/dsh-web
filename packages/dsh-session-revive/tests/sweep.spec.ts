@@ -120,6 +120,16 @@ describe('controller list binding (makeListRows)', () => {
     expect(summary(sinks)?.detail).toMatchObject({ rows: 1, candidates: 1, revived: 0, parked: 1 })
   })
 
+  it('notices every listed row with subagent header facts (件1 child index feed)', async () => {
+    const rows = [row('child-1', { origin: 'subagent', parentSessionId: 'top-9' }), row('top-9')]
+    const noted: SweepRow[] = []
+    const controller: SweepListApi = { list: async () => ({ items: rows }) }
+    const listRows = makeListRows(controller, (r) => noted.push(r))
+    await expect(listRows(new AbortController().signal)).resolves.toEqual(rows)
+    expect(noted.map((r) => r.sessionId)).toEqual(['child-1', 'top-9'])
+    expect(noted[0]).toMatchObject({ origin: 'subagent', parentSessionId: 'top-9' })
+  })
+
   it('drives the sweep end to end through the envelope without failing', async () => {
     const controller: SweepListApi = {
       list: async () => ({ items: [row('cand', { projections: TB_OPEN })] }),

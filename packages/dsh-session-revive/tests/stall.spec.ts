@@ -18,7 +18,9 @@ import {
   STALL_TURN_OPEN_MS,
   StallTracker,
   makeHeartbeatReader,
+  ruledStallDeaths,
   type HeartbeatSource,
+  type StallRecord,
 } from '../src/stall.ts'
 
 const T0 = 1_700_000_000_000
@@ -270,5 +272,40 @@ describe('nextCheckAt (the shell timer contract)', () => {
     h.tracker.seedTurn('s1', T0 - TURN + 100_000)
     h.tracker.sweep(T0)
     expect(h.tracker.nextCheckAt()).toBe(T0 + 100_000)
+  })
+})
+
+describe('ruledStallDeaths (件3 案 A filter)', () => {
+  const detected = (cause: StallRecord['detail']['cause'], at: number, sessionId?: string): StallRecord => ({
+    kind: 'log',
+    at,
+    event: 'stall-detected',
+    ...(sessionId === undefined ? {} : { sessionId }),
+    detail: { cause },
+  })
+
+  it('keeps turn-open-stall crossings with a session id', () => {
+    expect(ruledStallDeaths([detected('turn-open-stall', 42, 's1')])).toEqual([{ sessionId: 's1', at: 42 }])
+  })
+
+  it('drops owner-heartbeat-stall — it keeps its evidence-only ruling', () => {
+    expect(ruledStallDeaths([detected('owner-heartbeat-stall', 42, 's1')])).toEqual([])
+  })
+
+  it('drops cleared lines and id-less detections', () => {
+    const cleared: StallRecord = { kind: 'log', at: 7, event: 'stall-cleared', sessionId: 's1', detail: { cause: 'turn-open-stall', reason: 'activity' } }
+    expect(ruledStallDeaths([cleared, detected('turn-open-stall', 9)])).toEqual([])
+  })
+
+  it('preserves batch order across mixed readings', () => {
+    const batch = [
+      detected('owner-heartbeat-stall', 1, 'a'),
+      detected('turn-open-stall', 2, 'b'),
+      detected('turn-open-stall', 3, 'c'),
+    ]
+    expect(ruledStallDeaths(batch)).toEqual([
+      { sessionId: 'b', at: 2 },
+      { sessionId: 'c', at: 3 },
+    ])
   })
 })
