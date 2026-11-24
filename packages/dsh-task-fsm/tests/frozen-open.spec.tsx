@@ -316,4 +316,65 @@ describe('FsmFrozenWatcher (invisible freshness poll)', () => {
     })
     expect(fetchMock).toHaveBeenCalledTimes(1) // only the mount tick ran
   })
+
+  // fsm-poll-404-1124 reversal fixture: the two-state pair. Exactly 404 stops
+  // this watcher's polling (the endless 404 row growth in the access log was
+  // pure waste for sessions with no FSM record); 5xx keeps the cadence
+  // (fail-open — a transient failure must never silence a live session).
+  it('operator sees polling stop on 404 (no FSM record): one fetch, interval cleared, zero growth', async () => {
+    vi.useFakeTimers()
+    fetchMock.mockResolvedValue({ ok: false, status: 404, json: async () => ({ ok: false, found: false }) } as Response)
+    // Given a session that never entered the FSM store (the host answers 404)
+    render(<FsmFrozenWatcher sessionId="session-1" />)
+    expect(fetchMock).toHaveBeenCalledTimes(1) // the mount tick
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0) // flush the verdict microtask
+    })
+    // Then the interval is stopped, silently (no log, no state)
+    expect(vi.getTimerCount()).toBe(0)
+    // When three more cadence windows elapse without a remount
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FROZEN_POLL_MS * 3)
+    })
+    // Then no request fires: the 404 rows stop growing (access-log equivalence)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('operator sees polling continue on 5xx (fail-open: a transient error never silences the watcher)', async () => {
+    vi.useFakeTimers()
+    fetchMock.mockResolvedValue({ ok: false, status: 503, json: async () => ({ ok: false, error: 'unavailable' }) } as Response)
+    // Given a session whose FSM route answers 503 (transient server trouble)
+    render(<FsmFrozenWatcher sessionId="session-1" />)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // When two cadence windows elapse, each tick fetches again
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FROZEN_POLL_MS)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FROZEN_POLL_MS)
+    })
+    // Then polling continues and the interval stays armed
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(1) // the cadence stays armed
+  })
+
+  it('operator sees polling continue after a network failure (a timeout resolves through the same fail-open path)', async () => {
+    vi.useFakeTimers()
+    fetchMock.mockRejectedValueOnce(new Error('network down')).mockResolvedValue(jsonOk(sessionView('frozen')))
+    // Given a first poll that fails with a network error (a timeout resolves the same way)
+    render(<FsmFrozenWatcher sessionId="session-1" />)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    // When the next cadence window elapses, the watcher polls again
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FROZEN_POLL_MS)
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(FROZEN_POLL_MS)
+    })
+    // Then the fail-open path keeps the cadence armed
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(1)
+  })
 })

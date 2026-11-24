@@ -9,11 +9,19 @@
  * overlay seat stays mounted under an elected takeover (chain `overlay`
  * keeps the fallback mounted), so the poll keeps running in every composer
  * state — input bar, ask card, and the frozen card alike.
+ *
+ * Stop rule (fsm-poll-404-1124): a 404 answer means the session has no FSM
+ * record, so this watcher stops polling silently — the endless 404 cadence
+ * was pure waste (1322 log rows in one day) for sessions that never entered
+ * the machine. The row's render/mount chain starts a fresh watcher when the
+ * session later enters at E1. Every other failure (5xx / network / timeout)
+ * keeps the cadence: fail-open, so a transient error never silences a live
+ * session.
  * @module @linxin666/dsh-task-fsm/client/FsmFrozenWatcher
  */
 
 import { useEffect } from 'react'
-import { refreshFsmView } from './api.ts'
+import { refreshFsmViewOutcome } from './api.ts'
 
 /** Poll cadence while a conversation is open (ui-session heartbeat tick parity). */
 export const FROZEN_POLL_MS = 5_000
@@ -32,14 +40,27 @@ export function FsmFrozenWatcher({ sessionId }: FsmFrozenWatcherProps) {
   useEffect(() => {
     if (typeof sessionId !== 'string' || sessionId === '') return
     let live = true
+    let timer: ReturnType<typeof setInterval> | undefined
+    const stopPolling = (): void => {
+      if (timer === undefined) return
+      clearInterval(timer)
+      timer = undefined
+    }
     const tick = (): void => {
-      if (live) void refreshFsmView(sessionId)
+      if (!live) return
+      void refreshFsmViewOutcome(sessionId).then(({ notFound }) => {
+        // Exactly 404 = no FSM record: stop this watcher's interval quietly
+        // (no log, no state — a later E1 entry re-mounts a fresh watcher).
+        // 5xx / network / timeout resolve notFound: false and keep polling.
+        if (live && notFound) stopPolling()
+        return notFound
+      })
     }
     tick()
-    const timer = setInterval(tick, FROZEN_POLL_MS)
+    timer = setInterval(tick, FROZEN_POLL_MS)
     return () => {
       live = false
-      clearInterval(timer)
+      stopPolling()
     }
   }, [sessionId])
   return null
