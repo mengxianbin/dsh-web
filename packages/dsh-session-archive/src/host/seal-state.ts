@@ -65,12 +65,19 @@ export class SealComputeError extends Error {
  * Run one seal analysis on a worker thread (实施护栏 ②).
  * @param id - the session the verdict is for.
  * @param dir - its workspace directory from the sessions-root index.
+ * @param options - click-time options carried over the wire (the async
+ *   seal-check channel's `recheck` must re-probe git in the worker too —
+ *   the worker's own memo is cold, but the flag still names the intent).
  * @returns the six-value grouping; rejects with a {@link SealComputeError}
  *   naming the infra cause — the caller degrades the rejection to an
  *   `UNKNOWN` record carrying that detail (fail-visible, never mislabelled
  *   `decode-fail`).
  */
-export function computeSealInWorker(id: string, dir: string | undefined): Promise<SealCheckResult> {
+export function computeSealInWorker(
+  id: string,
+  dir: string | undefined,
+  options?: { readonly recheck?: boolean },
+): Promise<SealCheckResult> {
   const base = new URL('.', import.meta.url)
   const entry = WORKER_CANDIDATES.map((candidate) => new URL(candidate, base))
     .find((url) => existsSync(fileURLToPath(url)))
@@ -101,7 +108,7 @@ export function computeSealInWorker(id: string, dir: string | undefined): Promis
       settle(() => reject(error))
     })
     // oxlint-disable-next-line unicorn/require-post-message-target-origin -- Worker postMessage has no window targetOrigin.
-    worker.postMessage({ id, dir })
+    worker.postMessage({ id, dir, recheck: options?.recheck === true })
   }).finally(() => {
     void worker.terminate()
   })

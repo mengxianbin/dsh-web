@@ -366,9 +366,42 @@ export interface AnalyzeSealOptions {
  * only become fresher, never a false green.
  */
 export function analyzeSeal(id: string, dir: string | undefined, options?: AnalyzeSealOptions): SealCheckResult {
-  if (dir === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
+  const probe = probeSeal(id, dir, options)
+  if (probe.kind === 'answer') return probe.result
+  const result = deriveSeal(id, probe.file, probe.stamp)
+  if (probe.stamp !== undefined && result.detail !== DETAIL.decodeFail) memoPut(probe.file, probe.stamp, result)
+  return result
+}
+
+/**
+ * The cheap preamble of {@link analyzeSeal} split off for the off-loop
+ * channel (stall-rootcause-1123): dir/file resolution, the pre-read stamp,
+ * and the memo hit test — everything that costs a stat, never a decode. The
+ * async caller answers `answer` hits inline and sends only `miss` rows to the
+ * worker, so the memo keeps its hit latency while the decode leaves the main
+ * thread.
+ */
+export type SealProbe =
+  | { readonly kind: 'answer'; readonly result: SealCheckResult }
+  | {
+    readonly kind: 'miss'
+    readonly file: string
+    readonly stamp: { readonly mtimeMs: number; readonly size: number } | undefined
+  }
+
+/**
+ * Resolve + stamp + memo-lookup one seal ask without deriving.
+ * @param id - the session id the verdict is stamped under.
+ * @param dir - the session's transcript directory (absent = unlocatable).
+ * @param options - click-time options; `recheck` promotes a memoized
+ *   no-endorsement red to a miss (git re-probe), exactly as the sync path.
+ * @returns an inline `answer` (early UNKNOWN or memo hit) or a `miss` with
+ *   the pre-read stamp the caller must memoize against after deriving.
+ */
+export function probeSeal(id: string, dir: string | undefined, options?: AnalyzeSealOptions): SealProbe {
+  if (dir === undefined) return { kind: 'answer', result: { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound } }
   const file = latestTranscriptPath(dir)
-  if (file === undefined) return { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound }
+  if (file === undefined) return { kind: 'answer', result: { id, verdict: 'UNKNOWN', detail: DETAIL.transcriptNotFound } }
 
   // Stamp before read, on purpose: a stamp taken after the read could pair a
   // post-append key with pre-append content and serve that stale verdict
@@ -394,14 +427,29 @@ export function analyzeSeal(id: string, dir: string | undefined, options?: Analy
       // answer under another session's id.
       sealMemo.delete(file)
       sealMemo.set(file, hit)
-      return { ...hit.result, id }
+      return { kind: 'answer', result: { ...hit.result, id } }
     }
     sealMemoMisses += 1
   }
 
-  const result = deriveSeal(id, file, stamp)
-  if (stamp !== undefined && result.detail !== DETAIL.decodeFail) memoPut(file, stamp, result)
-  return result
+  return { kind: 'miss', file, stamp }
+}
+
+/**
+ * Memoize a verdict the OFF-LOOP channel derived (worker answers carry no
+ * stamp of their own — the parent's pre-read stamp is the safe-direction key
+ * this function pairs them under). The decode-fail skip mirrors the sync
+ * path: read failures are transient and must retry on the next call.
+ * @param file - the transcript absolute path the verdict belongs to.
+ * @param stamp - the pre-read mtime+size the ask was resolved under.
+ * @param result - the derived verdict to retain.
+ */
+export function memoPutSeal(
+  file: string,
+  stamp: { readonly mtimeMs: number; readonly size: number },
+  result: SealCheckResult,
+): void {
+  if (result.detail !== DETAIL.decodeFail) memoPut(file, stamp, result)
 }
 
 /** The uncached derivation: full read + decode + grouping for one transcript file. */
