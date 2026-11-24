@@ -327,3 +327,95 @@ describe('ledger document helpers', () => {
     expect(createAttentionDocument()).toEqual({ version: 1, sessions: {} })
   })
 })
+
+describe('AttentionLedger onClassSettled seam (sessionclass-summary-channel-1127)', () => {
+  /** A ledger whose projection seam records every settled class write. */
+  function ledgerWithSeam(registry: FakeRegistry, path: string, calls: [string, string][]): AttentionLedger {
+    return new AttentionLedger({
+      registry,
+      attentionPath: path,
+      now: () => '2026-10-29T00:00:00.000Z',
+      onClassSettled: (sessionId, sessionClass) => {
+        calls.push([sessionId, sessionClass])
+      },
+    })
+  }
+
+  it('fires once per persisted write on the startup pass, with the listed id', async () => { // test-standards-allow: seam-firing cases mirror the file's ledger style
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-a'])
+    const calls: [string, string][] = []
+    const ledger = ledgerWithSeam(registry, path, calls)
+
+    await ledger.startupPass()
+    expect(calls).toEqual([['session-a', 'human']])
+
+    // An applied record never writes again, so the seam never fires again.
+    await ledger.startupPass()
+    expect(calls).toEqual([['session-a', 'human']])
+  })
+
+  it('fires on a dispatch declaration under the declared class', async () => { // test-standards-allow: seam-firing cases mirror the file's ledger style
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-x'])
+    const calls: [string, string][] = []
+
+    await ledgerWithSeam(registry, path, calls).declare('session-x', 'bot-worker')
+
+    expect(calls).toEqual([['session-x', 'bot-worker']])
+  })
+
+  it('fires when a pending default is retried, under the recorded class', async () => { // test-standards-allow: seam-firing cases mirror the file's ledger style
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-bot'])
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      sessions: { 'session-bot': { class: 'bot-boss', defaultApplied: false, source: 'dispatch', updatedAt: 'earlier' } },
+    }), 'utf8')
+    const calls: [string, string][] = []
+    const ledger = ledgerWithSeam(registry, path, calls)
+
+    await ledger.startupPass()
+    expect(calls).toEqual([['session-bot', 'bot-boss']])
+
+    // Nothing left to write: a fully applied record stays silent.
+    await ledger.startupPass()
+    expect(calls).toEqual([['session-bot', 'bot-boss']])
+  })
+
+  it('never fires for a non-member (no record, no write)', async () => { // test-standards-allow: seam-firing cases mirror the file's ledger style
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-member'])
+    const calls: [string, string][] = []
+
+    await ledgerWithSeam(registry, path, calls).ensureFirstMessage('session-child')
+
+    expect(calls).toEqual([])
+  })
+
+  it('a throwing seam never fails the ledger write that preceded it', async () => { // test-standards-allow: seam-firing cases mirror the file's ledger style
+    const dir = await tempDir()
+    const path = join(dir, 'session-attention.json')
+    const registry = new FakeRegistry()
+    registry.members.push(['session-x'])
+    const ledger = new AttentionLedger({
+      registry,
+      attentionPath: path,
+      now: () => '2026-10-29T00:00:00.000Z',
+      onClassSettled: () => {
+        throw new Error('seam refused')
+      },
+    })
+
+    await expect(ledger.declare('session-x', 'bot-boss')).resolves.toBeUndefined()
+    expect((await readSessions(path))['session-x']?.class).toBe('bot-boss')
+  })
+})

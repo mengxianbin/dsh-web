@@ -24,7 +24,7 @@ The 2026-10-29 13:53 misarchive showed the archive decision had no identity dime
 - The gate's safety depends on ledger coverage: an unrecorded Session counts as `human`, so unrecorded bot duty Sessions would fail open until backfilled/declared (m-note batch includes a one-time backfill of alive boss Sessions).
 - Callers that still pass `bot` write `bot-worker` records — correct semantics (bot-dispatched task work) with no caller change required.
 - The pre-triclass runtime binary treats `bot-boss` as invalid until the next dsh web restart; duty-dispatch callers switching to the new literal before the restart window would see 400s (accepted: duty dispatches are rare and the restart is a declared human handoff).
-- No UI surface shows the class; effect remains pin ordering plus the archive gate.
+- The hover card's session-type line shows the class since hover-sessionclass-1121, now served from the `sessionClass` summary projection ([session class on the list channel](2026-11-25-sessionclass-summary-channel.md)); pin ordering plus the archive gate remain the ledger's other effects.
 
 ## Testing
 

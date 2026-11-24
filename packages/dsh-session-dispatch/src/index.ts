@@ -10,6 +10,7 @@ import { mountOnce } from './mount-once.ts'
 import { resolveDshHome } from './dsh-home.ts'
 import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
+import { createClassProjection } from './host/class-projection.ts'
 import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
 import { TaskbotBossGate } from './host/boss-gate.ts'
 import { SteerAckTracker } from './host/steer-ack.ts'
@@ -50,7 +51,10 @@ export const Config: z<Config> = z.object({
  * and the ledger applies each Session's default pin state exactly once —
  * startup pass over workspace members, dispatch declaration at creation,
  * first real user message as the fallback; after that a manual pin/unpin is
- * never overridden. Routes are loopback-fenced; the browser roster is
+ * never overridden. Every persisted class is additionally folded into the
+ * `sessionClass` Session projection (live appends through the ledger seam, a
+ * boot backfill for Sessions that predate the record), so the value rides
+ * `SessionSummary.projectionValues` — the list channel the hover card reads. Routes are loopback-fenced; the browser roster is
  * untouched (host-only package).
  */
 export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: Config): void => {
@@ -58,18 +62,36 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
   ctx.effect(() => {
     const dshHome = resolveDshHome()
     const store = new FileBindingStore(defaultStorePaths(dshHome))
+    // The `sessionClass` fold (sessionclass-summary-channel-1127): every
+    // ledger write pushes the class onto the live Session's log, and the
+    // boot backfill mirrors the recorded classes onto cold Sessions so the
+    // hover line reads the list snapshot on the same channel as the id.
+    const classProjection = createClassProjection(ctx)
+    // Mount first: the backfill below must see the unit registered, or a
+    // cold refold would write a checkpoint without the `sessionClass` row.
+    const projectionMounted = classProjection.mount()
     const attention = new AttentionLedger({
       // Structural view of the Host registry: the real registry brands its
       // SessionId, which the ledger accepts as plain strings (same cast
       // convention as the session controller below).
       registry: ctx.workspaceRegistry as unknown as AttentionRegistry,
       attentionPath: defaultAttentionPath(dshHome),
+      onClassSettled: (sessionId, sessionClass) => classProjection.syncById(sessionId, sessionClass),
     })
     // Startup pass enqueues first, so every later trigger serializes behind
     // it: current workspace members without a record get the human default
     // once, pending defaults are retried. Fail-open — the per-session
     // triggers below still cover anything this pass could not settle.
-    void attention.startupPass().catch(() => {})
+    // The backfill rides the same chain: after the pass settles the ledger
+    // and the fold is mounted, mirror every recorded class into its Session
+    // log (fast-path skip per Session; per-Session fail-open; quiet when the
+    // profile serves no persistence/cache services).
+    void (async () => {
+      await attention.startupPass().catch(() => {})
+      await projectionMounted
+      const classes = await attention.classes().catch(() => undefined)
+      if (classes !== undefined) await classProjection.backfill(classes).catch(() => {})
+    })()
     // Structural view of the Host session service: the real controller
     // brands requestId/sessionId, which the routes mint as plain strings.
     const sessions = ctx.sessionController as unknown as DispatchSessionApi
@@ -114,6 +136,7 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
       void attention.ensureFirstMessage(String(session.id)).catch(() => {})
     })
     return () => {
+      classProjection.dispose()
       disposeEvents()
       for (const dispose of disposers) {
         try {

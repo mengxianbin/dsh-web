@@ -27,7 +27,7 @@ Status: implemented
 - 分类只活在 sidecar 里；文件丢失时下一次启动 pass 降级按 `human` 处理（朝置顶方向兜底），永不崩溃。
 - 插件无法替 bot 拉起的会话推断「值班还是任务」：由派发方声明。约定落在调用侧（m-note 的 `dsh-session-dispatch`、`taskbot` skill 与 guard 脚本）：任务派发 → `bot`，轮换/接管 → `human`，人工发起的派发 → 省略或 `human`。
 - 升级后首次启动会把所有无声明的存量成员都置顶（包括早于账本的在跑 bot 任务会话——手点取消一次即可，且不会再被置顶回来）。
-- 无任何 UI 面展示分类；效果只体现在置顶排序上。
+- 悬停卡的会话类型行展示该分类（自 hover-sessionclass-1121 起，由 `sessionClass` 摘要投影供值——[会话分类走上列表通道](2026-11-25-sessionclass-summary-channel.zh.md)）；置顶排序仍是本账本自身的效果。
 - 死掉或从未有过消息的 `defaultApplied: false` 记录每次启动廉价重试（一次被拒的 pin，无变化不写盘）。
 
 ## 测试

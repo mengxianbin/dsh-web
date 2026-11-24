@@ -27,7 +27,7 @@ The sidebar shows human-facing Sessions and bot task Sessions in one flat orderi
 - Classification lives only in the sidecar; losing the file degrades to `human` on the next startup pass (fail toward pinning), never to a crash.
 - The plugin cannot infer duty-vs-task for bot-created Sessions: dispatchers declare it. The convention lives in the caller side (m-note `dsh-session-dispatch` and `taskbot` skills, guard scripts): task dispatch → `bot`, rotation/takeover → `human`, human-initiated dispatch → omit or `human`.
 - First boot after upgrade pins every pre-existing undeclared member (including any live bot task Session that predates the ledger — one manual unpin clears it, and it never re-pins).
-- No UI surface shows the class; the effect is pin ordering only.
+- The hover card's session-type line shows the class (since hover-sessionclass-1121, served from the `sessionClass` summary projection — [session class on the list channel](2026-11-25-sessionclass-summary-channel.md)); pin ordering remains this ledger's own effect.
 - Dead or never-messaged records with `defaultApplied: false` retry cheaply on each startup (one refused pin, no write when nothing changed).
 
 ## Testing

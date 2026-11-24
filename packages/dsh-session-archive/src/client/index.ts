@@ -200,10 +200,12 @@ export function apply(ctx: ClientContext): void {
   })
 
   // Hover-card session-origin line (hover-sessionclass-1121): mounts only
-  // while a row's hover card is open, reads GET /api/session-dispatch/attention
-  // once per page (cached, zero polling), and renders nothing when the ledger
-  // has no record for the session or the endpoint is unreachable — quiet
-  // absence, never a banner.
+  // while a row's hover card is open and reads the row's `sessionClass`
+  // summary projection through the standard useSessions hook
+  // (sessionclass-summary-channel-1127) — no separate endpoint, no fetch
+  // round trip on first hover. Renders nothing when the list has no row or
+  // record yet, or the value falls outside the triclass — quiet absence,
+  // never a banner.
   ctx.slots.inject('sidebar.session.row.hover', () => {
     try {
       const unregister = ctx.slots.register({

@@ -19,7 +19,10 @@ dispatch also declares a `sessionClass` (`human` by default; `bot-boss` for
 bot duty sessions; `bot-worker` for bot-dispatched task work; the legacy `bot`
 spelling normalizes to `bot-worker`) into the attention ledger
 (`$DSH_HOME/session-attention.json`), which applies each Session's default
-pin state exactly once. Host-only — the package declares no `dsh.client`
+pin state exactly once, and every persisted class is folded into the
+`sessionClass` Session projection so it rides `SessionSummary
+.projectionValues` — the same list channel the session id comes from.
+Host-only — the package declares no `dsh.client`
 face, so nothing appears in the browser roster.
 
 ## Why
@@ -87,6 +90,19 @@ members) are never recorded or pinned. A corrupt ledger is quarantined to
 `<path>.corrupt-<epoch>` and rebuilt, degrading to `human` on the next
 startup pass.
 
+Every class the ledger persists is also folded into the **`sessionClass`
+Session projection** (`src/host/class-projection.ts`, record type
+`plugin:session-dispatch/attention`): a live write appends the class onto
+the Session's own log through the ledger's `onClassSettled` seam, and a
+once-per-boot backfill mirrors every recorded class onto Sessions that
+predate the record — a zero-I/O skip when the checkpoint already carries
+the class, otherwise one write-open append (only when the record is
+missing) plus a cold refold that refreshes the checkpoint (a new
+projection key never cues the controller's cold repair, so the backfill
+owns that write-back). The value then rides `SessionSummary
+.projectionValues`, so `GET /api/session-dispatch/attention` remains the
+diagnostic read face while consumers read the list snapshot.
+
 ### `POST /api/session-send`
 
 Deliver one prompt onto an existing Session — the REST mirror of typing into a
@@ -149,8 +165,13 @@ not a task account of record — the git board stays the only authority.
 
 - `src/index.ts` — plugin entry: injects `webServer`, `sessionController`,
   `workspaceRegistry`; registers the dispatch, health, bindings,
-  session-send, and session-stop routes; runs the attention startup pass and
-  the first-message classification hook.
+  session-send, and session-stop routes; runs the attention startup pass,
+  the first-message classification hook, and the `sessionClass` backfill
+  pass that follows it.
+- `src/host/class-projection.ts` — the `sessionClass` projection: the
+  triclass fold from `plugin:session-dispatch/attention` records, the live
+  append seam, and the once-per-boot ledger → log backfill (fast-path
+  checkpoint skip, write-open append, cold refold).
 - `src/host/routes.ts` — body validation, the `taskRef`/binding contracts,
   and the route factories (dispatch, health, bindings, session-send,
   session-stop).

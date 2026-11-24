@@ -2,28 +2,24 @@
 /**
  * Hover-card session-origin line (hover-sessionclass-1121): the browser half
  * seats the `sidebar.session.row.hover` seat with this package's own occupant
- * id, and the line renders the raw triclass verbatim — quiet absence when the
- * ledger has no record or the endpoint is unreachable (never a banner), one
- * cached fetch per page, zero polling.
+ * id, and the line renders the raw triclass verbatim from the list snapshot's
+ * `sessionClass` summary projection (sessionclass-summary-channel-1127) —
+ * quiet absence when the standard hook is absent, the row carries no record,
+ * or the value falls outside the triclass (never a banner, no fetch at all).
+ *
+ * test-standards-allow: render tests over a structural useSessions stub —
+ * quiet-absence checks are existence assertions by design, and the seat
+ * registration case asserts the component identity it was given.
  */
-import { act, cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, render, screen } from '@testing-library/react'
+import { afterEach, describe, expect, it } from 'vitest'
 import { apply } from '../src/client/index.ts'
-import { SessionClassLine } from '../src/client/SessionClassLine.tsx'
-import { resetSessionClassLookup } from '../src/client/session-class.ts'
+import { SessionClassLine, type SessionListRows, type UseSessions } from '../src/client/SessionClassLine.tsx'
 import { zh } from '../src/client/locales.ts'
 
-const fetchMock = vi.fn()
-
-function jsonOk(body: unknown): Response {
-  return { ok: true, json: async () => body } as Response
-}
-
-/** Flush the microtask queue inside act so effect-driven state settles. */
-async function flush(): Promise<void> {
-  await act(async () => {
-    await new Promise(resolve => setTimeout(resolve, 0))
-  })
+/** A `useSessions` stand-in bound to one snapshot (the git-graph fixture shape). */
+function useSessionsAt(state: SessionListRows): UseSessions {
+  return <S,>(selector: (s: SessionListRows) => S): S => selector(state)
 }
 
 /** The zh line copy with the class substituted (the label itself is locale copy). */
@@ -31,15 +27,8 @@ function lineCopy(sessionClass: string): string {
   return (zh as Record<string, string>)['arch.hover.class'].replace('{class}', sessionClass)
 }
 
-beforeEach(() => {
-  fetchMock.mockReset()
-  vi.stubGlobal('fetch', fetchMock)
-  resetSessionClassLookup()
-})
-
 afterEach(() => {
   cleanup()
-  vi.unstubAllGlobals()
 })
 
 describe('sidebar.session.row.hover registration', () => {
@@ -95,68 +84,47 @@ describe('sidebar.session.row.hover registration', () => {
 })
 
 describe('SessionClassLine rendering', () => {
-  it.each(['human', 'bot-boss', 'bot-worker'] as const)('renders the raw %s class verbatim', async (sessionClass) => {
-    fetchMock.mockResolvedValue(jsonOk({ ok: true, classes: { 'session-1': sessionClass } }))
-    const view = render(<SessionClassLine sessionId="session-1" />)
-    await flush()
+  it.each(['human', 'bot-boss', 'bot-worker'] as const)('renders the raw %s class verbatim', (sessionClass) => {
+    const state: SessionListRows = {
+      byId: { 'session-1': { projectionValues: { sessionClass } } },
+    }
+    const view = render(<SessionClassLine sessionId="session-1" useSessions={useSessionsAt(state)} />)
     expect(screen.getByText(lineCopy(sessionClass))).toBeTruthy()
     expect(view.container.querySelector('[data-session-class]')?.getAttribute('data-session-class')).toBe(sessionClass)
   })
 
-  it('renders nothing when the ledger has no record for the session', async () => {
-    fetchMock.mockResolvedValue(jsonOk({ ok: true, classes: { 'session-other': 'human' } }))
-    const view = render(<SessionClassLine sessionId="session-missing" />)
-    await flush()
+  it('renders nothing when the row carries no sessionClass record', () => {
+    const state: SessionListRows = { byId: { 'session-1': {} } }
+    const view = render(<SessionClassLine sessionId="session-1" useSessions={useSessionsAt(state)} />)
     expect(view.container.textContent).toBe('')
     expect(screen.queryByText(/会话类型/u)).toBeNull()
   })
 
-  it('stays quietly absent when the endpoint is unreachable, and never retries', async () => {
-    fetchMock.mockRejectedValue(new Error('connection refused'))
-    const view = render(<SessionClassLine sessionId="session-1" />)
-    await flush()
-    await flush()
+  it('renders nothing when the list has no row for the session yet', () => {
+    const view = render(<SessionClassLine sessionId="session-missing" useSessions={useSessionsAt({ byId: {} })} />)
     expect(view.container.textContent).toBe('')
     expect(screen.queryByText(/会话类型/u)).toBeNull()
-    // The failure settles the cache: one attempt for the page's lifetime.
-    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('stays quietly absent when the endpoint refuses with a non-2xx status', async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 403, json: async () => ({ ok: false }) } as Response)
-    const view = render(<SessionClassLine sessionId="session-1" />)
-    await flush()
-    expect(view.container.textContent).toBe('')
-    expect(fetchMock).toHaveBeenCalledTimes(1)
-  })
-
-  it('renders nothing for a value outside the triclass', async () => {
-    fetchMock.mockResolvedValue(jsonOk({ ok: true, classes: { 'session-1': 'machine' } }))
-    const view = render(<SessionClassLine sessionId="session-1" />)
-    await flush()
+  it('renders nothing for a value outside the triclass', () => {
+    const state: SessionListRows = {
+      byId: { 'session-1': { projectionValues: { sessionClass: 'machine' } } },
+    }
+    const view = render(<SessionClassLine sessionId="session-1" useSessions={useSessionsAt(state)} />)
     expect(view.container.textContent).toBe('')
   })
 
-  it('resolves a bare workspace id against the canonical ledger key', async () => {
-    fetchMock.mockResolvedValue(jsonOk({ ok: true, classes: { 'session-abc': 'bot-worker' } }))
-    render(<SessionClassLine sessionId="abc" />)
-    await flush()
+  it('stays quietly absent without the standard list hook', () => {
+    const view = render(<SessionClassLine sessionId="session-1" />)
+    expect(view.container.textContent).toBe('')
+    expect(screen.queryByText(/会话类型/u)).toBeNull()
+  })
+
+  it('reads the row under the owner id exactly as the seat passes it', () => {
+    const state: SessionListRows = {
+      byId: { 'session-abc': { projectionValues: { sessionClass: 'bot-worker' } } },
+    }
+    render(<SessionClassLine sessionId="session-abc" useSessions={useSessionsAt(state)} />)
     expect(screen.getByText(lineCopy('bot-worker'))).toBeTruthy()
-  })
-
-  it('fetches once per page and serves every later hover from the cache', async () => {
-    fetchMock.mockResolvedValue(jsonOk({
-      ok: true,
-      classes: { 'session-a': 'human', 'session-b': 'bot-boss' },
-    }))
-    const first = render(<SessionClassLine sessionId="session-a" />)
-    await flush()
-    expect(screen.getByText(lineCopy('human'))).toBeTruthy()
-    first.unmount()
-
-    const second = render(<SessionClassLine sessionId="session-b" />)
-    await flush()
-    expect(screen.getByText(lineCopy('bot-boss'))).toBeTruthy()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 })

@@ -135,6 +135,14 @@ export interface AttentionLedgerOptions {
   readonly attentionPath: string
   /** Clock seam for `updatedAt` (test injection). */
   readonly now?: () => string
+  /**
+   * Fires after a class write lands (sessionclass-summary-channel-1127): the
+   * projection seam that mirrors the persisted class onto the Session's own
+   * log. Called only when the ledger file actually changed, with the id the
+   * workspace lists and the class just written; the callback runs
+   * fail-open — a throwing seam never fails the ledger write that preceded it.
+   */
+  readonly onClassSettled?: (sessionId: string, sessionClass: SessionClass) => void
 }
 
 /**
@@ -151,6 +159,7 @@ export class AttentionLedger {
   private readonly registry: AttentionRegistry
   private readonly attentionPath: string
   private readonly now: () => string
+  private readonly onClassSettled: ((sessionId: string, sessionClass: SessionClass) => void) | undefined
   private table: AttentionDocument | undefined
   private chain: Promise<unknown> = Promise.resolve()
 
@@ -158,6 +167,16 @@ export class AttentionLedger {
     this.registry = options.registry
     this.attentionPath = options.attentionPath
     this.now = options.now ?? (() => new Date().toISOString())
+    this.onClassSettled = options.onClassSettled
+  }
+
+  /** Push one freshly persisted class at the projection seam (fail-open). */
+  private settled(sessionId: string, sessionClass: SessionClass): void {
+    try {
+      this.onClassSettled?.(sessionId, sessionClass)
+    } catch {
+      // The ledger write already landed; a broken seam must not fail it.
+    }
   }
 
   /** Run one operation exclusively behind the chain (the previous step's failure never wedges the next). */
@@ -232,6 +251,7 @@ export class AttentionLedger {
     const applied = await this.applyDefault(sessionClass, sessionId)
     table.sessions[canonical] = { class: sessionClass, defaultApplied: applied, source, updatedAt: this.now() }
     await writeJsonAtomic(this.attentionPath, table)
+    this.settled(sessionId, sessionClass)
   }
 
   /** Retry a record whose default never landed; no write when nothing changed. */
@@ -240,6 +260,8 @@ export class AttentionLedger {
     if (applied === record.defaultApplied) return
     table.sessions[canonical] = { ...record, defaultApplied: applied, updatedAt: this.now() }
     await writeJsonAtomic(this.attentionPath, table)
+    // The record's class is what landed (declare's pending branch may carry a fresher one).
+    this.settled(pinTarget, table.sessions[canonical].class)
   }
 
   /**

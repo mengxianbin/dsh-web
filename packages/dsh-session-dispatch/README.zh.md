@@ -12,7 +12,9 @@ DSH Web 的纯 REST 会话派发：`POST /api/session-dispatch` 通过 Host 自�
 输入保留，会话可再经 session-send 唤醒。每次派发还会向注意力账本（`$DSH_HOME/session-attention.json`）
 声明一个 `sessionClass`（默认 `human`；bot 值班会话为 `bot-boss`；bot 派发的任务
 工作为 `bot-worker`；旧字面 `bot` 归一为 `bot-worker`），账本对每个
-会话只应用一次默认置顶。仅 Host 侧——本包不声明 `dsh.client` 面，浏览器花名册中
+会话只应用一次默认置顶，且每条落账的分类都会折入 `sessionClass` 会话投影，
+使该值随 `SessionSummary.projectionValues` 走——与会话 id 同一条列表通道。
+仅 Host 侧——本包不声明 `dsh.client` 面，浏览器花名册中
 不出现任何条目。
 
 ## 动机
@@ -71,6 +73,15 @@ socket 一律 `403`。
 （从不入工作区成员表）既不记录也不置顶。账本损坏时隔离为
 `<path>.corrupt-<epoch>` 并重建，下一次启动 pass 降级按 `human` 处理。
 
+账本落账的每个分类还会折入 **`sessionClass` 会话投影**
+（`src/host/class-projection.ts`，记录类型 `plugin:session-dispatch/attention`）：
+活会话经账本的 `onClassSettled` 缝把分类追加进会话自身日志；每次启动一次的回填
+pass 把所有已记录分类镜像到记录之前的存量会话——检查点已带该值时零 I/O 跳过，
+否则一次写打开追加（仅当记录缺失）加一次冷重折刷新检查点（新投影键不会触发
+控制器的冷修复，该回写由回填承担）。此后该值随 `SessionSummary
+.projectionValues` 下发，`GET /api/session-dispatch/attention` 保留为诊断读面，
+消费方读列表快照。
+
 ### `POST /api/session-send`
 
 向既有会话投递一条提示词——等价于在活会话的输入框里人工打字（跨会话投递：
@@ -123,7 +134,11 @@ Host 拒绝（目标不在 attach = `session/not-found`、subagent 归属拒绝�
 
 - `src/index.ts`——插件入口：注入 `webServer`、`sessionController`、
   `workspaceRegistry`，注册派发、健康、绑定、session-send 与 session-stop
-  五条路由；运行注意力启动 pass 与首条消息分类钩子。
+  五条路由；运行注意力启动 pass、首条消息分类钩子与紧随其后的 `sessionClass`
+  回填 pass。
+- `src/host/class-projection.ts`——`sessionClass` 投影：从
+  `plugin:session-dispatch/attention` 记录折出三值分类、活会话追加缝，以及每
+  启动一次的账本 → 日志回填（检查点快速路径跳过、写打开追加、冷重折）。
 - `src/host/routes.ts`——请求体校验、`taskRef`/绑定契约与路由工厂（派发、
   健康、绑定、session-send、session-stop）。
 - `src/host/bindings.ts`——快账：`$DSH_HOME` 下的原子绑定持久化、实时活性查
