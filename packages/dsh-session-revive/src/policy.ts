@@ -414,6 +414,48 @@ export class RevivalPolicy {
   }
 
   /**
+   * One ruled stall crossing (design revive-child-rescue-1124 件3 案 A,
+   * ask `case3-pick` 2026-11-24): `turn-open-stall` 越线即按四闸发. The
+   * ruling itself grants revive-class admission (a stall is not an LLM
+   * failure code, so `selfLearn`/`classOf` do not govern it), then the
+   * exact ruled gates run — wave probe (跨回合过波冷却) + `decide`
+   * (4h×4 quota / 10-min breaker / 1M watermark / wave hold).
+   * `owner-heartbeat-stall` never enters here: it keeps its evidence-only
+   * half (narrow exemption ask `subprocess-exempt`).
+   * @param input - stalled session, crossing time, optional origin attribution.
+   * @returns detect + wave + decision records (the ruled account verbatim).
+   */
+  onStall(input: { sessionId: string; at: number; origin?: string }): PolicyRecord[] {
+    const code = 'turn-open-stall'
+    this.counters.detected += 1
+    this.counters.reviveClass += 1
+    const records: PolicyRecord[] = [
+      {
+        kind: 'detect',
+        at: input.at,
+        sessionId: input.sessionId,
+        code,
+        cls: 'revive',
+        ...(input.origin === undefined ? {} : { origin: input.origin }),
+      },
+    ]
+    const wave = this.waveOf(code, input.at)
+    if (wave.opened) {
+      this.counters.waveOpens += 1
+      records.push({
+        kind: 'wave',
+        at: input.at,
+        event: 'open',
+        cause: code,
+        count: wave.count,
+        releaseAt: input.at + WAVE_COOLDOWN_MS,
+      })
+    }
+    records.push(...this.decide({ sessionId: input.sessionId, code, at: input.at, allowWaveHold: true }))
+    return records
+  }
+
+  /**
    * One durable `model/selection` event (拍板⑩ 墙随路由走): a wall-suspended
    * session whose provider left the walled route has lost the wall's subject —
    * the hold releases and the session rejoins the normal revival flow,

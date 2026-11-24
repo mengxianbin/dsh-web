@@ -709,3 +709,52 @@ describe('boot sweep (拍板⑪ restart revival, zero quota)', () => {
     expect(q.snapshot(T0 + MIN).suspended).toBe(0)
   })
 })
+
+describe('件3 案 A — turn-open-stall crossing sends through the ruled gates', () => {
+  it('admits the crossing as revive-class with a quota stamp (ruling-granted, not selfLearn)', () => {
+    const p = policy()
+    const records = p.onStall({ sessionId: 'A', at: T0 })
+    expect(records[0]).toMatchObject({ kind: 'detect', code: 'turn-open-stall', cls: 'revive' })
+    expect(lastDecision(records)).toMatchObject({
+      action: 'revive',
+      reason: 'ok',
+      chainId: 'A',
+      code: 'turn-open-stall',
+      quotaUsed: 1,
+      quotaLimit: 4,
+    })
+  })
+
+  it('rides the same 4h×4 can as error deaths — fifth crossing exhausts it', () => {
+    const p = policy()
+    const stamps = [0, 16, 32, 48, 64].map((min) => T0 + min * MIN)
+    for (const [index, at] of stamps.slice(0, 4).entries()) {
+      expect(lastDecision(p.onStall({ sessionId: 'A', at }))).toMatchObject({ action: 'revive', quotaUsed: index + 1 })
+    }
+    expect(lastDecision(p.onStall({ sessionId: 'A', at: stamps[4] }))).toMatchObject({
+      action: 'skip',
+      reason: 'quota-exhausted',
+      quotaUsed: 4,
+    })
+  })
+
+  it('shares its own wave window (跨回合过波冷却); other causes run their own probe', () => {
+    const p = policy()
+    expect(lastDecision(p.onStall({ sessionId: 's1', at: T0 }))).toMatchObject({ action: 'revive', quotaUsed: 1 })
+    const open = p.onStall({ sessionId: 's2', at: T0 + MIN })
+    expect(open.find((r) => r.kind === 'wave')).toMatchObject({ event: 'open', cause: 'turn-open-stall', count: 2 })
+    expect(lastDecision(open)).toMatchObject({ action: 'hold', reason: 'wave-hold', quotaUsed: 0 })
+    expect(lastDecision(p.onError({ sessionId: 't1', code: 'TRANSPORT', at: T0 + 2 * MIN }))).toMatchObject({
+      action: 'revive',
+      code: 'TRANSPORT',
+    })
+  })
+
+  it('carries origin attribution into the detect record', () => {
+    const p = policy()
+    expect(p.onStall({ sessionId: 'c1', at: T0, origin: 'subagent' })[0]).toMatchObject({
+      kind: 'detect',
+      origin: 'subagent',
+    })
+  })
+})

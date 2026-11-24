@@ -40,7 +40,9 @@ import { MechanismHealth, readHostReviveHalted, removeReviveHealth } from './hea
 import { mountOnce } from './mount-once.ts'
 import { RevivalPolicy, type PolicyRecord } from './policy.ts'
 import { makeListRows, runBootSweep, type SweepListApi } from './sweep.ts'
-import { StallTracker, makeHeartbeatReader, type StallRecord } from './stall.ts'
+import { dispatchNudge, type ChildHeaderFacts } from './delivery.ts'
+import { queueHostSubagentPrompt } from '@deepseek-ai/dsh-subagent/internal'
+import { StallTracker, makeHeartbeatReader, ruledStallDeaths, type StallRecord } from './stall.ts'
 import { makeStatusRoute } from './host/routes.ts'
 import { attributeProbeFailure, probeRoute, type ProbeResult } from './v2-probe.ts'
 import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
@@ -226,6 +228,24 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     let lastNudgeAt = 0
     let wakeTimer: ReturnType<typeof setTimeout> | undefined
 
+    // Child-session header index (design 件1): only `origin=subagent` rows are
+    // retained — captured from the boot list rows (both listRows consumers)
+    // and from any live event the child emits. Send dispatch reads it to
+    // route through the parent-authorized delivery seam instead of the fenced
+    // generic prompt (围栏零改 — the fence itself is never touched).
+    const childHeaders = new Map<string, ChildHeaderFacts>()
+    const noteHeader = (sessionId: string, header: ChildHeaderFacts): void => {
+      if (header.origin === 'subagent' && !childHeaders.has(sessionId)) {
+        childHeaders.set(sessionId, {
+          origin: 'subagent',
+          ...(header.parentSession === undefined ? {} : { parentSession: header.parentSession }),
+        })
+      }
+    }
+    const noticeRow = (row: { readonly sessionId: string; readonly origin?: 'subagent'; readonly parentSessionId?: string }): void => {
+      noteHeader(String(row.sessionId), { origin: row.origin, parentSession: row.parentSessionId })
+    }
+
     // One structured JSON line per record, stamped with the active mode so a
     // grep can split shadow evidence from live sends. v2 machine records ride
     // the same line shape (kind `v2-*`).
@@ -262,7 +282,21 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       stallDeadline = deadline
       stallTimer = setTimeout(() => {
         stallTimer = undefined
-        logStall(stall.sweep(Date.now()))
+        const at = Date.now()
+        const stallRecords = stall.sweep(at)
+        // Evidence-first: the readings land regardless of what follows.
+        logStall(stallRecords)
+        // 件3 案 A (ask `case3-pick` 2026-11-24): turn-open-stall 越线即按四闸发 —
+        // same death→gates→send account as an error death; owner-heartbeat-stall
+        // keeps its evidence-only half (narrow exemption ask `subprocess-exempt`).
+        for (const death of ruledStallDeaths(stallRecords)) {
+          const origin = childHeaders.get(death.sessionId)?.origin
+          applyV2(machine.onDeath({ sessionId: death.sessionId, at }))
+          applyRecords(
+            policy.onStall({ sessionId: death.sessionId, at, ...(origin === undefined ? {} : { origin }) }),
+          )
+          armWake()
+        }
         armStall()
       }, Math.max(0, deadline - Date.now()))
     }
@@ -271,7 +305,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     // counts — the boot sweep's tier-1 checkpoint projection names it, and
     // the silence clock starts at seed time (never retroactive).
     if (resolved.stall.watch) {
-      void makeListRows(ctx.sessionController as unknown as SweepListApi)(abort.signal)
+      void makeListRows(ctx.sessionController as unknown as SweepListApi, noticeRow)(abort.signal)
         .then((rows) => {
           for (const row of rows) {
             const boundary = row.projections?.values.turnBoundary as { openTurnStartSeq?: number | null } | undefined
@@ -456,23 +490,39 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       const text = nudgeTextFor(code)
       const timer = setTimeout(() => {
         sendTimers.delete(timer)
-        void sessions
-          .prompt(
-            {
-              requestId: `session-revive-${randomUUID()}`,
-              sessionId,
-              mode: 'queue',
-              content: [{ type: 'text', text }],
-            },
-            abort.signal,
-          )
-          .then(() => {
+        void dispatchNudge(sessionId, text, {
+          header: (id) => childHeaders.get(id),
+          liveParent: (parentId) => (ctx.get('agents') as { get(id: string): unknown } | undefined)?.get(parentId),
+          runtime: () => ctx.get('subagents'),
+          prompt: async (targetId, body) => {
+            await sessions.prompt(
+              {
+                requestId: `session-revive-${randomUUID()}`,
+                sessionId: targetId,
+                mode: 'queue',
+                content: [{ type: 'text', text: body }],
+              },
+              abort.signal,
+            )
+          },
+          deliver: async (parent, childId, body) => {
+            const runtime = ctx.get('subagents') as Parameters<typeof queueHostSubagentPrompt>[0] | undefined
+            if (runtime === undefined) throw new Error('subagents runtime unavailable')
+            await queueHostSubagentPrompt(
+              runtime,
+              parent as Parameters<typeof queueHostSubagentPrompt>[1],
+              childId as Parameters<typeof queueHostSubagentPrompt>[2],
+              [{ type: 'text', text: body }] as Parameters<typeof queueHostSubagentPrompt>[3],
+              { kind: 'user', rpcId: `session-revive-${randomUUID()}` } as Parameters<typeof queueHostSubagentPrompt>[4],
+              abort.signal,
+            )
+          },
+          sent: () => {
             log({ kind: 'log', at: Date.now(), event: 'nudge-sent', sessionId, ...(code === undefined ? {} : { detail: { cause: code } }) })
-            return undefined
-          })
-          .catch((error: unknown) => {
-            // The send never ran: clear the machine's in-flight marker so the
-            // next decision can re-gate (a stuck marker would deny forever).
+          },
+          failed: (_id, error) => {
+            // Attempted and rejected: clear the machine's in-flight marker so
+            // the next decision can re-gate (a stuck marker would deny forever).
             machine.onAttemptWithheld(sessionId)
             log({
               kind: 'log',
@@ -481,7 +531,19 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
               sessionId,
               detail: { error: String(error).slice(0, 300), ...(code === undefined ? {} : { cause: code }) },
             })
-          })
+          },
+          unsendable: (_id, reason) => {
+            // Pre-send intercept (件1 fail-closed): no attempt, no fence probe.
+            machine.onAttemptWithheld(sessionId)
+            log({
+              kind: 'log',
+              at: Date.now(),
+              event: 'stall-unsendable',
+              sessionId,
+              detail: { reason, ...(code === undefined ? {} : { cause: code }) },
+            })
+          },
+        })
       }, plan.delay)
       sendTimers.add(timer)
     }
@@ -541,6 +603,8 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
 
     const offEvent = ctx.on('session/event', (session: Session, event: SessionEvent) => {
       const sessionId = String(session.id)
+      // Child index (件1): a live child's first event captures its header facts.
+      noteHeader(sessionId, session.header)
       // Stall probes ride this same stream: turn boundaries open/close and
       // every event refreshes a silence clock; the armed timer does the rest.
       logStall(stall.onEvent(sessionId, event.type, typeof event.time === 'number' ? event.time : Date.now()))
@@ -747,7 +811,7 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     // applyRecords/sendNudge path: staggered, breaker-armed, watermark-
     // checked, and quota-exempt (status counters/quota 零增).
     void runBootSweep({
-      listRows: makeListRows(ctx.sessionController as unknown as SweepListApi),
+      listRows: makeListRows(ctx.sessionController as unknown as SweepListApi, noticeRow),
       readEvents: async (sessionId, signal) => {
         // Resolved per read, not at activation: sessionPersistence is not in
         // this plugin's inject graph, so an eager capture could bind before
