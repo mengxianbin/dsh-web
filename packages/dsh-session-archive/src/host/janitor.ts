@@ -45,6 +45,7 @@ import {
 import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, sealRefOf, type AnalyzeSealOptions } from './seal.ts'
 import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
+import { analyzeSealAsync } from './seal-async.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { AsyncTtlMemo } from './ttl-memo.ts'
 import { InventoryResponseCache, type InventoryResponseServe } from './inventory-response-cache.ts'
@@ -799,10 +800,21 @@ export class ArchiveService {
    * `indexSessionDirs` walk, no `dirSize`, see {@link resolveSessionDirs});
    * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
    * a silent pass).
+   *
+   * The dialog channel is ASYNC since stall-rootcause-1123: memo hits still
+   * answer inline (one stat + map lookup), but a cold derive runs in the
+   * worker ({@link analyzeSealAsync}) so the synchronous decode + git probe
+   * never blocks the Host main thread — the 0.5–2.8s seal-check stalls the
+   *取证 measured leave with this change. Ids are processed sequentially on
+   * purpose: one worker at a time, the turn/end path's single-flight rule.
    */
-  sealCheck(ids: readonly string[], options?: AnalyzeSealOptions): SealCheckResult[] {
+  async sealCheck(ids: readonly string[], options?: AnalyzeSealOptions): Promise<SealCheckResult[]> {
     const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
-    return ids.map((id) => analyzeSeal(id, dirs.get(id), options))
+    const results: SealCheckResult[] = []
+    for (const id of ids) {
+      results.push(await analyzeSealAsync(id, dirs.get(id), options))
+    }
+    return results
   }
 
   // ------------------------------------------------------------------

@@ -86,8 +86,9 @@ describe('ArchiveService.sealCheck — targeted read behind the six-value groupi
     writeTranscript(host, 'session-green', [assistantMsg(SAVE_NA)])
     const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
 
-    // When a seal-check runs on a fresh service
-    const results = service.sealCheck(['session-green', 'session-ghost'])
+    // When a seal-check runs on a fresh service (async since
+    // stall-rootcause-1123: the cold derive answers from the worker)
+    const results = await service.sealCheck(['session-green', 'session-ghost'])
 
     // Then it located the id by probe — the full index cache was never paid
     // for — and the miss still answers UNKNOWN (client fail-open unchanged)
