@@ -10,6 +10,11 @@ import { randomUUID } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { decideBossGate, type BossGateDecision, type DispatchBossGate } from './boss-gate.ts'
+import {
+  planSeam,
+  recordStateOf,
+  type DispatchFsmSeam,
+} from './fsm-seam.ts'
 import { readBoundedJson, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 
@@ -161,6 +166,13 @@ export interface DispatchServices {
    * keeps pre-gate deployments and tests byte-identical.
    */
   readonly bossGate?: DispatchBossGate
+  /**
+   * E1 task-fsm seam (fsm-seam-archive-build-1125 S1, 方案 A): the loopback
+   * client that registers the task and fires E1 before session work. When
+   * absent the seam is off entirely — pre-seam deployments and tests stay
+   * byte-identical (no FSM call is ever attempted).
+   */
+  readonly fsm?: DispatchFsmSeam
 }
 
 /** Body-parse verdict. */
@@ -330,6 +342,25 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           console.log(`[dispatch-gate] allow reason=${gate.reason} class=${sessionClass ?? 'human'} taskRef=${taskRef ?? '-'}`)
         }
       }
+      // S1 封缝 (fsm-seam-archive-build-1125 方案 A, 挂点 = allow 之后): E1 段的
+      // 零副作用前段 —— 豁免（taskRef 无 '#' 合成锚 / sessionClass=bot-boss）直接
+      // 跳过不入 FSM；带锚派发先抽 scope 键 + G1 任务书 worktree 预案，缺 = 400
+      // 拒派 fail-closed（此刻还没建会话、没写 FSM，零孤儿）。create/E1 本体在
+      // proceed() 内（409 活绑定闸之后），语义与 scripts/dsh/dispatch-send.mjs 同源。
+      const fsmSeam = services.fsm
+      const origin = typeof req.headers.host === 'string' && req.headers.host !== ''
+        ? `http://${req.headers.host}`
+        : undefined
+      let seam: { scope: string; worktreePlan: string } | undefined
+      if (taskRef !== undefined && fsmSeam !== undefined) {
+        const planned = planSeam({ taskRef, sessionClass: sessionClass ?? 'human', prompt })
+        if (planned.kind === 'refuse') {
+          console.warn(`[dispatch-fsm-e1] REFUSED status=400 taskRef=${taskRef} detail=${planned.error}`)
+          writeJson(res, 400, { ok: false, error: `E1_BLOCKED ${planned.error}` })
+          return
+        }
+        if (planned.kind === 'run') seam = { scope: planned.scope, worktreePlan: planned.worktreePlan }
+      }
       // One critical section per taskRef: 409 gate -> session create -> ledger append.
       const proceed = async (): Promise<void> => {
         if (taskRef !== undefined && services.bindings !== undefined) {
@@ -352,6 +383,36 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
             return
           }
         }
+        // S1: FSM 注册（G1 在 create 门 fail-closed；create 409 = 按 state 分流幂等
+        // —— active 跳 E1 / backlog 续 / 终态·冻结拒派，同 dispatch-send.mjs）。
+        // 排在 409 活绑定闸之后：被 409 拒的派发不落 backlog 记录（零残留）。
+        let needE1 = seam !== undefined
+        if (seam !== undefined && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
+          const created = await fsmSeam.post(origin, 'create', {
+            taskRef,
+            worktreePlan: seam.worktreePlan,
+            scope: seam.scope,
+            ...(title === undefined ? {} : { title }),
+          })
+          if (created.status === 409) {
+            const state = recordStateOf(await fsmSeam.get(origin, 'state'), taskRef)
+            if (state === 'active') {
+              // 幂等跳过：该记录已 E1（session.id 可能仍空 = E1 前置期历史残留，
+              // 不回补——FSM 是前瞻账，见收口随注）。
+              needE1 = false
+            } else if (state !== 'backlog') {
+              console.warn(`[dispatch-fsm-e1] REFUSED status=409 taskRef=${taskRef} detail=记录态=${state ?? '查无'} 非 backlog/active（终态/冻结拒派）`)
+              writeJson(res, 409, { ok: false, error: `E1_BLOCKED 记录态=${state ?? '查无'} 非 backlog/active（终态/冻结拒派）`, taskRef })
+              return
+            }
+          } else if (created.status !== 200) {
+            const status = created.status >= 400 ? created.status : 503
+            const detail = typeof created.json.error === 'string' ? created.json.error : JSON.stringify(created.json)
+            console.warn(`[dispatch-fsm-e1] REFUSED status=${status} taskRef=${taskRef} detail=create status=${created.status} ${detail}`)
+            writeJson(res, status, { ok: false, error: `E1_BLOCKED create=${created.status} ${detail}` })
+            return
+          }
+        }
         const signal = new AbortController().signal
         let sessionId: string
         let attentionError: string | undefined
@@ -361,6 +422,31 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
             ...(mode === undefined ? {} : { agentPreset: mode }),
           })
           sessionId = created.sessionId
+          // S1: transition E1 带 payload.sessionId —— fsm.ts:102 的既有 sessionId
+          // 合并语义就是 session id 回写（schema 零改，§3.2 决定⑤）：记录落
+          // {id, mode:'frozen', reason:'排队位：等待开工核验'} 设计正形。409 forbid
+          // = 幂等跳过（并发下已被 E1）。E1 拒（G2/G3 等）= 拒派 + orphanSession
+          // 留痕（会话已建未投递，warn 带 id 供清理；fail-closed 不放行）。
+          if (seam !== undefined && needE1 && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
+            const e1 = await fsmSeam.post(origin, 'transition', { taskRef, event: 'E1', payload: { sessionId } })
+            const forbidden = e1.status === 409 && e1.json.kind === 'forbid'
+            if (e1.status !== 200 && !forbidden) {
+              const guard = typeof e1.json.guard === 'string' ? e1.json.guard : undefined
+              const detail = typeof e1.json.detail === 'string' ? e1.json.detail
+                : typeof e1.json.error === 'string' ? e1.json.error : JSON.stringify(e1.json)
+              const hint = guard === 'G3'
+                ? `；hint=开 scope 归人：POST /api/task-fsm/scope {key:"${seam.scope}",prio:"red|yellow",intent}`
+                : guard === 'G2' ? '；hint=同 taskRef 已有活绑定（409 防双跑）' : ''
+              console.warn(`[dispatch-fsm-e1] REFUSED status=${e1.status} taskRef=${taskRef} event=E1 guard=${guard ?? '-'} detail=${detail} orphanSession=${sessionId}${hint}`)
+              writeJson(res, e1.status >= 400 ? e1.status : 503, {
+                ok: false,
+                error: `E1_BLOCKED E1=${e1.status} ${detail}${hint}`,
+                ...(guard === undefined ? {} : { guard }),
+                taskRef,
+              })
+              return
+            }
+          }
           if (services.attention !== undefined) {
             try {
               await services.attention.declare(sessionId, sessionClass ?? 'human')

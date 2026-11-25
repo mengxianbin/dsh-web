@@ -12,6 +12,7 @@ import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
 import { createClassProjection } from './host/class-projection.ts'
 import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
+import { makeLoopbackFsmSeam } from './host/fsm-seam.ts'
 import { TaskbotBossGate } from './host/boss-gate.ts'
 import { SteerAckTracker } from './host/steer-ack.ts'
 
@@ -116,6 +117,11 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
         // dispatches while a stale halt wedge is provable, and clears a
         // leftover halt so the self-heal chain re-arms.
         bossGate: new TaskbotBossGate({ statePath: join(dshHome, 'taskbot-state.json') }),
+        // E1 task-fsm seam (fsm-seam-archive-build-1125 S1 方案 A): every
+        // taskRef-with-anchor dispatch registers + passes E1 through loopback
+        // self-calls before a session exists (G1/G2/G3 同 dispatch-send.mjs);
+        // synthetic anchors (no '#') and bot-boss dispatches are exempt.
+        fsm: makeLoopbackFsmSeam(),
       }),
       // Delivery onto an existing Session: queue by default, steer on request.
       makeSessionSendRoute({ sessions }, { steerAck }),
