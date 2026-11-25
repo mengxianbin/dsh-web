@@ -22,6 +22,7 @@ import { archivePlan, pendingReceipts } from '../core/archive.ts'
 import type { FsmFile, ScopeDecl, TaskRecord } from '../core/schema.ts'
 import { EVENTS, type EventId } from '../core/table.ts'
 import { FsmStore } from './store.ts'
+import { ArchiveLeg } from './archive-leg.ts'
 import { makeHostDeps, type TransitionEvidence } from './sources.ts'
 import { readBoundedJson, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
@@ -31,11 +32,23 @@ export const TASK_FSM_API_PREFIX = '/api/task-fsm'
 /** Transition bodies carry evidence blocks; 64 KiB is ample. */
 const BODY_MAX_BYTES = 64 * 1024
 
+/**
+ * 404 body hint (S3, fsm-seam-archive-build-1125): 404 语义不变、只加字段——
+ * 「查无」与「该走哪」一次说清（E1 缝落地后此形态应绝迹）。
+ */
+const HINT_UNKNOWN_TASKREF = 'task not registered — dispatch bypassed the E1 seam? run POST /api/task-fsm/create + transition E1 first (fsm-seam-archive-1125 方案A)'
+
 export interface FsmRouteServices {
   store: FsmStore
   dshHome: string
   /** G5 redisp breaker cap (design §6.1 N 建议初值 3, 判据归人). */
   maxRedisp: number
+  /**
+   * S2 归档执行腿 (fsm-seam-archive-build-1125 §3.2): when absent, no E18
+   * auto-notice and no archive POST ever fires — pre-leg deployments and
+   * tests stay byte-identical.
+   */
+  leg?: ArchiveLeg
 }
 
 /** Discriminated result of one read-modify-write transition attempt. */
@@ -255,19 +268,51 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
         ...(rawPayload.rulingReceipt === true ? { rulingReceipt: true } : {}),
         ...(typeof rawPayload.sessionId === 'string' ? { sessionId: rawPayload.sessionId } : {}),
       }
+      // S2 触发②的出参通道：update 回调内算好的父归 ids，写盘成功后再发 POST
+      // （回调内发 HTTP 会把网络延迟塞进读改写临界区）。
+      let parentArchiveIds: readonly string[] = []
+      const origin = typeof req.headers.host === 'string' && req.headers.host !== ''
+        ? `http://${req.headers.host}`
+        : undefined
       try {
         const outcome = store.update<UpdateOutcome>((file) => {
           const record = file.tasks[taskRef]
           if (record === undefined) return { status: 404 as const, error: 'unknown taskRef' }
           const result = applyTransition(record, event, depsFor(services, file, record, evidence), payload)
           if (!result.ok) return { status: 409 as const, refusal: result }
-          file.tasks[taskRef] = result.record
-          return { status: 200 as const, record: result.record }
+          let next = result.record
+          // S2 事件驱动触发①② (fsm-seam-archive-build-1125 §3.2, 腿在场才生效)：
+          // 「落 done」= from ≠ done（E17/E19 在已 done 记录上不再触发，防 E18 重发
+          // 撤销已回执状态）。① 根终态 → E18 同笔原子补发（pendingAck + 黄档通知面
+          // 接通，生产零调用方的断头根因）；② 父落 done → childSessions 交归档腿
+          // （父收口即归子，§5；写盘后 fire-and-forget，失败留痕不回滚）。
+          if (next.state === 'done' && record.state !== 'done' && services.leg !== undefined) {
+            const isRoot = next.root === true || next.parent === undefined
+            if (isRoot && next.pendingAck !== true) {
+              const notice = applyTransition(next, 'E18', depsFor(services, file, next, {}), {})
+              if (notice.ok) next = notice.record
+            }
+            parentArchiveIds = archivePlan(file, taskRef).childSessions
+          }
+          file.tasks[taskRef] = next
+          return { status: 200 as const, record: next }
         })
-        if ('error' in outcome) { writeJson(res, outcome.status, { ok: false, error: outcome.error }); return }
+        if ('error' in outcome) {
+          // S3 可见性（仅 404/409 分支）：host 侧拒绝留痕，404 语义不变只加 hint。
+          console.warn(`[task-fsm] transition REFUSED status=${outcome.status} taskRef=${taskRef} event=${event} detail=${outcome.error}`)
+          writeJson(res, outcome.status, outcome.status === 404
+            ? { ok: false, error: outcome.error, hint: HINT_UNKNOWN_TASKREF }
+            : { ok: false, error: outcome.error })
+          return
+        }
         if ('refusal' in outcome) {
+          console.warn(`[task-fsm] transition REFUSED status=409 taskRef=${taskRef} event=${event} kind=${outcome.refusal.kind} guard=${outcome.refusal.guard ?? '-'} detail=${outcome.refusal.detail}`)
           writeJson(res, outcome.status, { ok: false, kind: outcome.refusal.kind, detail: outcome.refusal.detail, ...(outcome.refusal.guard !== undefined ? { guard: outcome.refusal.guard } : {}) })
           return
+        }
+        // S2 触发②：父归 POST（fail-open —— 归档失败不碰已写好的 FSM 转移）。
+        if (parentArchiveIds.length > 0 && services.leg !== undefined && origin !== undefined) {
+          void services.leg.archive(taskRef, parentArchiveIds, origin)
         }
         writeJson(res, 200, { ok: true, record: outcome.record, queue: deriveQueue(outcome.record) })
       } catch (error) {
@@ -305,8 +350,18 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
           file.tasks[taskRef] = result.record
           return { status: 200 as const, record: result.record }
         })
-        if ('error' in outcome) { writeJson(res, outcome.status, { ok: false, error: outcome.error }); return }
-        if ('refusal' in outcome) { writeJson(res, outcome.status, { ok: false, kind: outcome.refusal.kind, detail: outcome.refusal.detail }); return }
+        if ('error' in outcome) {
+          // S3 可见性（仅 404/409 分支）：host 侧拒绝留痕，404 语义不变只加 hint。
+          console.warn(`[task-fsm] wake REFUSED status=${outcome.status} taskRef=${taskRef} trigger=${trigger} detail=${outcome.error}`)
+          writeJson(res, outcome.status, outcome.status === 404
+            ? { ok: false, error: outcome.error, hint: HINT_UNKNOWN_TASKREF }
+            : { ok: false, error: outcome.error })
+          return
+        }
+        if ('refusal' in outcome) {
+          console.warn(`[task-fsm] wake REFUSED status=409 taskRef=${taskRef} trigger=${trigger} kind=${outcome.refusal.kind} guard=${outcome.refusal.guard ?? '-'} detail=${outcome.refusal.detail}`)
+          writeJson(res, outcome.status, { ok: false, kind: outcome.refusal.kind, detail: outcome.refusal.detail }); return
+        }
         writeJson(res, 200, { ok: true, woke: true, sessionId: outcome.record.session?.id, record: outcome.record })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
@@ -324,6 +379,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       if (body === undefined || taskRef === '') { writeJson(res, 400, { ok: false, error: 'body needs { taskRef }' }); return }
+      const origin = typeof req.headers.host === 'string' && req.headers.host !== ''
+        ? `http://${req.headers.host}`
+        : undefined
       try {
         const outcome = store.update<UpdateOutcome>((file) => {
           const record = file.tasks[taskRef]
@@ -334,8 +392,25 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
           file.tasks[taskRef] = result.record
           return { status: 200 as const, record: result.record }
         })
-        if ('error' in outcome) { writeJson(res, outcome.status, { ok: false, error: outcome.error }); return }
-        if ('refusal' in outcome) { writeJson(res, outcome.status, { ok: false, kind: outcome.refusal.kind, detail: outcome.refusal.detail }); return }
+        if ('error' in outcome) {
+          // S3 可见性（仅 404/409 分支）：404 语义不变、只加 hint 字段。
+          console.warn(`[task-fsm] ack REFUSED status=${outcome.status} taskRef=${taskRef} event=E19 detail=${outcome.error}`)
+          writeJson(res, outcome.status, outcome.status === 404
+            ? { ok: false, error: outcome.error, hint: HINT_UNKNOWN_TASKREF }
+            : { ok: false, error: outcome.error })
+          return
+        }
+        if ('refusal' in outcome) {
+          console.warn(`[task-fsm] ack REFUSED status=409 taskRef=${taskRef} event=E19 kind=${outcome.refusal.kind} guard=${outcome.refusal.guard ?? '-'} detail=${outcome.refusal.detail}`)
+          writeJson(res, outcome.status, { ok: false, kind: outcome.refusal.kind, detail: outcome.refusal.detail, ...(outcome.refusal.guard !== undefined ? { guard: outcome.refusal.guard } : {}) })
+          return
+        }
+        // S2 触发③：E19 人回执成功 → 归根会话自己（leaveToHuman：人查收即归档授权，
+        // 宿主是机械执行手；fire-and-forget，失败留痕不回滚 FSM）。
+        if (services.leg !== undefined && origin !== undefined) {
+          const id = outcome.record.session?.id
+          if (typeof id === 'string' && id !== '') void services.leg.archive(taskRef, [id], origin)
+        }
         writeJson(res, 200, { ok: true, record: outcome.record })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })

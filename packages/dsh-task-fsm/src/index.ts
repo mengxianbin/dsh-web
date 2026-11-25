@@ -15,6 +15,7 @@ import { mountOnce } from './mount-once.ts'
 import { resolveDshHome } from './dsh-home.ts'
 import { FsmStore, defaultFsmPath } from './host/store.ts'
 import { makeTaskFsmRoutes } from './host/routes.ts'
+import { ArchiveLeg } from './host/archive-leg.ts'
 import {
   DEFAULT_COOLDOWN_MS, DEFAULT_FLOOR_RATIO, DEFAULT_WATCH_PERIOD_MS,
   MemFloorWatcher,
@@ -37,6 +38,8 @@ export interface Config {
   memFloorPeriodMs?: number
   /** Continuous-healthy cooldown before a `quota-free` wake (default 60s, 施工期定判据归人). */
   memFloorCooldownMs?: number
+  /** S2 archive execution leg — auto E18 on root done + archive POSTs (default on, fsm-seam-archive-build-1125). */
+  archiveLeg?: boolean
 }
 
 export const Config: z<Config> = z.object({
@@ -46,6 +49,7 @@ export const Config: z<Config> = z.object({
   memFloorRatio: z.number().default(DEFAULT_FLOOR_RATIO),
   memFloorPeriodMs: z.number().default(DEFAULT_WATCH_PERIOD_MS),
   memFloorCooldownMs: z.number().default(DEFAULT_COOLDOWN_MS),
+  archiveLeg: z.boolean().default(true),
 })
 
 export const apply = mountOnce('dsh-task-fsm', (ctx: Context, config?: Config): void => {
@@ -54,7 +58,11 @@ export const apply = mountOnce('dsh-task-fsm', (ctx: Context, config?: Config): 
   ctx.effect(() => {
     const dshHome = resolveDshHome()
     const store = new FsmStore(defaultFsmPath(dshHome))
-    const routes = makeTaskFsmRoutes({ store, dshHome, maxRedisp: parsed.maxRedisp ?? 3 })
+    // S2 归档执行腿 (fsm-seam-archive-build-1125 §3.2): 事件驱动三触发的 HTTP 半
+    // （触发① E18 在 transition 路由内原子补发，触发②③ 走本腿 POST archive；
+    // actor = 渠道名 fsm-host、seal 红不 force、失败留痕不回滚）。
+    const leg = parsed.archiveLeg === false ? undefined : new ArchiveLeg()
+    const routes = makeTaskFsmRoutes({ store, dshHome, maxRedisp: parsed.maxRedisp ?? 3, ...(leg === undefined ? {} : { leg }) })
     const disposers = routes.map((route) => ctx.webServer.register(route))
     // E7 扳机 (mem-floor-freeze-wiring-1124): bounded low-frequency watcher;
     // period is clamped ≥30s inside the class, reads are os.freemem-class
