@@ -62,6 +62,7 @@ function fakeReq(url: string, payload: unknown, host: string): IncomingMessage {
 interface DispatchBody {
   ok?: boolean
   sessionId?: string
+  taskRef?: string
   error?: string
   guard?: string
 }
@@ -206,17 +207,39 @@ describe('E1 dispatch seam (host route registers + fires E1 before session work)
     expect(warns.some((w) => w.includes('g3-fixture') && w.includes('G3'))).toBe(true)
   })
 
-  it('create 409 → active is idempotent: E1 skipped, record untouched (历史残留 id 不回写)', async () => {
+  it('operator gets 409 at the gate when the taskRef already holds a live FSM session', async () => {
+    // Given the record landed active with its session bound by the first dispatch
     access = []
-    const beforeTransition = fsmHits('POST /api/task-fsm/transition')
+    const beforeCreated = counters.created
     const firstId = store.load().tasks[TASK_REF]?.session?.id
     expect(firstId).toBeTruthy()
+    // When the same taskRef dispatches again
     const again = await dispatch({ prompt: PROMPT, taskRef: TASK_REF, title: 'seam 夹具', sessionClass: 'bot-worker' })
+    // Then the gate answers 409 with the unchanged body shape, before create — no session minted
+    expect(again.status).toBe(409)
+    expect(again.body).toMatchObject({ ok: false, taskRef: TASK_REF, sessionId: firstId })
+    expect(String(again.body.error)).toContain('taskRef already has a live session')
+    expect(fsmHits('POST /api/task-fsm/create')).toBe(0)
+    expect(fsmHits('GET /api/task-fsm/state')).toBe(1) // 闸① state read only
+    expect(counters.created).toBe(beforeCreated)
+    expect(store.load().tasks[TASK_REF]?.session?.id).toBe(firstId) // 记录零改
+  })
+
+  it('operator re-dispatches through the idempotent path when the active record carries no session id', async () => {
+    // Given the active record with its session id cleared (E1 前置期历史残留 形态)
+    access = []
+    const seeded = store.load()
+    seeded.tasks[TASK_REF]!.session = { id: '', mode: 'active', reason: '' }
+    store.save(seeded)
+    const beforeTransition = fsmHits('POST /api/task-fsm/transition')
+    // When the same taskRef dispatches again
+    const again = await dispatch({ prompt: PROMPT, taskRef: TASK_REF, title: 'seam 夹具', sessionClass: 'bot-worker' })
+    // Then the gate clears (session.id 空), create 409 → active skips E1, record untouched
     expect(again.status).toBe(200)
     expect(fsmHits('POST /api/task-fsm/create')).toBe(1) // 409 幂等分流
-    expect(fsmHits('GET /api/task-fsm/state')).toBe(1) // 分流读
+    expect(fsmHits('GET /api/task-fsm/state')).toBe(2) // 闸①读 + 分流读
     expect(fsmHits('POST /api/task-fsm/transition')).toBe(beforeTransition) // E1 跳过
-    expect(store.load().tasks[TASK_REF]?.session?.id).toBe(firstId) // 残留如实（前瞻账不回补）
+    expect(store.load().tasks[TASK_REF]?.session?.id).toBe('') // 残留如实（前瞻账不回补）
     expect(store.load().tasks[TASK_REF]?.history.map((h) => h.event)).toEqual(['E1'])
   })
 })

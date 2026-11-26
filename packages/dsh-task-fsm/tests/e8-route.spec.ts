@@ -100,6 +100,68 @@ async function seedActive(t: ReturnType<typeof setup>): Promise<void> {
   expect(e1.body.record?.state).toBe('active')
 }
 
+/**
+ * scope → create a backlog record, optionally injecting a session node
+ * directly (G2 夹具: the session must exist BEFORE E1 fires, so it cannot
+ * come from E1 itself).
+ */
+async function seedBacklog(
+  t: ReturnType<typeof setup>,
+  session?: { id: string; mode: 'active' | 'frozen' | 'locked'; reason: string },
+): Promise<void> {
+  const sc = await call(t.scope, { key: SCOPE, prio: 'red', intent: 'dsh 板（G2 改读夹具）' })
+  expect(sc.status).toBe(200)
+  const cr = await call(t.create, {
+    taskRef: TASK_REF,
+    worktreePlan: '开 worktree .wt/g2-route-fixture 再动手（worktree 预案）',
+    scope: SCOPE,
+    title: 'G2 改读夹具',
+  })
+  expect(cr.status).toBe(200)
+  if (session !== undefined) {
+    const file = t.store.load()
+    file.tasks[TASK_REF]!.session = session
+    t.store.save(file)
+  }
+}
+
+describe('G2 route reads FSM state (fsm-rebind-1126 改读)', () => {
+  it('operator sees E1 refused 409 G2 when the FSM record already holds an active session', async () => {
+    const t = setup()
+    try {
+      // Given a backlog record whose FSM session is already bound (切单后 B 的形态)
+      await seedBacklog(t, { id: 'session-g2', mode: 'active', reason: '' })
+      const before = readFileSync(t.file, 'utf8')
+      // When E1 fires for that taskRef
+      const e1 = await call(t.transition, { taskRef: TASK_REF, event: 'E1', payload: { sessionId: 'session-g2' } })
+      // Then it refuses with guard G2 (FSM 记录有 active 会话) and the store file stays byte-identical
+      expect(e1.status).toBe(409)
+      expect(e1.body.ok).toBe(false)
+      expect(e1.body.guard).toBe('G2')
+      expect(e1.body.detail).toContain('FSM 记录有 active 会话')
+      expect(readFileSync(t.file, 'utf8')).toBe(before)
+      expect(t.store.load().tasks[TASK_REF]?.state).toBe('backlog')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it('operator sees E1 pass when the bound session id is empty (session.id 空 → 活口径不命中)', async () => {
+    const t = setup()
+    try {
+      // Given a backlog record whose session node carries an empty id
+      await seedBacklog(t, { id: '', mode: 'active', reason: '' })
+      // When E1 fires for that taskRef
+      const e1 = await call(t.transition, { taskRef: TASK_REF, event: 'E1' })
+      // Then G2 passes and the record lands active
+      expect(e1.status).toBe(200)
+      expect(e1.body.record?.state).toBe('active')
+    } finally {
+      t.cleanup()
+    }
+  })
+})
+
 describe('E8 acceptance gate route two-state (green lands done / red refuses without writing)', () => {
   it('red readings answer 409 G4 and leave the store file byte-identical (机检红不写)', async () => {
     const t = setup()

@@ -5,9 +5,20 @@
  * @module @linxin666/dsh-task-fsm/core/subreason
  */
 
-import type { TaskRecord } from './schema.ts'
+import type { HistoryEntry, TaskRecord } from './schema.ts'
 import { deriveQueue } from './queue.ts'
 import { EVENT_LABELS } from './table.ts'
+
+/**
+ * Label of any history event: E1–E21 come from the design table; the two
+ * rebind pseudo-events (fsm-rebind-1126 §3.1) are history-only marks and
+ * deliberately stay out of `EVENT_LABELS` (轴封闭, E1–E21 表不扩).
+ */
+function historyEventLabel(event: HistoryEntry['event']): string {
+  if (event === 'rebind-in') return '换绑入'
+  if (event === 'rebind-out') return '换绑出'
+  return EVENT_LABELS[event]
+}
 
 /** The four answers a red/yellow hover must carry (§4.2). */
 export interface SubReasons {
@@ -52,7 +63,7 @@ const NEXT_BY_STATE: Readonly<Record<string, string>> = {
 export function deriveSubReasons(record: TaskRecord): SubReasons {
   const verdict = deriveQueue(record)
   const last = record.history.length > 0 ? record.history[record.history.length - 1] : undefined
-  const lastLabel = last ? `${EVENT_LABELS[last.event]}（${last.event}）→ ${last.to}` : '无转移记录'
+  const lastLabel = last ? `${historyEventLabel(last.event)}（${last.event}）→ ${last.to}` : '无转移记录'
 
   const what = WHAT_BY_CAUSE[record.cause ?? '']
     ?? (record.session?.mode === 'frozen' || record.session?.mode === 'locked'

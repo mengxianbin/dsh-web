@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { Readable } from 'node:stream'
+import type { DispatchFsmSeam } from '../src/host/fsm-seam.ts'
 import {
   makeDispatchRoutes,
   makeHealthRoute,
@@ -278,6 +279,28 @@ function fakeBindings(overrides: Partial<DispatchBindingStore> = {}): DispatchBi
   }
 }
 
+/** A task book carrying a G1 worktree 预案 (planSeam → run, so the gate runs). */
+const PLAN_PROMPT = '# 任务书\n\nworktree 预案 = 开 .wt/gate-fixture 后动手\n正文'
+
+const GATE_REF = 'board.md#item-1'
+
+/**
+ * FSM seam double for 闸① (fsm-rebind-1126): serves GET state from one
+ * optional record and answers create/transition 200 (the gate verdict is the
+ * unit under test; the create/E1 flow has its own real-server spec).
+ */
+function fakeFsm(record?: { state: string; session?: { id: string } }): DispatchFsmSeam {
+  return {
+    async get() {
+      const tasks = record === undefined ? {} : { [GATE_REF]: record }
+      return { status: 200, json: { ok: true, file: { version: 1, scopes: {}, tasks } } }
+    },
+    async post() {
+      return { status: 200, json: { ok: true } }
+    },
+  }
+}
+
 describe('dispatch route taskRef bindings', () => {
   it('records a binding with taskRef, sessionId, workspaceId, title, and createdAt', async () => {
     const bindings = fakeBindings()
@@ -300,17 +323,12 @@ describe('dispatch route taskRef bindings', () => {
     expect(Number.isFinite(Date.parse(binding.createdAt))).toBe(true)
   })
 
-  it('answers 409 with the existing sessionId when the taskRef still has a live session', async () => {
-    const existing: DispatchBinding = {
-      taskRef: 'board.md#item-1',
-      sessionId: 'session-live',
-      workspaceId: 'ws-1',
-      createdAt: '2026-10-19T00:00:00.000Z',
-    }
+  it('operator gets 409 with the existing sessionId when the FSM record holds a live session', async () => {
+    // Given an FSM record for the taskRef in active state with a bound session
+    const fsm = fakeFsm({ state: 'active', session: { id: 'session-live' } })
     let created = false
-    const bindings = fakeBindings({ async findAlive() { return existing } })
     const services = happyServices({
-      bindings,
+      fsm,
       sessions: {
         async create() { created = true; return { sessionId: 's' } },
         async rename() { return {} },
@@ -319,22 +337,28 @@ describe('dispatch route taskRef bindings', () => {
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
-    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
+    // When the operator dispatches that taskRef (a plan-bearing task book)
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    // Then it answers 409 with the unchanged body shape and mints no session
     expect(captured.status).toBe(409)
-    expect(captured.body).toMatchObject({ ok: false, taskRef: 'board.md#item-1', sessionId: 'session-live' })
+    expect(captured.body).toMatchObject({ ok: false, taskRef: GATE_REF, sessionId: 'session-live' })
+    expect(String((captured.body as { error: string }).error)).toBe('taskRef already has a live session: session-live')
     expect(created).toBe(false)
-    expect(bindings.recorded).toHaveLength(0)
   })
 
-  it('re-dispatches when the previous binding is dead (findAlive answers undefined)', async () => {
-    const bindings = fakeBindings()
-    const services = happyServices({ bindings })
+  it('operator re-dispatches on absent and terminal FSM records (清态放行)', async () => {
+    // Given an FSM seam with no record, then one holding a terminal record
+    // When the operator dispatches the taskRef against each
+    const services = happyServices({ fsm: fakeFsm() })
     const handler = makeDispatchRoutes(services)[0].handler!
-    const first = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
-    expect(first.status).toBe(200)
-    const second = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
-    expect(second.status).toBe(200)
-    expect(bindings.recorded).toHaveLength(2)
+    const absent = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    const terminalServices = happyServices({ fsm: fakeFsm({ state: 'done', session: { id: 'session-dead' } }) })
+    const terminalHandler = makeDispatchRoutes(terminalServices)[0].handler!
+    const terminal = await run(terminalHandler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    // Then the gate clears both (no live session) and both dispatch
+    expect(absent.status).toBe(200)
+    expect(absent.body).toEqual({ ok: true, sessionId: 'session-abc' })
+    expect(terminal.status).toBe(200)
   })
 
   it('dispatches without taskRef exactly as before, recording nothing', async () => {
@@ -347,14 +371,20 @@ describe('dispatch route taskRef bindings', () => {
     expect(bindings.recorded).toHaveLength(0)
   })
 
-  it('fails the 409 gate open when the binding store throws, still dispatching', async () => {
-    const bindings = fakeBindings({
-      async findAlive() { throw new Error('store on fire') },
-    })
-    const services = happyServices({ bindings })
+  it('operator is refused 503 when the FSM state read fails (fail-closed, 原快账 fail-open 反转)', async () => {
+    // Given an FSM seam whose GET state cannot be answered (fetch failed = status 0)
+    const fsm: DispatchFsmSeam = {
+      async get() { return { status: 0, json: { error: 'fetch failed' } } },
+      async post() { return { status: 200, json: { ok: true } } },
+    }
+    const services = happyServices({ fsm })
     const handler = makeDispatchRoutes(services)[0].handler!
-    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }))
-    expect(captured.status).toBe(200)
+    // When the operator dispatches the taskRef
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    // Then it refuses 503 with the fail-closed wording instead of dispatching
+    expect(captured.status).toBe(503)
+    expect(String((captured.body as { error: string }).error)).toContain('fail-closed')
+    expect(captured.body).toMatchObject({ ok: false, taskRef: GATE_REF })
   })
 
   it('still dispatches a taskRef when no binding store is composed', async () => {
@@ -378,32 +408,38 @@ describe('dispatch route taskRef bindings', () => {
 })
 
 describe('dispatch gate serialization', () => {
-  it('lets exactly one of two concurrent same-taskRef dispatches pass; the loser answers 409 with the winner sessionId', async () => {
-    const recorded: DispatchBinding[] = []
-    const alive = new Set<string>()
-    const bindings: DispatchBindingStore = {
-      async findAlive(taskRef) {
-        for (let i = recorded.length - 1; i >= 0; i -= 1) {
-          const binding = recorded[i]!
-          if (binding.taskRef === taskRef && alive.has(binding.sessionId)) return binding
-        }
-        return undefined
+  it('operator sees exactly one of two concurrent same-taskRef dispatches pass; the loser answers 409 with the winner sessionId', async () => {
+    // Given a stateful FSM seam that turns live only when the winner's E1 lands
+    const state: { record?: { state: string; session?: { id: string } } } = {}
+    const fsm: DispatchFsmSeam = {
+      async get() {
+        const tasks = state.record === undefined ? {} : { [GATE_REF]: state.record }
+        return { status: 200, json: { ok: true, file: { version: 1, scopes: {}, tasks } } }
       },
-      async record(binding) { recorded.push(binding) },
-      async list() { return recorded.map((binding) => ({ ...binding, alive: alive.has(binding.sessionId) })) },
+      async post(_origin, path, body) {
+        if (path === 'create') {
+          if (state.record !== undefined) return { status: 409, json: { ok: false, error: 'task already exists' } }
+          state.record = { state: 'backlog' }
+          return { status: 200, json: { ok: true } }
+        }
+        if (path === 'transition') {
+          const payload = body as { payload?: { sessionId?: string } }
+          state.record = { state: 'active', session: { id: payload.payload?.sessionId ?? '' } }
+          return { status: 200, json: { ok: true } }
+        }
+        return { status: 200, json: { ok: true } }
+      },
     }
     let created = 0
     const services = happyServices({
-      bindings,
+      fsm,
       sessions: {
         async create() {
           // Widen the check-then-act window: without in-process serialization
-          // both requests clear findAlive before either one records.
+          // both requests clear the gate before either one's E1 lands.
           await new Promise((resolve) => setTimeout(resolve, 10))
           created += 1
-          const sessionId = `session-${created}`
-          alive.add(sessionId)
-          return { sessionId }
+          return { sessionId: `session-${created}` }
         },
         async rename() { return {} },
         async prompt() { return { accepted: true } },
@@ -411,18 +447,20 @@ describe('dispatch gate serialization', () => {
       },
     })
     const handler = makeDispatchRoutes(services)[0].handler!
-    const body = { workspaceId: 'ws-1', prompt: 'x', taskRef: 'board.md#item-1' }
+    const body = { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }
     const [first, second] = await Promise.all([
       run(handler, fakeReq('POST', body)),
       run(handler, fakeReq('POST', body)),
     ])
+    // Then exactly one passes; the loser's queued FSM read observes the winner's E1 and answers 409
     expect([first.status, second.status].sort((a, b) => a - b)).toEqual([200, 409])
     const winner = first.status === 200 ? first : second
     const loser = first.status === 200 ? second : first
+    const winnerId = (winner.body as { sessionId: string }).sessionId
     expect(winner.body).toMatchObject({ ok: true, sessionId: expect.stringMatching(/^session-/) })
-    expect(loser.body).toMatchObject({ ok: false, taskRef: 'board.md#item-1', sessionId: (winner.body as { sessionId: string }).sessionId })
+    expect(loser.body).toMatchObject({ ok: false, taskRef: GATE_REF, sessionId: winnerId })
     expect(created).toBe(1)
-    expect(recorded).toHaveLength(1)
+    expect(state.record?.session?.id).toBe(winnerId)
   })
 })
 

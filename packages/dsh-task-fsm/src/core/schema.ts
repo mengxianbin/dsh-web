@@ -17,12 +17,25 @@ export type QueueTier = 'none' | 'red' | 'yellow'
 /** D 机看态 (§2.2): active / ❄️ frozen / 🔒 locked. */
 export type SessionMode = 'active' | 'frozen' | 'locked'
 
+/**
+ * Rebind pseudo-events (fsm-rebind-1126, 设计 §3.1 换绑原子事件): history-only
+ * marks — NOT transition-table events. The six-state × E1–E21 matrix stays
+ * closed (⛔ 非 E22), and these never join `EVENTS` / `EVENT_LABELS`.
+ */
+export type RebindEvent = 'rebind-in' | 'rebind-out'
+
+/** The two rebind history events (schema validation face). */
+export const REBIND_EVENTS: readonly RebindEvent[] = ['rebind-in', 'rebind-out']
+
 /** One history entry appended by every accepted transition (§2.6). */
 export interface HistoryEntry {
-  event: EventId
+  event: EventId | RebindEvent
   from: State
   to: State
   at: string
+  /** rebind 强制切留痕（§3.2 force 分支）：`kind:'forced'` 时 `forceReason` 非空。 */
+  kind?: 'forced'
+  forceReason?: string
 }
 
 /** Session node of one task record (D axis + hover freeze reason source). */
@@ -74,15 +87,22 @@ export interface FsmFile {
 }
 
 const StateSchema = z.union(STATES.map((s) => z.const(s)) as [ReturnType<typeof z.const>, ...ReturnType<typeof z.const>[]])
-const EventSchema = z.union(EVENTS.map((e) => z.const(e)) as [ReturnType<typeof z.const>, ...ReturnType<typeof z.const>[]])
 const QueueSchema = z.union([z.const('none'), z.const('red'), z.const('yellow')])
 const ModeSchema = z.union([z.const('active'), z.const('frozen'), z.const('locked')])
 
+/** E1–E21 plus the two rebind pseudo-events (history face only). */
+const HistoryEventSchema = z.union([
+  ...EVENTS.map((e) => z.const(e)),
+  ...REBIND_EVENTS.map((e) => z.const(e)),
+] as [ReturnType<typeof z.const>, ...ReturnType<typeof z.const>[]])
+
 const HistorySchema = z.object({
-  event: EventSchema,
+  event: HistoryEventSchema,
   from: StateSchema,
   to: StateSchema,
   at: z.string(),
+  kind: z.const('forced'),
+  forceReason: z.string(),
 })
 
 const SessionSchema = z.object({
@@ -163,7 +183,9 @@ export function parseFsmFile(raw: unknown): FsmFile {
       if (Array.isArray(record.history)) {
         for (const entry of record.history) {
           const event = (entry as { event?: unknown } | null)?.event
-          if (typeof event !== 'string' || !EVENTS.includes(event as EventId)) {
+          const known = typeof event === 'string'
+            && ((EVENTS as readonly string[]).includes(event) || (REBIND_EVENTS as readonly string[]).includes(event))
+          if (!known) {
             throw new Error(`task-fsm-state: task "${key}" history holds unknown event "${String(event)}"`)
           }
         }

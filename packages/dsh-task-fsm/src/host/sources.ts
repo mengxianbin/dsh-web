@@ -1,17 +1,16 @@
 /**
- * Host wiring for G1–G3/G5 sources: structural (sync) reads of the dispatch
- * quick ledger + workspace store for G2, the fsm file itself for G3, and the
- * evidence fields the caller supplied for G1/G4/G6. The dispatch ledger
- * contract is mirrored structurally (taskRef/sessionId rows; aliveness =
- * sessionIds minus global.archivedSessionIds) — a read-only consumer of
- * another package's file, documented so a contract change fails loudly here.
+ * Host wiring for G1–G3/G5 sources: the fsm file itself for G2 (「活」口径 =
+ * 设计 §1P2 纯 FSM, fsm-rebind-1126) and G3 scope, and the evidence fields
+ * the caller supplied for G1/G4/G6. The quick-ledger reads retired here
+ * (`countLiveBindings` → `countLiveTaskSessions`): G2 no longer touches
+ * dispatch-bindings.json / workspace.json — 防撞直接走 FSM state
+ * (2026-11-25 拍 `fsm-dispatch-direction`)。
  * @module @linxin666/dsh-task-fsm/host/sources
  */
 
-import { existsSync, readFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { AcceptanceReading, GuardDeps } from '../core/guards.ts'
 import type { FsmFile } from '../core/schema.ts'
+import { STATES } from '../core/table.ts'
 
 /** Evidence the transition caller supplies for the evidence-backed guards. */
 export interface TransitionEvidence {
@@ -25,63 +24,29 @@ export interface TransitionEvidence {
   stalled?: boolean
 }
 
-/** Structural mirror of one dispatch binding row (see module doc). */
-interface BindingRow { taskRef?: unknown; sessionId?: unknown }
-
-/** Canonical session-id spelling (workspace store mixes bare uuids). */
-function canonicalSessionId(id: string): string {
-  return id.startsWith('session-') ? id : `session-${id}`
-}
-
 /**
- * Live binding count for one taskRef: a binding counts as live when its
- * session sits in some workspace's `sessionIds` and not in
- * `global.archivedSessionIds`. Unreadable inputs fail CLOSED for G2 here
- * (unlike dispatch's fail-open dedupe): a broken ledger must not wave a
+ * Live session count for one taskRef — the G2 source. 设计 §1P2 拍定「活」=
+ * 纯 FSM：`state ∉ {done, cancelled}` ∧ `session.id 非空`（⛔ 不读
+ * workspace.json archived 佐证）。An unreadable state fails CLOSED (returns
+ * NaN; the guard refuses on NaN — 照现形): a corrupt record must not wave a
  * duplicate dispatch through the FSM gate.
+ * @param file - the current fsm file (already parsed; the store fails closed on corrupt JSON).
+ * @param taskRef - the task to count live sessions for.
+ * @returns 0 / 1 for a readable record (NaN = state unreadable → fail-closed).
  */
-export function countLiveBindings(dshHome: string, taskRef: string): number {
-  const bindingsPath = join(dshHome, 'dispatch-bindings.json')
-  const storePath = join(dshHome, 'storages', 'workspace.json')
-  if (!existsSync(bindingsPath)) return 0
-  let rows: BindingRow[] = []
-  try {
-    const doc = JSON.parse(readFileSync(bindingsPath, 'utf8')) as { bindings?: unknown }
-    rows = Array.isArray(doc.bindings) ? (doc.bindings as BindingRow[]) : []
-  } catch {
-    return Number.NaN // fail-closed marker: caller's guard refuses on NaN
-  }
-  const mine = rows.filter((row) => row.taskRef === taskRef && typeof row.sessionId === 'string')
-  if (mine.length === 0) return 0
-  if (!existsSync(storePath)) return Number.NaN
-  try {
-    const store = JSON.parse(readFileSync(storePath, 'utf8')) as {
-      global?: { archivedSessionIds?: unknown }
-      tables?: { workspaces?: Record<string, { sessionIds?: unknown } | null> }
-    }
-    const archived = new Set<string>()
-    if (Array.isArray(store.global?.archivedSessionIds)) {
-      for (const id of store.global.archivedSessionIds) if (typeof id === 'string') archived.add(canonicalSessionId(id))
-    }
-    const alive = new Set<string>()
-    for (const row of Object.values(store.tables?.workspaces ?? {})) {
-      if (!Array.isArray(row?.sessionIds)) continue
-      for (const id of row.sessionIds) {
-        if (typeof id === 'string') {
-          const canonical = canonicalSessionId(id)
-          if (!archived.has(canonical)) alive.add(canonical)
-        }
-      }
-    }
-    return mine.filter((row) => alive.has(canonicalSessionId(String(row.sessionId)))).length
-  } catch {
-    return Number.NaN
-  }
+export function countLiveTaskSessions(file: FsmFile, taskRef: string): number {
+  const record = file.tasks[taskRef]
+  if (record === undefined) return 0
+  const state = record.state
+  if (typeof state !== 'string' || !STATES.includes(state)) return Number.NaN
+  if (state === 'done' || state === 'cancelled') return 0
+  const id = record.session?.id
+  return typeof id === 'string' && id !== '' ? 1 : 0
 }
 
 /**
  * Build the per-transition guard deps.
- * @param opts - dsh home, current file (G3 scope registry), evidence, redisp cap (G5).
+ * @param opts - dsh home (retained for caller wiring; G2 no longer reads it after fsm-rebind-1126), current file (G2 live sessions + G3 scope registry), evidence, redisp cap (G5).
  * @returns GuardDeps wired to real sources, fail-closed everywhere.
  */
 export function makeHostDeps(opts: {
@@ -94,7 +59,7 @@ export function makeHostDeps(opts: {
 }): GuardDeps {
   return {
     taskbookHasWorktreePlan: () => opts.evidence.worktreePlan === true,
-    liveBindings: (taskRef) => countLiveBindings(opts.dshHome, taskRef),
+    liveTaskSessions: (taskRef) => countLiveTaskSessions(opts.file, taskRef),
     scopeRegistered: (scope) => opts.file.scopes[scope] !== undefined,
     acceptanceReadings: () => opts.evidence.readings ?? [],
     heartbeat: () => ({ stalled: opts.evidence.stalled === true, redisp: opts.redisp, maxRedisp: opts.maxRedisp }),
