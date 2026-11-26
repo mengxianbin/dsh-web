@@ -17,10 +17,14 @@ through a logger exporter tap). Excluded causes — human abort, session
 resume/fork markers, goal block/complete — are never continued; they only
 write a `stop-parked` evidence line. At activation the plugin also runs a
 boot sweep (2026-11-08 ruling, design §4.2): it actively scans for orphan
-turns — sessions whose stored log ends in an unclosed `turn/start` — judges
-中断归因 = 重启 (only process death leaves a turn open), and wakes each
-confirmed orphan through the same staggered nudge with zero quota
-consumption. Every detection and decision is one
+turns — sessions whose stored log ends in an unclosed `turn/start`, plus a
+session already closed by an error turn (design §4.2 rule two, confirmed
+against the raw log) — judges 中断归因 = 重启 (only process death leaves a
+turn open), and wakes each confirmed orphan through the same staggered
+nudge with zero quota consumption. A revive decision the v2 gate defers is
+persisted to its own change-only ledger and replayed idempotently at the
+next activation, so a Host restart no longer swallows it (rule one). Every
+detection and decision is one
 structured JSON log line. The default `shadow` mode never touches a session;
 `mode: 'live'` queues a continue nudge through the Host session controller.
 Host-only — the package declares no `dsh.client` face.
@@ -67,6 +71,18 @@ Host-only — the package declares no `dsh.client` face.
   quota-exempt, so status `counters`/`quota` never move. The sweep cannot
   wait for events: the `interrupted` closer is only written at the next
   resume (design §4.2 条3).
+- Carries a deferred revive decision across a restart (design §4.2 rule
+  one): a pending decision (planned time, channel, route evidence, cooldown
+  deadline) is written change-only to `<dsh-home>/session-revive-pending.json`
+  (bounded, atomic) and replayed idempotently at activation — no new
+  decision count, no quota — while the read is fail-closed (a corrupt
+  ledger skips ALL replay and logs one loud `pending-replay-skipped` line;
+  宁漏不误复活). The sweep screen also admits a checkpoint-closed row whose
+  `lastTurnOutcome` projection reads `error` (rule two): the raw log must
+  then show the last `turn/end` as an error the policy still classifies as
+  revivable before `decide` runs, and a closed non-error turn is never
+  swept. Both faces ride the existing zero-quota sweep channel — the four
+  gates are unchanged.
 - Holds sessions while a same-cause wave is open (2 or more identical error
   codes within 15 minutes) and releases them after 5 quiet minutes, with each
   revive spaced by the configured stagger and charged to its own chain.
@@ -159,16 +175,21 @@ the active `mode`. The boot sweep adds its own evidence: one `boot-sweep`
 summary line per activation (list/screen/read/revive counts), per-orphan
 `decision` records carrying `code: "boot-sweep"`, and a loud
 `boot-sweep-failed` line whenever it gives up (fail closed — an
-unconfirmed session is never nudged).
+unconfirmed session is never nudged). The pending ledger adds a
+`pending-replay` line when a restart replays deferred decisions (with the
+restored count), or a loud `pending-replay-skipped` line when the read
+fails or the first gate is red.
 
 ## Security model
 
 - The status route is loopback-only (RFC 5735 local addresses): remote
   sockets answer `403`, so session ids and counters never leave the machine.
-- No credentials, no outbound network, and no files written: the plugin
-  listens to in-process session events and, only in `live` mode, queues a
-  text message to the errored session through the Host's own session
-  controller.
+- No credentials and no session data leaves the machine: the plugin listens
+  to in-process session events, writes only its local ledgers under
+  `<dsh-home>` (health, v2 state export, pending decisions), reaches the
+  provider only through route probes and the Host's own request path, and,
+  only in `live` mode, queues a text message to the errored session through
+  the Host's own session controller.
 - `shadow` (the default) performs zero sends, so a mounted-but-unconfigured
   plugin cannot disturb any session until someone deliberately sets
   `mode: 'live'`.
@@ -176,8 +197,9 @@ unconfirmed session is never nudged).
 ## Known limitations
 
 - State is in-memory: breaker trips, suspensions, quota stamps, and wave
-  holds reset when the Host restarts; the structured logs remain the durable
-  evidence.
+  holds reset when the Host restarts (the deferred pending decision is the
+  one exception — it persists to its own ledger, design §4.2 rule one); the
+  structured logs remain the durable evidence.
 - Morning-report integration is not in place yet: breaker and skip evidence
   lives in the log stream, waiting for a reader.
 - The `live` send path exists but has never run against a real session;

@@ -435,3 +435,135 @@ describe('section-seven export shape', () => {
     )
   })
 })
+
+describe('pending ledger export + idempotent replay (design §4.2 rule one)', () => {
+  it('exports only sessions holding a deferred decision, with the full releaseDue input set', () => {
+    const { m, clock } = machine()
+    greenPath(m)
+    // A session outside revival contributes nothing.
+    m.onAssistant('other-session', { inputTokens: 1 })
+    expect(m.pendingSnapshot()).toEqual({ at: T0, sessions: {} })
+    // A probe-pending defer parks the decision.
+    m.setRoute({ provider: 'q' })
+    m.onReviveDecision({ sessionId: 'S', at: clock.value, plannedAt: clock.value + 5 * MIN, code: 'TRANSPORT' })
+    const doc = m.pendingSnapshot()
+    expect(Object.keys(doc).sort()).toEqual(['at', 'sessions'])
+    expect(doc.sessions['S']).toEqual({
+      plannedAt: clock.value + 5 * MIN,
+      code: 'TRANSPORT',
+      channel: 'fresh',
+      route: { provider: 'q' },
+      cooldownUntil: 0,
+    })
+    // An opened attempt clears the pending: nothing left to export.
+    clock.value += 5 * MIN
+    m.onProbeResult('q', { ok: true })
+    expect(m.pendingSnapshot().sessions).toEqual({})
+  })
+
+  it('falls back to the durable route when the session has no evidence of its own', () => {
+    const { m } = machine()
+    m.setRoute({ provider: 'fallback' })
+    // No route on the session yet: the release would use currentRoute, so the
+    // ledger must carry it or the replay would park route-unknown forever.
+    m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 })
+    expect(m.pendingSnapshot().sessions['S'].route).toEqual({ provider: 'fallback' })
+    // Route-unknown with no fallback at all: the entry carries no route — the
+    // replay parks fail-closed exactly like the original defer did.
+    const bare = machine()
+    bare.m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 })
+    expect(bare.m.pendingSnapshot().sessions['S'].route).toBeUndefined()
+  })
+
+  it('replays a persisted ledger into a fresh machine and round-trips byte-identically', () => {
+    const { m } = machine()
+    m.seedRoute('S', { provider: 'mimo', model: 'mimo-v2-flash' })
+    m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 + 60_000, code: 'TIMEOUT' })
+    const exported = m.pendingSnapshot()
+
+    const restarted = machine()
+    expect(restarted.m.restorePending(exported.sessions)).toBe(1)
+    const replayed = restarted.m.pendingSnapshot()
+    expect(replayed.sessions).toEqual(exported.sessions)
+    // Byte-stable for the seeded writer's change-only comparison.
+    expect(JSON.stringify(replayed.sessions)).toBe(JSON.stringify(exported.sessions))
+  })
+
+  it('is idempotent: a second replay of the same ledger changes nothing', () => {
+    const { m } = machine()
+    m.seedRoute('S', { provider: 'p' })
+    m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0, code: 'TRANSPORT' })
+    const exported = m.pendingSnapshot()
+    // The replay targets a FRESH machine (the reload); the second pass over
+    // the same ledger is a no-op, byte for byte.
+    const restarted = machine()
+    expect(restarted.m.restorePending(exported.sessions)).toBe(1)
+    const after = JSON.stringify(restarted.m.pendingSnapshot().sessions)
+    expect(restarted.m.restorePending(exported.sessions)).toBe(0)
+    expect(JSON.stringify(restarted.m.pendingSnapshot().sessions)).toBe(after)
+  })
+
+  it('live-wins: a pending decided this boot is never clobbered by the replay', () => {
+    const { m } = machine()
+    m.seedRoute('S', { provider: 'p' })
+    // This boot already deferred a FRESHER decision for S.
+    m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 + 10_000, code: 'TIMEOUT' })
+    const stale = { S: { plannedAt: T0 - 5_000, code: 'TRANSPORT', channel: 'zero-cost' as const, route: { provider: 'p' }, cooldownUntil: 0 } }
+    expect(m.restorePending(stale)).toBe(0)
+    expect(m.pendingSnapshot().sessions['S']).toMatchObject({ plannedAt: T0 + 10_000, code: 'TIMEOUT', channel: 'fresh' })
+  })
+
+  it('skips a session whose attempt is already in flight (no second queue)', () => {
+    const { m } = machine()
+    greenPath(m)
+    m.onReviveDecision({ sessionId: 'S', at: T0, plannedAt: T0 })
+    expect(m.stateSnapshot().sessions['S']).toBeDefined()
+    const ledger = { S: { plannedAt: T0, channel: 'fresh' as const, cooldownUntil: 0 } }
+    expect(m.restorePending(ledger)).toBe(0)
+    expect(m.pendingSnapshot().sessions).toEqual({})
+  })
+
+  it('fails closed while the first gate is red: replays nothing and creates no state', () => {
+    const { m } = machine({ gateOk: false })
+    const ledger = { S: { plannedAt: T0, code: 'TRANSPORT', channel: 'fresh' as const, route: { provider: 'p' }, cooldownUntil: 0 } }
+    expect(m.restorePending(ledger)).toBe(0)
+    expect(Object.keys(m.stateSnapshot().sessions)).toEqual([])
+    expect(m.pendingSnapshot().sessions).toEqual({})
+  })
+
+  it('restores the cooldown deadline and the attempt channel evidence', () => {
+    const { m, clock } = machine()
+    m.seedRoute('S', { provider: 'p' })
+    const ledger = {
+      S: { plannedAt: T0 - 1, code: 'TRANSPORT', channel: 'progress-retry' as const, route: { provider: 'p' }, cooldownUntil: T0 + 2 * MIN },
+    }
+    expect(m.restorePending(ledger)).toBe(1)
+    // The cooldown is in the future: the release waits for it.
+    expect(m.releaseDue(T0)).toEqual([])
+    expect(m.nextWakeAt()).toBe(T0 + 2 * MIN)
+    // Green path + past deadline: the attempt opens with the persisted channel.
+    m.onProbeResult('p', { ok: true })
+    clock.value = T0 + 2 * MIN
+    const released = m.releaseDue(clock.value)
+    expect(kinds(released)).toContain('v2-attempt')
+    expect(released[0]).toMatchObject({ channel: 'progress-retry', code: 'TRANSPORT' })
+    // The pending was consumed: the ledger now exports nothing.
+    expect(m.pendingSnapshot().sessions).toEqual({})
+  })
+
+  it('a restored route-unknown defer releases once model/selection names a route', () => {
+    const { m } = machine()
+    const ledger = { S: { plannedAt: T0, channel: 'fresh' as const, cooldownUntil: 0 } }
+    expect(m.restorePending(ledger)).toBe(1)
+    // No route yet: the replay parks exactly like the original defer, and the
+    // probe loop has nothing to target (route-unknown waits for selection).
+    expect(m.releaseDue(T0)).toEqual([])
+    expect(m.routesNeedingProbe(T0)).toEqual([])
+    // The durable route arrives; the probe cache is already green from an
+    // earlier round on that route, so the deferred decision releases inside
+    // the probe result (the shell's post-probe releaseDue pass).
+    m.setRoute({ provider: 'p', model: 'm' })
+    expect(kinds(m.onProbeResult('p', { ok: true }))).toContain('v2-attempt')
+    expect(m.pendingSnapshot().sessions).toEqual({})
+  })
+})

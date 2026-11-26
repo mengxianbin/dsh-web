@@ -12,9 +12,10 @@ DSH Web 影子先行的会话自动复活插件：监听每个 `turn/end` 错误
 logger exporter tap 捕获）。排除类停轮——人为中止、会话 resume/fork 标记、
 目标 block/complete——一律不自动续，只写一行 `stop-parked` 留证。激活时插件
 还会跑一次 boot sweep（2026-11-08 裁定，设计 §4.2）：主动扫描孤儿轮——存储
-日志尾部 `turn/start` 未闭合的会话——判定「中断归因 = 重启」（只有进程死亡会
-留下未闭合 turn），逐个确认后走同一条错峰 nudge 叫醒，且零额度。每次检测与
-每次判定都是一行结构化 JSON 日志。默认 `shadow` 模式完全不碰会话；
+日志尾部 `turn/start` 未闭合的会话，外加已由 error 轮收口的会话（设计 §4.2
+规则二，经 raw 日志确认）——判定「中断归因 = 重启」（只有进程死亡会留下未闭合 turn），逐个确认后走同一条错峰 nudge 叫醒，且零额度。v2 门推迟的复活
+决策写入独立 change-only 账本、下次激活幂等重放，宿主重启不再吞掉它（规则
+一）。每次检测与每次判定都是一行结构化 JSON 日志。默认 `shadow` 模式完全不碰会话；
 `mode: 'live'` 才会经宿主会话控制器排队一句继续 nudge。仅宿主侧——本包不声明
 `dsh.client` 面。
 
@@ -48,6 +49,14 @@ logger exporter tap 捕获）。排除类停轮——人为中止、会话 resum
   确认的孤儿走同一条错峰路径叫醒——断路器照常武装、1M 水位照查，但额度
   豁免，status 的 `counters`/`quota` 零增。sweep 等不到事件：`interrupted`
   closer 只在下次 resume 时落盘（设计 §4.2 条3）。
+- 复活决策跨重启不丢（设计 §4.2 规则一）：pending 决策（计划时刻、通道、
+  路由证据、冷却截止）按 change-only 写入
+  `<dsh-home>/session-revive-pending.json`（有界、原子），激活时幂等重放——
+  不新增 decision 计数、不碰额度；读取 fail-closed（账本损坏 → 跳过全部
+  重放并落一行响亮 `pending-replay-skipped`，宁漏不误复活）。sweep 预筛
+  同时纳入 `lastTurnOutcome` 投影为 `error` 的已收口行（规则二）：raw
+  日志必须读到末轮 `turn/end` 为 error 且 policy 仍判可复活才放行 decide，
+  closed 非 error 轮绝不入扫。两者都走既有零额 sweep 通道——四闸不变。
 - 同因波开启期间（15 分钟内同码错误达到 2 次）挂起会话，5 分钟静默后释放，
   逐个错峰复活、各自扣自己罐的额度。
 - 提供 `GET /api/session-revive/status`（仅回环）：方式、计数、挂起/停用/
@@ -115,21 +124,25 @@ dsh plugin --profile <name> add link:<repo>/packages/dsh-session-revive
 标记的 JSON 对象。boot sweep 另有自己的证据行：每次激活一行 `boot-sweep`
 汇总（列表/预筛/读取/复活计数）、每个孤儿一条带 `code: "boot-sweep"` 的
 `decision`，放弃时响亮落 `boot-sweep-failed`（fail closed——未确认的会话
-绝不 nudge）。
+绝不 nudge）。pending 账本另有自己的证据行：重启重放推迟决策时落
+`pending-replay`（带重放计数），读取失败或首核红时响亮落
+`pending-replay-skipped`。
 
 ## 安全模型
 
 - 状态路由仅回环（RFC 5735 本地地址）：远端套接字一律 `403`，会话 id 与
   计数不出本机。
-- 不碰凭据、不发起外网请求、不写文件：插件只听进程内会话事件，且仅在
-  `live` 模式下经宿主自带的会话控制器给目标会话排队一条文本消息。
+- 不碰凭据、会话数据不出本机：插件只听进程内会话事件，只写 `<dsh-home>` 下
+  自己的本地账本（health、v2 状态导出、pending 决策），对供应商只经路由探针
+  与宿主自身请求路径触达，且仅在 `live` 模式下经宿主自带的会话控制器给目标
+  会话排队一条文本消息。
 - `shadow`（默认）零发送：挂载而未配置的插件不会打扰任何会话，除非有人
   显式设 `mode: 'live'`。
 
 ## 已知限制
 
-- 状态在内存里：断路、挂起、额度戳与波挂起随宿主重启清零；结构化日志才是
-  持久留证。
+- 状态在内存里：断路、挂起、额度戳与波挂起随宿主重启清零（唯一例外 = 推迟的
+  pending 决策，它落自己的账本、设计 §4.2 规则一）；结构化日志才是持久留证。
 - 晨报联动尚未接入：断路与跳过证据躺在日志流里，等读取方。
 - `live` 发送路径已实现但从未对真实会话跑过；打开开关属于转正批次，自带
   验证清单。
