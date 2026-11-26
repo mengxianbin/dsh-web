@@ -107,10 +107,18 @@ export type V2GateWhy =
   | 'probe-red'
   | 'route-unknown'
   | 'cooldown'
+  | 'frozen'
   | 'stopped'
   | 'relay-chain'
   | 'attempt-in-flight'
   | 'halted'
+
+/**
+ * §6.3 frozen re-check cadence (freeze-reclaim-design-1127 Phase 1): a
+ * frozen-deferred decision parks in 60s cycles — the mem-floor watcher's own
+ * tick — so an E4 wake (or a human unfreeze) is picked up on the next cycle.
+ */
+const FSM_RECHECK_MS = 60_000
 
 /** Which channel opened this attempt (evidence for the log line). */
 export type V2AttemptChannel = 'fresh' | 'zero-cost' | 'progress-retry'
@@ -231,6 +239,13 @@ export interface ReviveV2Options {
   /** Resolve a route's provider baseURL; undefined means fail closed (park + alarm). */
   resolveBaseURL: (route: { provider: string; model?: string }) => string | undefined
   now?: () => number
+  /**
+   * §6.3 唤醒对账 (freeze-reclaim-design-1127 Phase 1): the shell's synchronous
+   * view of the task FSM's frozen sessions — a frozen/locked session is never
+   * auto-woken (the revive-vs-E7 conflict is the observed failure). Undefined
+   * = no FSM authority injected = the gate is off (test and legacy callers).
+   */
+  frozenSet?: () => ReadonlySet<string>
 }
 
 /**
@@ -242,6 +257,7 @@ export class ReviveV2Machine {
   private readonly gate: TranscriptFirstGate
   private readonly resolveBaseURL: ReviveV2Options['resolveBaseURL']
   private readonly now: () => number
+  private readonly frozenSet?: () => ReadonlySet<string>
   private readonly sessions = new Map<string, SessionState>()
   private readonly routes = new Map<string, RouteState>()
   /** Relay generation seeds: a spawned relay carries depth 1 from its first state. */
@@ -252,6 +268,7 @@ export class ReviveV2Machine {
     this.gate = options.gate
     this.resolveBaseURL = options.resolveBaseURL
     this.now = options.now ?? (() => Date.now())
+    this.frozenSet = options.frozenSet
   }
 
   // ── inputs ───────────────────────────────────────────────────────────────
@@ -354,6 +371,17 @@ export class ReviveV2Machine {
     }
     if (state.attempt !== undefined) {
       return [{ kind: 'v2-gate', at: input.at, sessionId: input.sessionId, verdict: 'deny', why: 'attempt-in-flight' }]
+    }
+    // §6.3 唤醒对账 (freeze-reclaim-design-1127): a frozen/locked session is
+    // never auto-woken — park the decision for a re-check (defer ≠ kill: the
+    // E4 wake or a human unfreeze releases it through the normal chain).
+    if (this.frozenSet?.().has(input.sessionId)) {
+      state.pending = {
+        plannedAt: input.plannedAt,
+        channel: state.nextChannel,
+        ...(input.code === undefined ? {} : { code: input.code }),
+      }
+      return [{ kind: 'v2-gate', at: input.at, sessionId: input.sessionId, verdict: 'defer', why: 'frozen' }]
     }
     const route = state.route ?? this.currentRoute
     if (route === undefined) {
@@ -613,7 +641,7 @@ export class ReviveV2Machine {
   releaseDue(at: number): V2Record[] {
     const records: V2Record[] = []
     if (!this.gate.ok) return records
-    for (const state of this.sessions.values()) {
+    for (const [sessionId, state] of this.sessions) {
       const pending = state.pending
       if (pending === undefined) continue
       if (state.stopped !== null || state.relaying || state.attempt !== undefined) continue
@@ -623,6 +651,13 @@ export class ReviveV2Machine {
       if (cached === undefined || !cached.ok) continue
       const fireAt = Math.max(pending.plannedAt, state.cooldownUntil)
       if (at < fireAt) continue
+      // §6.3 唤醒对账: never open an attempt for a frozen/locked session —
+      // push the re-check out one cycle and leave the decision parked.
+      if (this.frozenSet?.().has(sessionId)) {
+        state.pending = { ...pending, plannedAt: at + FSM_RECHECK_MS }
+        records.push({ kind: 'v2-gate', at, sessionId, verdict: 'defer', why: 'frozen' })
+        continue
+      }
       records.push(...this.openAttempt(state, at, fireAt, pending.code))
     }
     return records
