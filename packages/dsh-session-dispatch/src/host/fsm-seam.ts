@@ -9,7 +9,7 @@
  *
  * Placement inside the route (施工取舍, §2.2 挂点的最小副作用形):
  *   planLine/scope 抽取 = proceed() 之前（纯函数、零副作用，缺 = 400 拒派）
- *   FSM create          = proceed() 内 409 活绑定闸之后、session create 之前
+ *   FSM create          = proceed() 内 409 活会话闸之后、session create 之前
  *                         （409 拒派不落 backlog 记录；G1 在 create 门 fail-closed）
  *   transition E1       = session create 之后（E1 payload 带 sessionId —— §3.2 决定⑤
  *                         的 session id 回写就走这条既有合并语义，schema 零改；
@@ -136,9 +136,51 @@ export function makeLoopbackFsmSeam(): DispatchFsmSeam {
   }
 }
 
-/** Shape of `GET /api/task-fsm/state` (the 409 分流 read). */
+/** Shape of `GET /api/task-fsm/state` (the 409 分流 read + 闸① live read). */
 interface FsmStateBody {
-  file?: { tasks?: Record<string, { state?: unknown }> }
+  file?: { tasks?: Record<string, { state?: unknown; session?: { id?: unknown } }> }
+}
+
+/**
+ * The six states, mirrored as literals — the task-fsm package is consumed
+ * over loopback only (zero cross-plugin import, 同 PLAN_PATTERNS 两处字面
+ * 必须保持一致口径): a state outside this list reads as unreadable so the
+ * gate fails CLOSED, exactly like G2's NaN.
+ */
+const FSM_STATES: ReadonlySet<string> = new Set(['backlog', 'active', 'deferred', 'blocked', 'done', 'cancelled'])
+
+/** 闸① verdict for one taskRef (fsm-rebind-1126): live session / clear / unreadable. */
+export type FsmLiveGateVerdict =
+  /** state 非终态 ∧ session.id 非空 → 同 taskRef 已有活会话 (409). */
+  | { readonly kind: 'live'; readonly sessionId: string }
+  /** 无记录 / 终态 / session.id 空 → 放行建会话. */
+  | { readonly kind: 'clear' }
+  /** fetch failed / non-200 / malformed body → fail-closed 503 (⛔ 不放行). */
+  | { readonly kind: 'unreadable'; readonly detail: string }
+
+/**
+ * Read the 闸① liveness verdict out of a `GET state` response — the same
+ * 「活」definition as E1's G2 (设计 §1P2 纯 FSM, fsm-rebind-1126):
+ * `state ∉ {done, cancelled}` ∧ `session.id 非空`.
+ * @param response - the seam's loopback response (`status 0` = fetch failed).
+ * @param taskRef - the dispatched task reference.
+ * @returns live / clear / unreadable (unreadable = refuse, fail-closed).
+ */
+export function fsmLiveGateOf(response: FsmSeamResponse, taskRef: string): FsmLiveGateVerdict {
+  if (response.status !== 200) return { kind: 'unreadable', detail: `GET state status=${response.status}` }
+  const body = response.json as FsmStateBody
+  if (body.file === undefined || typeof body.file !== 'object') {
+    return { kind: 'unreadable', detail: 'GET state body carries no file' }
+  }
+  const record = body.file.tasks?.[taskRef]
+  if (record === undefined) return { kind: 'clear' }
+  const state = record.state
+  if (typeof state !== 'string' || !FSM_STATES.has(state)) {
+    return { kind: 'unreadable', detail: `record state unreadable: ${taskRef} (${JSON.stringify(state)})` }
+  }
+  if (state === 'done' || state === 'cancelled') return { kind: 'clear' }
+  const id = record.session?.id
+  return typeof id === 'string' && id !== '' ? { kind: 'live', sessionId: id } : { kind: 'clear' }
 }
 
 /** Read one record's state out of a `GET state` response (absent = undefined). */

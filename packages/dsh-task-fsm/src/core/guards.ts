@@ -17,8 +17,8 @@ export interface AcceptanceReading { name: string; ok: boolean }
 export interface GuardDeps {
   /** G1: the taskbook for this taskRef carries a worktree 预案 (dispatch 前置断言). */
   taskbookHasWorktreePlan(taskRef: string): boolean
-  /** G2: live dispatch bindings for this taskRef (shared service §7.3, 409 防双跑). */
-  liveBindings(taskRef: string): number
+  /** G2: live FSM sessions for this taskRef (设计 §1P2「活」口径, 409 防双跑). */
+  liveTaskSessions(taskRef: string): number
   /** G3: the task's scope is in a human-opened scope declaration (§8). */
   scopeRegistered(scope: string): boolean
   /** G4: machine readings for the acceptance gate (§6.1). */
@@ -54,11 +54,19 @@ export function g1WorktreePlan(deps: GuardDeps, taskRef: string): GuardResult {
     : deny('G1', '任务书缺 worktree 预案 → 拦截不开工')))
 }
 
-/** G2 taskRef 409 — 同 taskRef 活绑定唯一（零活绑定才可派发）. */
+/**
+ * G2 taskRef 409 — 同 taskRef FSM 活会话唯一（fsm-rebind-1126 改读 FSM
+ * state，与派发口闸①同口径）. Fail-closed kept: an unreadable state (NaN)
+ * denies, never passes.
+ */
 export function g2TaskRef409(deps: GuardDeps, taskRef: string): GuardResult {
-  return guard('G2', () => (deps.liveBindings(taskRef) === 0
-    ? pass('G2', '无活绑定')
-    : deny('G2', `已有 ${deps.liveBindings(taskRef)} 条活绑定（409 防双跑）`)))
+  return guard('G2', () => {
+    const live = deps.liveTaskSessions(taskRef)
+    if (Number.isNaN(live)) return deny('G2', 'FSM state 读取失败（fail-closed）')
+    return live === 0
+      ? pass('G2', 'FSM 记录无 active 会话')
+      : deny('G2', 'FSM 记录有 active 会话（409 防双跑）')
+  })
 }
 
 /** G3 scope 在册 — taskRef 前缀 ∈ 人开 scope 声明（§8.1 结构闭集）. */

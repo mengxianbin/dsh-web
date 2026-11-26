@@ -12,7 +12,7 @@ import type { EventId, State } from '../src/core/table.ts'
 function deps(overrides: Partial<GuardDeps> = {}): GuardDeps {
   return {
     taskbookHasWorktreePlan: () => true,
-    liveBindings: () => 0,
+    liveTaskSessions: () => 0,
     scopeRegistered: () => true,
     acceptanceReadings: () => [{ name: 'vitest', ok: true }],
     heartbeat: () => ({ stalled: false, redisp: 0, maxRedisp: 3 }),
@@ -48,7 +48,7 @@ describe('E1 dispatch (预立行, §3.1)', () => {
   })
 
   it('refuses when G2 sees a live binding (409 防双跑)', () => {
-    const result = applyTransition(record('backlog'), 'E1', deps({ liveBindings: () => 2 }), payload)
+    const result = applyTransition(record('backlog'), 'E1', deps({ liveTaskSessions: () => 2 }), payload)
     expect(result.ok).toBe(false)
     if (result.ok) return
     expect(result.kind).toBe('guard-refused')
@@ -163,7 +163,7 @@ describe('blocked / waiting rows', () => {
     }
     const cap = applyTransition(blocked, 'E14', deps({ heartbeat: () => ({ stalled: false, redisp: 3, maxRedisp: 3 }) }), payload)
     expect(cap.ok).toBe(false)
-    const dual = applyTransition(blocked, 'E14', deps({ liveBindings: () => 1 }), payload)
+    const dual = applyTransition(blocked, 'E14', deps({ liveTaskSessions: () => 1 }), payload)
     expect(dual.ok).toBe(false)
   })
 

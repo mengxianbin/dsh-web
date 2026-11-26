@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { decideBossGate, type BossGateDecision, type DispatchBossGate } from './boss-gate.ts'
 import {
+  fsmLiveGateOf,
   planSeam,
   recordStateOf,
   type DispatchFsmSeam,
@@ -156,7 +157,11 @@ export interface DispatchServices {
   readonly workspaces: DispatchWorkspaceRegistry
   readonly agents?: DispatchAgentRegistry
   readonly commands?: DispatchCommandExecutor
-  /** Quick-ledger binding store; when absent, taskRef dispatches record nothing and never 409. */
+  /**
+   * Quick-ledger binding store; when absent, taskRef dispatches record
+   * nothing. The 409 gate no longer reads it (fsm-rebind-1126: it reads the
+   * FSM seam below) — the ledger is history until `#bindings-retire-1126`.
+   */
   readonly bindings?: DispatchBindingStore
   /** Attention ledger; when absent, dispatches record no class and apply no pin default. */
   readonly attention?: DispatchAttentionApi
@@ -257,13 +262,14 @@ function errorDetail(error: unknown): string {
 
 /**
  * In-process FIFO keyed by taskRef. The 409 gate is check-then-act: its window
- * spans findAlive through session create and the ledger append, so without a
- * queue two concurrent dispatches of one taskRef can both pass the check and
- * fork the work. Running that whole section one request at a time per taskRef
- * makes the loser's findAlive observe the winner's binding and answer 409.
- * Scope is deliberately process-local: a single Host process owns these
- * routes, so no file lock or cross-process protocol is involved. Rejected
- * sections do not poison the chain; an idle taskRef key is dropped again.
+ * spans the FSM state read through session create and the ledger append, so
+ * without a queue two concurrent dispatches of one taskRef can both pass the
+ * check and fork the work. Running that whole section one request at a time
+ * per taskRef makes the loser's FSM read observe the winner's E1 landing and
+ * answer 409. Scope is deliberately process-local: a single Host process owns
+ * these routes, so no file lock or cross-process protocol is involved.
+ * Rejected sections do not poison the chain; an idle taskRef key is dropped
+ * again.
  */
 function createGateQueue(): <T>(taskRef: string, run: () => Promise<T>) => Promise<T> {
   const tails = new Map<string, Promise<void>>()
@@ -346,7 +352,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
       // 零副作用前段 —— 豁免（taskRef 无 '#' 合成锚 / sessionClass=bot-boss）直接
       // 跳过不入 FSM；带锚派发先抽 scope 键 + G1 任务书 worktree 预案，缺 = 400
       // 拒派 fail-closed（此刻还没建会话、没写 FSM，零孤儿）。create/E1 本体在
-      // proceed() 内（409 活绑定闸之后），语义与 scripts/dsh/dispatch-send.mjs 同源。
+      // proceed() 内（409 活会话闸之后），语义与 scripts/dsh/dispatch-send.mjs 同源。
       const fsmSeam = services.fsm
       const origin = typeof req.headers.host === 'string' && req.headers.host !== ''
         ? `http://${req.headers.host}`
@@ -363,29 +369,32 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
       }
       // One critical section per taskRef: 409 gate -> session create -> ledger append.
       const proceed = async (): Promise<void> => {
-        if (taskRef !== undefined && services.bindings !== undefined) {
-          let existing: Awaited<ReturnType<DispatchBindingStore['findAlive']>>
-          try {
-            existing = await services.bindings.findAlive(taskRef)
-          } catch (error) {
-            // The ledger is an occupancy sensor, not an authority: a store
-            // failure must not wedge dispatch, so the gate fails open.
-            existing = undefined
-            void error
+        // 闸① 409 防双跑 (fsm-rebind-1126): 改读 FSM state —— 「活」= state 非终态 ∧
+        // session.id 非空（与 E1 G2 同口径, 设计 §1P2）, 读面 = GET /state (fsm-seam 通路)。
+        // 方向反转: 原快账 findAlive 读失败 = fail-open 放行 → 现 FSM 读失败 = 503 拒
+        // (可用性四问拍定 fail-closed); 无记录 / 非活 → 放行建会话。快账 bindings.record
+        // 仍只写历史（#bindings-retire-1126 先立后破, 本单零改）。409 响应体形状不变。
+        if (seam !== undefined && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
+          const verdict = fsmLiveGateOf(await fsmSeam.get(origin, 'state'), taskRef)
+          if (verdict.kind === 'unreadable') {
+            console.warn(`[dispatch-gate] 409 gate REFUSED status=503 taskRef=${taskRef} source=fsm detail=${verdict.detail} (fail-closed)`)
+            writeJson(res, 503, { ok: false, error: `fsm state unreadable (fail-closed): ${verdict.detail}`, taskRef })
+            return
           }
-          if (existing !== undefined) {
+          if (verdict.kind === 'live') {
+            console.warn(`[dispatch-gate] 409 taskRef=${taskRef} source=fsm sessionId=${verdict.sessionId}`)
             writeJson(res, 409, {
               ok: false,
-              error: `taskRef already has a live session: ${existing.sessionId}`,
+              error: `taskRef already has a live session: ${verdict.sessionId}`,
               taskRef,
-              sessionId: existing.sessionId,
+              sessionId: verdict.sessionId,
             })
             return
           }
         }
         // S1: FSM 注册（G1 在 create 门 fail-closed；create 409 = 按 state 分流幂等
         // —— active 跳 E1 / backlog 续 / 终态·冻结拒派，同 dispatch-send.mjs）。
-        // 排在 409 活绑定闸之后：被 409 拒的派发不落 backlog 记录（零残留）。
+        // 排在 409 活会话闸之后：被 409 拒的派发不落 backlog 记录（零残留）。
         let needE1 = seam !== undefined
         if (seam !== undefined && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
           const created = await fsmSeam.post(origin, 'create', {
@@ -436,7 +445,7 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
                 : typeof e1.json.error === 'string' ? e1.json.error : JSON.stringify(e1.json)
               const hint = guard === 'G3'
                 ? `；hint=开 scope 归人：POST /api/task-fsm/scope {key:"${seam.scope}",prio:"red|yellow",intent}`
-                : guard === 'G2' ? '；hint=同 taskRef 已有活绑定（409 防双跑）' : ''
+                : guard === 'G2' ? '；hint=同 taskRef FSM 已有 active 会话（409 防双跑）' : ''
               console.warn(`[dispatch-fsm-e1] REFUSED status=${e1.status} taskRef=${taskRef} event=E1 guard=${guard ?? '-'} detail=${detail} orphanSession=${sessionId}${hint}`)
               writeJson(res, e1.status >= 400 ? e1.status : 503, {
                 ok: false,
@@ -514,7 +523,10 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           ...(gate === undefined ? {} : { bossGate: { verdict: gate.verdict, reason: gate.reason, ...(haltCleared ? { haltCleared: true } : {}) } }),
         }, { 'cache-control': 'no-store' })
       }
-      if (taskRef !== undefined && services.bindings !== undefined) {
+      // The queue serializes the gate check-then-act window whenever either
+      // occupancy source is composed (FSM seam since fsm-rebind-1126, quick
+      // ledger before it).
+      if (taskRef !== undefined && (services.bindings !== undefined || services.fsm !== undefined)) {
         await runQueued(taskRef, proceed)
       } else {
         await proceed()
