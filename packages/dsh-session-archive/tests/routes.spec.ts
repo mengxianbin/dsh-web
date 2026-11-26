@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { AddressInfo } from 'node:net'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService, PlanMismatchError } from '../src/host/janitor.ts'
-import { assistantMsg, createFakeHost, fakeContext, writeProjcacheSessionFile, writeTranscript } from './fixtures.ts'
+import { createFakeHost, fakeContext, fixtureSources, writeProjcacheSessionFile } from './fixtures.ts'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 
 function startServer(routes: WebRoute[]): Promise<{ server: Server; url: string }> {
@@ -164,12 +164,11 @@ describe('route fencing and contracts', () => {
 
   it('requires an actor on POST /archive and archives with a declared one', async () => {
     // The merged contract runs both gates on POST /archive: the actor must be
-    // declared (triclass, 400 without it) and the target must clear the seal
-    // gate (contract C2), so session-a carries a green N_A transcript here
-    // (the endorsement recheck only ever runs on DONE verdicts).
+    // declared (triclass, 400 without it) and the target must clear the
+    // four-tuple seal gate (contract C2), so session-a carries all-green
+    // dimension sources here (lamp-wiring-1126 — no transcript involved).
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
-    writeTranscript(host, 'session-a', [assistantMsg('本轮确认无产出。\n\nSAVE_STATUS=N_A')])
-    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home, verdictSources: fixtureSources() })
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
     const missing = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-a'] })
@@ -195,13 +194,12 @@ describe('route fencing and contracts', () => {
 
   it('serves the inventory through the response cache with observable headers', async () => {
     // The archive behind this test must clear the seal gate (contract C2):
-    // the REST route always passes a gate object, so session-a carries the
-    // green N_A transcript exactly like the archive contract test above —
-    // without it the gate skips the id (`seal-required`, still HTTP 200)
-    // and the refresh would keep serving archived=false.
+    // the REST route always passes a gate object, so session-a carries
+    // all-green four-tuple sources exactly like the archive contract test
+    // above — without it the gate skips the id (`seal-required`, still HTTP
+    // 200) and the refresh would keep serving archived=false.
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-a', updatedAt: 1 }], persistedIds: ['session-a'] })
-    writeTranscript(host, 'session-a', [assistantMsg('本轮确认无产出。\n\nSAVE_STATUS=N_A')])
-    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home, verdictSources: fixtureSources() })
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
 
