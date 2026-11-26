@@ -126,6 +126,10 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'GET') { writeJson(res, 405, { ok: false, error: 'method not allowed: use GET' }); return }
       const id = new URL(req.url ?? '', 'http://localhost').searchParams.get('id') ?? ''
+      // Binding-gap read-side seal (freeze-bind-button-1126): an empty id
+      // must never resolve, or it would match every session-less record and
+      // hand the UI a phantom frozen view.
+      if (id === '') { writeJson(res, 404, { ok: false, found: false }); return }
       try {
         const file = store.load()
         const record = Object.values(file.tasks).find((r) => r.session?.id === id)
