@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
 import type { LedgerDocument } from '../src/host/ledger.ts'
 import type { InventorySources } from '../src/host/inventory.ts'
+import type { AliveBinding, FsmTaskLike, VerdictSources } from '../src/host/archive-verdict.ts'
 
 export interface FeedItem {
   sessionId: string
@@ -284,6 +285,69 @@ export function fakeContext(host: FakeHost): unknown {
       if (name === 'workspaceRegistry') return host.registry
       if (name === 'sessions') return liveStore
       return undefined
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Four-tuple dimension sources (lamp-wiring-1126)
+// ---------------------------------------------------------------------------
+
+/** The default fixture taskRef the all-green binding carries. */
+export const FIXTURE_TASK_REF = 'content/tech/ai/dsh/tasks.md#fixture-task'
+/** The default fixture workspace root the two script legs "run" in. */
+export const FIXTURE_ROOT = 'C:/virtual/m-note'
+
+/** A `save-status.py` stdout line whose machine cell reads all-reached. */
+export const FIXTURE_SAVE_GREEN = 'SAVE_STATUS=DONE repo=C:/virtual/m-note commits=1/1 pushedBranch=1/1 merged=1/1 pushedMain=1/1 auditCleaned=yes dirty=0 repos=1/1 hashes=abc1234'
+
+/**
+ * Configurable four-tuple sources for gate/lamp tests. Every dimension
+ * defaults to a passing reading; each override drives exactly one dimension
+ * pass / fail / unreadable so a test can pin the fold it exercises.
+ *
+ * Semantics mirror the production read-failure conventions: an omitted key =
+ * pass, `undefined`/absent session entry = definitive fail, `null` = the
+ * source could not be read (unreadable → fail-closed fold).
+ */
+export function fixtureSources(spec: {
+  /** session → binding: object = alive, `undefined` = none alive (red), `null` = unreadable. Omitted table = alive for every session. */
+  bindings?: Record<string, AliveBinding | undefined | null>
+  /** taskRef → FSM record; `null` = FSM unreadable; omitted = every bound taskRef reads done+E8. */
+  fsm?: Readonly<Record<string, FsmTaskLike>> | null
+  /** save-status stdout line; `null` = unreadable; omitted = {@link FIXTURE_SAVE_GREEN}. */
+  save?: string | null
+  /** debt-scan reading; `null` = unreadable; omitted = zero markers. */
+  debt?: { readonly count: number } | { readonly error: string } | null
+  /** workspace root; `null` = unresolvable; omitted = {@link FIXTURE_ROOT}. */
+  root?: string | null
+} = {}): VerdictSources {
+  const defaultTasks: Record<string, FsmTaskLike> = {}
+  if (spec.bindings !== undefined) {
+    for (const entry of Object.values(spec.bindings)) {
+      if (entry !== undefined && entry !== null) defaultTasks[entry.taskRef] = { state: 'done', history: [{ event: 'E8' }] }
+    }
+  } else {
+    defaultTasks[FIXTURE_TASK_REF] = { state: 'done', history: [{ event: 'E8' }] }
+  }
+  const root = spec.root === undefined ? FIXTURE_ROOT : spec.root
+  const save = spec.save === undefined ? FIXTURE_SAVE_GREEN : spec.save
+  return {
+    async binding(sessionId: string) {
+      if (spec.bindings === undefined) return { taskRef: FIXTURE_TASK_REF, workspaceId: 'ws-fixture' }
+      return spec.bindings[sessionId]
+    },
+    workspaceRoot() {
+      return root ?? undefined
+    },
+    async fsmTasks() {
+      return spec.fsm === undefined ? defaultTasks : spec.fsm
+    },
+    async saveStatus() {
+      return save
+    },
+    async debtScan() {
+      return spec.debt === undefined ? { count: 0 } : spec.debt
     },
   }
 }

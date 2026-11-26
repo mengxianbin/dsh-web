@@ -1,12 +1,14 @@
 // @vitest-environment node
 /**
- * Targeted transcript-dir location for `sealCheck` (seal-targeted-read-1106):
+ * Targeted session-state location for `sealCheck` (seal-targeted-read-1106):
  * resolving only the named ids must equal the full sessions-root index
  * restricted to those ids — same keying, same containment checks, first
  * project dir wins — while never paying for the full `indexSessionDirs`
- * walk (no `dirSize` recursion, no cache scan). The six-value judgement
- * itself stays seal.spec's contract; this file pins only how a dir is found
- * and that a miss still answers `UNKNOWN` (fail-open for the client gate).
+ * walk (no `dirSize` recursion, no cache scan). The judgement itself is the
+ * four-tuple since lamp-wiring-1126 (archive-verdict.spec pins its
+ * semantics); this file pins how existence is found, that a miss still
+ * answers the fail-closed `UNKNOWN`, and that the full index cache is never
+ * paid for on the way.
  * @module tests/seal-targeted-read.spec
  */
 
@@ -15,9 +17,8 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ArchiveService } from '../src/host/janitor.ts'
-import { analyzeSeal } from '../src/host/seal.ts'
 import { indexSessionDirs, resolveSessionDirs } from '../src/host/session-files.ts'
-import { assistantMsg, createFakeHost, fakeContext, writeTranscript } from './fixtures.ts'
+import { createFakeHost, fakeContext, fixtureSources } from './fixtures.ts'
 
 /**
  * A sessions root exercising every shape the full index distinguishes: two
@@ -75,33 +76,26 @@ describe('resolveSessionDirs — targeted lookup equals the full index restricte
   })
 })
 
-describe('ArchiveService.sealCheck — targeted read behind the six-value grouping', () => {
-  // A green N_A row: the endorsement recheck only ever runs on DONE verdicts,
-  // so the zero-output tier stays the hermetic green fixture here.
-  const SAVE_NA = '本轮确认无产出。\n\nSAVE_STATUS=N_A'
-
-  it('operator gets the six-value verdicts without ever triggering the full directory scan', async () => {
-    // Given a service over a fixture home with one sealed and one missing session
+describe('ArchiveService.sealCheck — targeted read behind the four-tuple grouping', () => {
+  it('operator gets the four-tuple verdicts without ever triggering the full directory scan', async () => {
+    // Given a service over a fixture home with one live session and one miss
     const host = createFakeHost({ feedItems: [{ sessionId: 'session-green', updatedAt: 1 }] })
-    writeTranscript(host, 'session-green', [assistantMsg(SAVE_NA)])
-    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+    const service = new ArchiveService(fakeContext(host) as never, { dshHome: host.home, verdictSources: fixtureSources() })
 
-    // When a seal-check runs on a fresh service (async since
-    // stall-rootcause-1123: the cold derive answers from the worker)
+    // When a seal-check runs on a fresh service
     const results = await service.sealCheck(['session-green', 'session-ghost'])
 
     // Then it located the id by probe — the full index cache was never paid
-    // for — and the miss still answers UNKNOWN (client fail-open unchanged)
+    // for — and the miss still answers UNKNOWN (fail-closed unchanged)
     const dirIndex = (service as unknown as { dirIndex: { scans: number } }).dirIndex
     expect(dirIndex.scans).toBe(0)
-    expect(results).toEqual([
-      { id: 'session-green', verdict: 'N_A', detail: 'no-artifacts-by-design', lastLine: expect.any(String) },
-      { id: 'session-ghost', verdict: 'UNKNOWN', detail: 'transcript-not-found' },
-    ])
+    expect(results).toHaveLength(2)
+    expect(results[0]).toEqual(expect.objectContaining({ id: 'session-green', verdict: 'DONE', detail: '4t-pass' }))
+    expect(results[0].readings.contract.state).toBe('pass')
+    expect(results[1]).toEqual(expect.objectContaining({ id: 'session-ghost', verdict: 'UNKNOWN', detail: 'session-not-found' }))
 
     // And the counter is live: the next full-index consumer still scans once
     const full = await indexSessionDirs(join(host.home, 'sessions'))
-    expect(full.byId.has('session-green')).toBe(true)
-    expect(analyzeSeal('session-green', full.byId.get('session-green'))).toEqual(results[0])
+    expect(full.byId.has('session-green')).toBe(false) // feed-only session: no dir on disk
   })
 })

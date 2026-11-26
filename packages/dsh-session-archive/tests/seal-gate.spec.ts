@@ -1,24 +1,25 @@
 // @vitest-environment node
 /**
- * The archive seal gate over HTTP (contract C2) and the shared `seal-check`
- * endpoint (contract C1): green passes untouched, stale passes with
- * `seal: "stale"` recorded, true red and UNKNOWN are refused per id with
- * their grouping (no batch contagion), `force` needs a real reason or the
- * whole request is a 400.
+ * The archive gate over HTTP (contract C2) and the shared `seal-check`
+ * endpoint (contract C1), on the four-tuple structured recomputation
+ * (lamp-wiring-1126, §8.4): four-dimension green passes untouched, a red
+ * dimension and an unreadable one are refused per id with their grouping
+ * (no batch contagion), `force` needs a real reason or the whole request is
+ * a 400 — and none of it ever reads a transcript (the fixtures carry no
+ * transcript at all: the old text read would answer UNKNOWN here).
+ *
+ * The stale/sentinel tiers of the transcript layer are gone with the text
+ * source; their receipt/remedy behaviour lives in archive-verdict.spec.
  * @module tests/seal-gate.spec
  */
 
 import { afterAll, describe, expect, it, vi } from 'vitest'
-import { execFileSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { AddressInfo } from 'node:net'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService } from '../src/host/janitor.ts'
-import { assistantMsg, createFakeHost, fakeContext, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
+import { createFakeHost, fakeContext, fixtureSources, type FakeHost } from './fixtures.ts'
 
 function startServer(routes: WebRoute[]): Promise<{ server: Server; url: string }> {
   return new Promise((resolve) => {
@@ -48,86 +49,107 @@ async function post(url: string, path: string, body: unknown, headers: Record<st
   return { status: response.status, body: await response.json().catch(() => undefined) }
 }
 
-const SAVE_DONE = '## \u2705 执行完成\nSAVE_STATUS=DONE'
-const SAVE_TAIL = '## \u2705 执行完成\n保存状态：执行中，稍后继续'
-const CLEAN = '普通回复，无任何保存信号。'
+const GREEN_REF = 'content/tech/ai/dsh/tasks.md#gate-green'
+const RED_REF = 'content/tech/ai/dsh/tasks.md#gate-red'
 
-interface EndorsedRepo {
-  dir: string
-  hash: string
+const SRC_BINDINGS = 'GET /api/session-dispatch/bindings'
+const SRC_FSM = 'GET /api/task-fsm/state'
+const SRC_SAVE = 'scripts/git/save-status.py (repos= cell)'
+const SRC_DEBT = 'scripts/dsh/debt-scan.py --json'
+
+const GREEN_READINGS = {
+  contract: { state: 'pass', source: SRC_BINDINGS, note: 'alive-binding' },
+  e8: { state: 'pass', source: SRC_FSM, note: 'e8-done' },
+  pushed: { state: 'pass', source: SRC_SAVE, note: 'reached-push-lines' },
+  debt: { state: 'pass', source: SRC_DEBT, note: 'no-debt-markers' },
 }
 
-let repoCache: EndorsedRepo | undefined
-
-/** A real git repo whose single commit sits behind an origin remote-tracking ref (hermetic endorsement fixture). */
-function endorsedRepo(): EndorsedRepo {
-  if (repoCache !== undefined) return repoCache
-  const dir = mkdtempSync(join(tmpdir(), 'seal-gate-endorse-'))
-  const run = (args: string[]): string => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
-  run(['init', '-q'])
-  run(['config', 'user.email', 'seal@test'])
-  run(['config', 'user.name', 'seal'])
-  writeFileSync(join(dir, 'seed.txt'), 'seed\n')
-  run(['add', '.'])
-  run(['commit', '-q', '-m', 'seed'])
-  const hash = run(['rev-parse', 'HEAD']).trim()
-  run(['update-ref', 'refs/remotes/origin/main', hash])
-  repoCache = { dir, hash }
-  return repoCache
-}
-
-/** Transcript root event carrying the session cwd — the real transcript shape. */
-function sessionRoot(id: string, cwd: string): Record<string, unknown> {
-  return { type: 'session', version: 4, id, cwd }
-}
-
-/** An endorsed DONE report: 落点头 hash earlier in the message, the endorsement line last. */
-function endorsedDone(hash: string): string {
-  return `落点头 \`${hash}\` 已推 origin。\n\nSAVE_STATUS=DONE commits=1/1 pushedBranch=1/1 merged=1/1 pushedMain=1/1 auditCleaned=yes dirty=0`
-}
-
-/** A fake host with one session per seal shape: green / stale / red / unknown / neutral. */
+/**
+ * One host per seal shape: green (all four dims pass), red (task not E8-done),
+ * unknown (bindings unreadable). Deliberately transcript-free — the verdict
+ * must come from the structured sources alone.
+ */
 function gateHost(): FakeHost {
-  const ids = ['session-green', 'session-stale', 'session-red', 'session-unknown', 'session-neutral']
-  const host = createFakeHost({
+  const ids = ['session-green', 'session-red', 'session-unknown']
+  return createFakeHost({
     feedItems: ids.map((sessionId) => ({ sessionId, updatedAt: 1 })),
     persistedIds: ids,
   })
-  const repo = endorsedRepo()
-  writeTranscript(host, 'session-green', [sessionRoot('session-green', repo.dir), assistantMsg(endorsedDone(repo.hash))])
-  writeTranscript(host, 'session-stale', [
-    userMsg('save'),
-    assistantMsg(SAVE_DONE),
-    userMsg('再查一个'),
-    assistantMsg(CLEAN),
-  ])
-  writeTranscript(host, 'session-red', [userMsg('保存'), assistantMsg(SAVE_TAIL)])
-  writeTranscript(host, 'session-neutral', [userMsg('hi'), assistantMsg(CLEAN)])
-  // session-unknown intentionally has no directory at all.
-  return host
+}
+
+function gateSources(): ReturnType<typeof fixtureSources> {
+  return fixtureSources({
+    bindings: {
+      'session-green': { taskRef: GREEN_REF, workspaceId: 'ws-fixture' },
+      'session-red': { taskRef: RED_REF, workspaceId: 'ws-fixture' },
+      'session-unknown': null,
+    },
+    fsm: {
+      [GREEN_REF]: { state: 'done', history: [{ event: 'E8' }] },
+      [RED_REF]: { state: 'active', history: [] },
+    },
+  })
 }
 
 function gateService(host: FakeHost): ArchiveService {
-  return new ArchiveService(fakeContext(host) as never, { dshHome: host.home })
+  return new ArchiveService(fakeContext(host) as never, { dshHome: host.home, verdictSources: gateSources() })
 }
 
-describe('POST /seal-check (contract C1)', () => {
-  it('serves the shared six-value grouping with followUpCount on stale rows', async () => {
+describe('POST /seal-check (contract C1) — four-tuple rows', () => {
+  it('serves the shared grouping with per-dimension readings on every row', async () => {
     const host = gateHost()
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/seal-check', {
-      ids: ['session-green', 'session-stale', 'session-red', 'session-unknown', 'session-neutral'],
+      ids: ['session-green', 'session-red', 'session-unknown'],
     })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
-      { id: 'session-green', verdict: 'DONE', detail: 'sentinel-ok', lastLine: expect.any(String) },
-      { id: 'session-stale', verdict: 'UNSEALED', detail: 'sentinel-stale', followUpCount: 2, lastLine: expect.any(String) },
-      { id: 'session-red', verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: expect.any(String) },
-      { id: 'session-unknown', verdict: 'UNKNOWN', detail: 'transcript-not-found' },
-      { id: 'session-neutral', verdict: 'NEUTRAL', detail: 'no-save-trace', lastLine: expect.any(String) },
+      { id: 'session-green', verdict: 'DONE', detail: '4t-pass', readings: GREEN_READINGS },
+      {
+        id: 'session-red',
+        verdict: 'UNSEALED',
+        detail: '4t-red-e8',
+        readings: {
+          contract: { state: 'pass', source: SRC_BINDINGS, note: 'alive-binding' },
+          e8: { state: 'fail', source: SRC_FSM, note: 'task-not-done' },
+          pushed: { state: 'pass', source: SRC_SAVE, note: 'reached-push-lines' },
+          debt: { state: 'pass', source: SRC_DEBT, note: 'no-debt-markers' },
+        },
+      },
+      {
+        id: 'session-unknown',
+        verdict: 'UNKNOWN',
+        detail: '4t-unreadable-contract',
+        readings: {
+          contract: { state: 'unreadable', source: SRC_BINDINGS, note: 'bindings-unreadable' },
+          e8: { state: 'unreadable', source: SRC_FSM, note: 'no-taskref' },
+          pushed: { state: 'unreadable', source: SRC_SAVE, note: 'no-taskref' },
+          debt: { state: 'unreadable', source: SRC_DEBT, note: 'no-root' },
+        },
+      },
     ])
+  })
+
+  it('answers an unresolvable id with the fail-closed session-not-found row', async () => {
+    const host = gateHost()
+    const service = gateService(host)
+    const { server, url } = await startServer(makeArchiveRoutes(service))
+    servers.push(server)
+    const response = await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-ghost'] })
+    expect(response.status).toBe(200)
+    expect(response.body.results[0]).toEqual({
+      id: 'session-ghost',
+      verdict: 'UNKNOWN',
+      detail: 'session-not-found',
+      readings: {
+        contract: { state: 'unreadable', source: 'session lookup', note: 'session-not-found:session-ghost' },
+        e8: { state: 'unreadable', source: SRC_FSM, note: 'not-computed' },
+        pushed: { state: 'unreadable', source: SRC_SAVE, note: 'not-computed' },
+        debt: { state: 'unreadable', source: SRC_DEBT, note: 'not-computed' },
+      },
+    })
   })
 
   it('accepts GET ?ids= as the preflight scanner shape and refuses empty id lists', async () => {
@@ -162,8 +184,8 @@ describe('POST /seal-check (contract C1)', () => {
   })
 })
 
-describe('POST /archive — gate path 1: green passes', () => {
-  it('archives a DONE session as before: source manual, no seal field', async () => {
+describe('POST /archive — gate path 1: four-tuple green passes', () => {
+  it('archives a DONE session: source manual, no seal field — without any transcript to read', async () => {
     const host = gateHost()
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
@@ -177,26 +199,8 @@ describe('POST /archive — gate path 1: green passes', () => {
   })
 })
 
-describe('POST /archive — gate path 2: sentinel-stale passes with accounting', () => {
-  it('archives the stale session and records seal:"stale"', async () => {
-    const host = gateHost()
-    const service = gateService(host)
-    const { server, url } = await startServer(makeArchiveRoutes(service))
-    servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'], actor: 'manual' })
-    expect(response.status).toBe(200)
-    expect(response.body.results).toEqual([{ id: 'session-stale', status: 'ok' }])
-    expect(service.ledgerSnapshot().entries['session-stale']).toEqual({
-      archivedAt: expect.any(Number),
-      source: 'manual',
-      seal: 'stale',
-      actor: 'manual',
-    })
-  })
-})
-
-describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', () => {
-  it('skips each unsealed id with seal-required + its grouping while green still archives (批内不连坐)', async () => {
+describe('POST /archive — gate path 2: red and UNKNOWN refused per id', () => {
+  it('skips each non-green id with seal-required + its grouping while green still archives (批内不连坐)', async () => {
     const host = gateHost()
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
@@ -208,35 +212,18 @@ describe('POST /archive — gate path 3: true red and UNKNOWN refused per id', (
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
       { id: 'session-green', status: 'ok' },
-      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: '保存状态：执行中，稍后继续', expected: expect.any(String), remedy: expect.any(String) } },
-      { id: 'session-unknown', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNKNOWN', detail: 'transcript-not-found' } },
+      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: '4t-red-e8', remedy: expect.stringContaining('验收未过') } },
+      { id: 'session-unknown', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNKNOWN', detail: '4t-unreadable-contract' } },
     ])
-    // Green archived; the refused ids did not.
+    // Green archived; the refused ids wrote nothing.
     expect(host.registry.archivedSessionIds).toEqual(['session-green'])
     expect(service.ledgerSnapshot().entries['session-red']).toBeUndefined()
     expect(service.ledgerSnapshot().entries['session-unknown']).toBeUndefined()
   })
-
-  it('refuses sentinel-pending with its own grouping detail', async () => {
-    const host = createFakeHost({ feedItems: [{ sessionId: 'session-pending', updatedAt: 1 }], persistedIds: ['session-pending'] })
-    writeTranscript(host, 'session-pending', [assistantMsg('## \u2705 执行完成\nSAVE_STATUS=PENDING(2)')])
-    const service = gateService(host)
-    const { server, url } = await startServer(makeArchiveRoutes(service))
-    servers.push(server)
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-pending'], actor: 'manual' })
-    expect(response.status).toBe(200)
-    expect(response.body.results).toEqual([
-      { id: 'session-pending', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'sentinel-pending', lastLine: 'SAVE_STATUS=PENDING(2)', remedy: expect.any(String) } },
-    ])
-    // 甲: a pending receipt says "finish the save first", not "paste a line"
-    expect(response.body.results[0].seal.remedy).toContain('save-status.py')
-    expect(response.body.results[0].seal.expected).toBeUndefined()
-    expect(host.registry.archivedSessionIds).toEqual([])
-  })
 })
 
-describe('POST /archive — gate path 4: force with a real reason', () => {
-  it('force + non-empty reason passes a true-red id and records override with the seal it overrode', async () => {
+describe('POST /archive — gate path 3: force with a real reason', () => {
+  it('force + non-empty reason passes a red id and records override with the judgement it overrode', async () => {
     const host = gateHost()
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
@@ -253,18 +240,18 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
       archivedAt: expect.any(Number),
       source: 'override',
       reason: '板行[x] git 收口证据，任务书授权强归',
-      seal: 'UNSEALED:save-tail-no-sentinel',
+      seal: 'UNSEALED:4t-red-e8',
       actor: 'manual',
     })
   })
 
-  it('a forced batch records every entry as override with its per-id seal (全批 override)', async () => {
+  it('a forced batch records every entry as override with its per-id judgement (全批 override)', async () => {
     const host = gateHost()
     const service = gateService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
     const response = await post(url, '/api/dsh-session-archive/archive', {
-      ids: ['session-green', 'session-stale', 'session-red'],
+      ids: ['session-green', 'session-red', 'session-unknown'],
       actor: 'manual',
       force: true,
       reason: 'taskbot:taskRef=板行#anchor 板行[x] 受命收口',
@@ -272,9 +259,9 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     expect(response.status).toBe(200)
     expect(response.body.results.map((row: { status: string }) => row.status)).toEqual(['ok', 'ok', 'ok'])
     const entries = service.ledgerSnapshot().entries
-    expect(entries['session-green']).toEqual(expect.objectContaining({ source: 'override', reason: 'taskbot:taskRef=板行#anchor 板行[x] 受命收口', seal: 'DONE:sentinel-ok' }))
-    expect(entries['session-stale']).toEqual(expect.objectContaining({ source: 'override', seal: 'stale' }))
-    expect(entries['session-red']).toEqual(expect.objectContaining({ source: 'override', seal: 'UNSEALED:save-tail-no-sentinel' }))
+    expect(entries['session-green']).toEqual(expect.objectContaining({ source: 'override', reason: 'taskbot:taskRef=板行#anchor 板行[x] 受命收口', seal: 'DONE:4t-pass' }))
+    expect(entries['session-red']).toEqual(expect.objectContaining({ source: 'override', seal: 'UNSEALED:4t-red-e8' }))
+    expect(entries['session-unknown']).toEqual(expect.objectContaining({ source: 'override', seal: 'UNKNOWN:4t-unreadable-contract' }))
   })
 
   it('force without a reason refuses the whole request with 400 and archives nothing', async () => {
@@ -298,69 +285,35 @@ describe('POST /archive — gate path 4: force with a real reason', () => {
     const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-red'], actor: 'manual', force: 'yes', reason: 'not-boolean' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([
-      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'save-tail-no-sentinel', lastLine: '保存状态：执行中，稍后继续', expected: expect.any(String), remedy: expect.any(String) } },
+      { id: 'session-red', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: '4t-red-e8', remedy: expect.stringContaining('验收未过') } },
     ])
-    expect(host.registry.archivedSessionIds).toEqual([])
-  })
-})
-
-describe('endorsement downgrade at the endpoints (seal-noendorse-green-1106)', () => {
-  it('operator reads a bare DONE as non-green at seal-check and the archive gate refuses it', async () => {
-    // Given a last assistant message asserting DONE with no commits= endorsement
-    const host = createFakeHost({ feedItems: [{ sessionId: 'session-bare', updatedAt: 1 }], persistedIds: ['session-bare'] })
-    writeTranscript(host, 'session-bare', [assistantMsg('收口完成。\n\nSAVE_STATUS=DONE')])
-    const service = gateService(host)
-    const { server, url } = await startServer(makeArchiveRoutes(service))
-    servers.push(server)
-
-    // When the operator reads the seal over HTTP
-    const check = await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'] })
-    // Then the row is non-green with the scanner's no-endorsement reading
-    expect(check.status).toBe(200)
-    expect(check.body.results).toEqual([{ id: 'session-bare', verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: 'SAVE_STATUS=DONE' }])
-
-    // And the archive gate asks for confirmation instead of passing it free —
-    // the seal-required receipt is actionable (seal-remedy-1119, 甲): the
-    // exact line the gate read, the shape it must take, and the one command
-    // that regenerates it.
-    const archived = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-bare'], actor: 'manual' })
-    expect(archived.status).toBe(200)
-    expect(archived.body.results).toEqual([
-      { id: 'session-bare', status: 'skipped', reason: 'seal-required', seal: { verdict: 'UNSEALED', detail: 'no-endorsement', lastLine: 'SAVE_STATUS=DONE', expected: expect.any(String), remedy: expect.any(String) } },
-    ])
-    const seal = archived.body.results[0].seal
-    expect(seal.lastLine).toBe('SAVE_STATUS=DONE')
-    expect(seal.expected).toContain('SAVE_STATUS=DONE repo=')
-    expect(seal.expected).toContain('hashes=')
-    expect(seal.remedy).toContain('python scripts/git/save-status.py --hashes')
-    expect(seal.remedy).toContain('末行')
     expect(host.registry.archivedSessionIds).toEqual([])
   })
 })
 
 describe('seal-check recheck wiring (archive-seal-falsered-1116 段2)', () => {
   it('passes the click-time recheck flag through POST body and GET query alike', async () => {
-    // Given a bare-DONE session over a real service
-    const host = createFakeHost({ feedItems: [{ sessionId: 'session-bare', updatedAt: 1 }], persistedIds: ['session-bare'] })
-    writeTranscript(host, 'session-bare', [assistantMsg('收口完成。\n\nSAVE_STATUS=DONE')])
+    // Given a real service (the flag rides the wire for compatibility; the
+    // four-tuple has no memo stamp to re-probe, so it is ignored downstream)
+    const host = gateHost()
     const service = gateService(host)
     const spy = vi.spyOn(service, 'sealCheck')
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
 
     // When the click gate asks with recheck
-    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'], recheck: true })
+    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-green'], recheck: true })
     // Then the flag reaches the shared implementation (点击门重探)
-    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: true })
+    expect(spy).toHaveBeenLastCalledWith(['session-green'], { recheck: true })
 
     // A plain ask (the lamp pull's shape) keeps the memo window
-    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-bare'] })
-    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: false })
+    await post(url, '/api/dsh-session-archive/seal-check', { ids: ['session-green'] })
+    expect(spy).toHaveBeenLastCalledWith(['session-green'], { recheck: false })
 
     // GET carries the same flag (diagnostic curl form)
-    const ok = await fetch(`${url}/api/dsh-session-archive/seal-check?ids=session-bare&recheck=1`)
+    const ok = await fetch(`${url}/api/dsh-session-archive/seal-check?ids=session-green&recheck=1`)
     expect(ok.status).toBe(200)
-    expect(spy).toHaveBeenLastCalledWith(['session-bare'], { recheck: true })
+    expect(spy).toHaveBeenLastCalledWith(['session-green'], { recheck: true })
   })
 })
 
@@ -379,12 +332,12 @@ function cGateService(host: FakeHost, activity: readonly { kind: string }[] | Er
   ctx.waterfall = waterfall
   ctx.parallel = parallel
   ctx.logger = { warn: () => {} }
-  return { service: new ArchiveService(ctx as never, { dshHome: host.home }), waterfall, parallel }
+  return { service: new ArchiveService(ctx as never, { dshHome: host.home, verdictSources: gateSources() }), waterfall, parallel }
 }
 
 describe("C′ 归档即停轮 at the archive gate (加固A/B, 2026-11-19 裁定)", () => {
-  it('a fresh-green DONE archive with turn-only activity orders the stop with the write', async () => {
-    // Given the endorsed-green session and a turn-only activity waterfall
+  it('a fresh-green four-tuple DONE archive with turn-only activity orders the stop with the write', async () => {
+    // Given the all-green session and a turn-only activity waterfall
     const host = gateHost()
     const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
     const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
@@ -394,49 +347,13 @@ describe("C′ 归档即停轮 at the archive gate (加固A/B, 2026-11-19 裁定
     const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-green'], actor: 'manual' })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-green', status: 'ok' }])
-    // Then 加固B saw the fresh sentinel (DONE → stopTurn) and 加固A confirmed
+    // Then 加固B saw the fresh green (DONE → stopTurn) and 加固A confirmed
     // the turn family alone — the registry archives with stopActivity and
     // issues the stop itself, so no second dispatch fires.
     expect(waterfall).toHaveBeenCalledWith('workspace/session-activity', { sessionId: 'session-green' }, expect.any(Function))
     expect(archiveSpy).toHaveBeenCalledWith('session-green', { stopActivity: true })
     expect(parallel).not.toHaveBeenCalled()
     expect(host.registry.archivedSessionIds).toEqual(['session-green'])
-  })
-
-  it('a NEUTRAL green archive never orders a stop (no fresh sentinel)', async () => {
-    // Given the neutral session over the same turn-only waterfall
-    const host = gateHost()
-    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
-    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
-    const { server, url } = await startServer(makeArchiveRoutes(service))
-    servers.push(server)
-    // When the operator archives it through the gate
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-neutral'], actor: 'manual' })
-    expect(response.status).toBe(200)
-    expect(response.body.results).toEqual([{ id: 'session-neutral', status: 'ok' }])
-    // Then 加固B never even asks: green-for-archiving ≠ fresh sentinel, so
-    // the pre-C′ plain path runs verbatim (one-arg call + manual dispatch).
-    expect(waterfall).not.toHaveBeenCalled()
-    expect(archiveSpy).toHaveBeenCalledWith('session-neutral')
-    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-neutral' })
-  })
-
-  it('a stale pass-through archive never orders a stop (the conversation resumed)', async () => {
-    // Given the stale session over the same turn-only waterfall
-    const host = gateHost()
-    const archiveSpy = vi.spyOn(host.registry, 'archiveSession')
-    const { service, waterfall, parallel } = cGateService(host, [{ kind: 'turn' }])
-    const { server, url } = await startServer(makeArchiveRoutes(service))
-    servers.push(server)
-    // When the operator archives it through the gate
-    const response = await post(url, '/api/dsh-session-archive/archive', { ids: ['session-stale'], actor: 'manual' })
-    expect(response.status).toBe(200)
-    expect(response.body.results).toEqual([{ id: 'session-stale', status: 'ok' }])
-    // Then the stale tier carries no fresh sentinel: no activity query, plain path.
-    expect(waterfall).not.toHaveBeenCalled()
-    expect(archiveSpy).toHaveBeenCalledWith('session-stale')
-    expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-stale' })
-    expect(service.ledgerSnapshot().entries['session-stale']?.seal).toBe('stale')
   })
 
   it('a forced archive never orders a stop (the human stop channel stays the native dialog)', async () => {
@@ -454,7 +371,7 @@ describe("C′ 归档即停轮 at the archive gate (加固A/B, 2026-11-19 裁定
     })
     expect(response.status).toBe(200)
     expect(response.body.results).toEqual([{ id: 'session-red', status: 'ok' }])
-    // Then force overrides the seal but not 加固B: stopTurn stays false.
+    // Then force overrides the judgement but not 加固B: stopTurn stays false.
     expect(waterfall).not.toHaveBeenCalled()
     expect(archiveSpy).toHaveBeenCalledWith('session-red')
     expect(parallel).toHaveBeenCalledWith('workspace/session-stop', { sessionId: 'session-red' })

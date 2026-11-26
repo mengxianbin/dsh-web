@@ -27,7 +27,6 @@ import type {
   InventoryView,
   OpResult,
   RunStats,
-  SealCheckResult,
   SessionPreviewView,
 } from '../core/types.ts'
 import { buildInventory, ledgerEntryFor, readProjcacheIndex, type BuiltInventory, type InventorySources, type ProjcacheFileEntry, type ProjcacheIndex } from './inventory.ts'
@@ -42,10 +41,10 @@ import {
   type LedgerEntry,
   type LedgerSource,
 } from './ledger.ts'
-import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, sealRefOf, type AnalyzeSealOptions } from './seal.ts'
+import { analyzeSeal, isGreenSeal, isStaleSeal, sealMarker, type AnalyzeSealOptions } from './seal.ts'
 import { mayArchive, readIdentityTable, resolveActorClass, type IdentityClass } from './identity.ts'
 import { createSealStateSync, type SealStateOptions, type SealStateSync } from './seal-state.ts'
-import { analyzeSealAsync } from './seal-async.ts'
+import { computeFourTuple, createVerdictSources, fourTupleRefOf, unresolvedReadings, type ArchiveVerdict, type VerdictMemo, type VerdictSources } from './archive-verdict.ts'
 import { DirIndexCache } from './dir-index-cache.ts'
 import { AsyncTtlMemo } from './ttl-memo.ts'
 import { InventoryResponseCache, type InventoryResponseServe } from './inventory-response-cache.ts'
@@ -81,9 +80,16 @@ export interface ArchiveServiceOptions {
   dshHome?: string
   /**
    * The turn-end seal compute seam (seal-light-host-state-1109 护栏 ②): specs
-   * inject a deterministic fake; production defaults to the off-loop worker.
+   * inject a deterministic fake; production defaults to the four-tuple
+   * computation both lamp legs share (lamp-wiring-1126).
    */
   sealCompute?: SealStateOptions['compute']
+  /**
+   * The four-tuple dimension sources (lamp-wiring-1126): specs inject fakes
+   * so any dimension can be driven pass / fail / unreadable independently;
+   * production defaults to the loopback + m-note subprocess sources.
+   */
+  verdictSources?: VerdictSources
 }
 
 /**
@@ -288,11 +294,17 @@ export class ArchiveService {
   /** The turn-end seal sync, alive exactly while this service is mounted. */
   private sealState: SealStateSync | undefined
   private readonly sealCompute: SealStateOptions['compute']
+  /** The four-tuple dimension sources behind both lamp legs and the gate (lamp-wiring-1126). */
+  private readonly verdictSources: VerdictSources
 
   constructor(ctx: Context, options: ArchiveServiceOptions = {}) {
     this.ctx = ctx
     this.dshHome = options.dshHome ?? resolveDshHome()
     this.sealCompute = options.sealCompute
+    this.verdictSources = options.verdictSources ?? createVerdictSources({
+      origin: () => this.origin(),
+      workspacePath: (workspaceId) => this.workspacePath(workspaceId),
+    })
     this.ledgerPath = join(this.dshHome, 'dsh-session-archive', 'archive-ledger.json')
     this.statePath = join(this.dshHome, 'dsh-session-archive', 'state.json')
     this.journalPath = join(this.dshHome, 'dsh-session-archive', 'archive-events.jsonl')
@@ -330,7 +342,10 @@ export class ArchiveService {
     // mounts the key.
     this.sealState = createSealStateSync(this.ctx, {
       resolveDir: async (id) => (await this.dirIndex.get()).byId.get(id),
-      ...(this.sealCompute === undefined ? {} : { compute: this.sealCompute }),
+      // lamp-wiring-1126: the Host push leg computes the SAME four-tuple the
+      // C1 pull leg and the archive gate do — one source, both legs, so the
+      // lamp can never disagree with the gate (seal-lamp-consistency-1114).
+      compute: this.sealCompute ?? ((id) => this.sessionVerdict(id)),
     })
     this.sealState.start()
     // First-open prewarm (#inventory-first-open-1120): the first panel open
@@ -795,26 +810,64 @@ export class ArchiveService {
    * The six-value seal grouping for a batch of ids — the single implementation
    * behind both archive channels (contract C1: 分组实现全插件仅此一份): the
    * native dialog consumes it through `POST /seal-check`, the REST hard gate
-   * calls `analyzeSeal` directly through {@link archive}. Location probes
-   * only the named ids against the sessions root (targeted read — no full
-   * `indexSessionDirs` walk, no `dirSize`, see {@link resolveSessionDirs});
-   * an id with no locatable transcript answers `UNKNOWN` (fail-closed, never
-   * a silent pass).
+   * calls {@link sessionVerdict} directly through {@link archive}. Since
+   * lamp-wiring-1126 the grouping is the four-tuple structured recomputation
+   * (可归档 = 回合约态 ∧ 验收E8 ∧ 产出入仓 ∧ 欠账显式化, §8.4) — never a
+   * transcript read: a red dimension answers `UNSEALED` with the failing dim
+   * named, an unresolvable source or id answers `UNKNOWN` (fail-closed, never
+   * a silent pass), all four dimensions green answers `DONE`. `recheck` stays
+   * on the wire for compatibility and no longer re-probes anything — the git
+   * re-probe belonged to the retired transcript layer.
    *
-   * The dialog channel is ASYNC since stall-rootcause-1123: memo hits still
-   * answer inline (one stat + map lookup), but a cold derive runs in the
-   * worker ({@link analyzeSealAsync}) so the synchronous decode + git probe
-   * never blocks the Host main thread — the 0.5–2.8s seal-check stalls the
-   *取证 measured leave with this change. Ids are processed sequentially on
-   * purpose: one worker at a time, the turn/end path's single-flight rule.
+   * Sources dedup across the batch through one memo (one bindings fetch, one
+   * FSM fetch, one debt scan per root, one save-status run per distinct
+   * task), and the ids resolve in parallel: every leg is IO-bound.
    */
-  async sealCheck(ids: readonly string[], options?: AnalyzeSealOptions): Promise<SealCheckResult[]> {
-    const dirs = resolveSessionDirs(join(this.dshHome, 'sessions'), ids)
-    const results: SealCheckResult[] = []
-    for (const id of ids) {
-      results.push(await analyzeSealAsync(id, dirs.get(id), options))
+  async sealCheck(ids: readonly string[], options?: AnalyzeSealOptions): Promise<ArchiveVerdict[]> {
+    void options // wire compatibility only; the four-tuple has no memo stamp to re-probe.
+    const states = await this.targetStates(ids)
+    const memo: VerdictMemo = new Map()
+    return Promise.all(ids.map((id): Promise<ArchiveVerdict> => {
+      const state = states.get(id)
+      if (state === undefined || !state.found) {
+        // No existence answer = nothing to compute against: the same
+        // fail-closed UNKNOWN tier the transcript layer used for a missing dir.
+        return Promise.resolve({ id, verdict: 'UNKNOWN', detail: 'session-not-found', readings: unresolvedReadings(id) })
+      }
+      return this.sessionVerdict(id, memo)
+    }))
+  }
+
+  /** Loopback origin of this host; `undefined` before listen = every loopback source unreadable (fail-closed). */
+  private origin(): string | undefined {
+    const face = this.serviceFace<{ getOrigin?(): string }>('webServer')
+    try {
+      return typeof face?.getOrigin === 'function' ? face.getOrigin() : undefined
+    } catch {
+      return undefined
     }
-    return results
+  }
+
+  /** Registry path of one workspace — the m-note root the two script legs run in. */
+  private workspacePath(workspaceId: string): string | undefined {
+    const registry = this.serviceFace<{ list(): readonly { id: string; path: string }[] }>('workspaceRegistry')
+    try {
+      return registry?.list().find((workspace) => workspace.id === workspaceId)?.path
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * The four-tuple verdict for one session — THE single computation behind
+   * both lamp legs and the archive gate (lamp-wiring-1126): same inputs, same
+   * output, whatever the channel (先例 seal-lamp-consistency-1114).
+   * @param id - canonical session id.
+   * @param memo - per-request source dedup (see `VerdictMemo`); never crosses
+   *   a request — every request recomputes from live sources (门 = 现算).
+   */
+  async sessionVerdict(id: string, memo?: VerdictMemo): Promise<ArchiveVerdict> {
+    return computeFourTuple(id, this.verdictSources, memo)
   }
 
   // ------------------------------------------------------------------
@@ -889,6 +942,10 @@ export class ArchiveService {
       // Protection for the automatic path only: live-store/current/in-flight
       // come from in-memory state, the target's running flag rides its row.
       const protectedBase = source === 'auto' ? this.protectedReason(currentSessionId) : undefined
+      // The four-tuple sources dedup across THIS batch only (门 = 现算): one
+      // bindings fetch, one FSM fetch, one debt scan per root, one
+      // save-status run per distinct task — never cached across requests.
+      const gateMemo: VerdictMemo | undefined = gate === undefined ? undefined : new Map()
       const okIds: string[] = []
       for (const id of ids) {
         const state = states.get(id)
@@ -917,26 +974,26 @@ export class ArchiveService {
             continue
           }
         }
-        // Seal gate (contract C2): decided per id after the existence checks,
-        // so one refused session never drags its batch down (批内不连坐).
+        // Seal gate (contract C2 + lamp-wiring-1126 四元组): decided per id
+        // after the existence checks, so one refused session never drags its
+        // batch down (批内不连坐). The verdict is the structured four-tuple
+        // recomputed live on this request — this chain never reads a
+        // transcript (§8.4 机读现算,门永不用缓存).
         let entrySource: LedgerSource = source
         let entryReason: string | undefined
         let entrySeal: string | undefined
-        // C′ 归档即停轮 (2026-11-19 裁定, 加固B): only a **fresh-green** seal —
-        // DONE (endorsement rechecked green just now) or N_A, both a
-        // last-turn sentinel the gate re-read — may order the archive with
-        // `stopActivity`, so an in-turn self-archive lands and its own turn
-        // stops after the write. Force overrides the seal but not this
-        // decision (the human channel for stopping a live turn stays the
-        // native stop-and-archive dialog); NEUTRAL/LEGACY are green for
-        // archiving but carry no fresh sentinel, and the stale tier means
-        // the conversation resumed after the save — neither may stop a turn.
+        // C′ 归档即停轮 (2026-11-19 裁定, 加固B): only a **fresh-green** verdict
+        // may order the archive with `stopActivity` — since lamp-wiring-1126
+        // that is the four-tuple DONE the gate recomputed just now (N_A stays
+        // in the branch for wire vocabulary; the tuple never emits it), so an
+        // in-turn self-archive lands and its own turn stops after the write.
+        // Force overrides the verdict but not this decision (the human channel
+        // for stopping a live turn stays the native stop-and-archive dialog);
+        // red and UNKNOWN never reach here — they refuse below.
         let stopTurn = false
         if (gate !== undefined) {
-          // recheck (archive-seal-falsered-1116 段2): this REST gate decides at
-          // click time, so a memoized no-endorsement red is re-probed instead
-          // of served frozen to the transcript stamp.
-          const seal = analyzeSeal(id, state.dir, { recheck: true })
+          // oxlint-disable-next-line eslint/no-await-in-loop -- the gate folds the four dimensions fail-closed for THIS id before moving on: a sequential per-id compute is the design (each refusal must name its first red).
+          const seal = await this.sessionVerdict(id, gateMemo)
           if (gate.force !== undefined) {
             // Forced pass: the whole batch archives under the caller's stated
             // reason, each entry carrying the seal judgement it overrode.
@@ -947,12 +1004,14 @@ export class ArchiveService {
             // Green tier: archives exactly as before — no seal field, source manual.
             stopTurn = seal.verdict === 'DONE' || seal.verdict === 'N_A'
           } else if (isStaleSeal(seal)) {
-            // Stale tier (裁定①): pass through with the pinned marker.
+            // Stale tier (裁定①): unreachable for four-tuple verdicts; the
+            // branch stays for the six-value vocabulary's pass-through shape.
             entrySeal = 'stale'
           } else {
-            // True red (UNSEALED) and UNKNOWN: refuse this id with its
-            // grouping — the receipt carries what to fix (seal-remedy-1119).
-            results.push({ id, status: 'skipped', reason: 'seal-required', seal: sealRefOf(seal) })
+            // Red (UNSEALED) and UNKNOWN: refuse this id with its grouping —
+            // the receipt names the failing dimension (§8.4 缺因归因), and an
+            // unreadable source is never fixed by an action (no remedy).
+            results.push({ id, status: 'skipped', reason: 'seal-required', seal: fourTupleRefOf(seal) })
             continue
           }
         }
