@@ -6,25 +6,23 @@
  * structural fakes of the persistence/cache/store services.
  *
  * test-standards-allow: table-driven fold/backfill unit tests — role-titled
- * Given/When/Then bodies would contort pure state assertions, and the one
- * vi.mock pins the single appendPluginRecord seam the live paths assert on.
+ * Given/When/Then bodies would contort pure state assertions, and the fake
+ * Sessions' own `append` doubles pin the cross-copy write seam the live
+ * paths assert on — including their failure logging and bounded re-check
+ * (sessionclass-retry-1126).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import { appendPluginRecord, SessionLogOffset, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
+import { SessionLogOffset, type Session, type SessionEvent, type SessionHeader } from '@deepseek-ai/dsh-session'
 import {
   CLASS_RECORD,
   createClassProjection,
   sessionClassProjection,
 } from '../src/host/class-projection.ts'
 
-vi.mock('@deepseek-ai/dsh-session', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@deepseek-ai/dsh-session')>()
-  return { ...actual, appendPluginRecord: vi.fn() }
-})
-
 afterEach(() => {
-  vi.mocked(appendPluginRecord).mockReset()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 /** A committed class record shaped exactly as the writer persists it. */
@@ -49,6 +47,16 @@ function plainEvent(seq = 0): SessionEvent {
 }
 
 const header = { id: 'session-1' } as SessionHeader
+
+/**
+ * A live-Session double: the cross-copy seam is the instance's own `append`,
+ * which the Host stamps `{ ignorable: true }` — the shape `appendClassViaHost`
+ * verifies. A custom implementation may throw to model a rejected write.
+ */
+function fakeSession(id: string, implementation?: () => unknown): { session: Session; append: ReturnType<typeof vi.fn> } {
+  const append = vi.fn(implementation ?? (() => ({ ignorable: true })))
+  return { session: { id, append } as unknown as Session, append }
+}
 
 describe('sessionClassProjection fold', () => {
   it('inits null for an empty log', () => {
@@ -182,6 +190,7 @@ describe('ClassProjection.backfill', () => {
   })
 
   it('closes the handle even when the refold throws', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const persistence = fakePersistence({ statHeader: header, events: [plainEvent(0)] })
     const cache = fakeCache()
     cache.coldSnapshot = vi.fn(() => { throw new Error('checkpoint refused') })
@@ -189,6 +198,10 @@ describe('ClassProjection.backfill', () => {
 
     await expect(face.backfill({ 'session-1': 'human' })).resolves.toBeUndefined()
     expect(persistence.handle.close).toHaveBeenCalledTimes(1)
+    // The per-session failure is loud: id + class + reason, never silent.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('session=session-1 class=human'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('checkpoint refused'))
+    face.dispose()
   })
 
   it('skips a Session that was never materialized or is already gone', async () => {
@@ -209,7 +222,7 @@ describe('ClassProjection.backfill', () => {
   })
 
   it('syncs a recorded class onto a live Session and leaves cold ones to the pass', async () => {
-    const live = { id: 'session-live' } as unknown as Session
+    const { session: live, append: liveAppend } = fakeSession('session-live')
     const store = { get: (id: string) => (id === 'session-live' ? live : undefined) }
     const persistence = fakePersistence({ statHeader: header, events: [plainEvent(0)] })
     const cache = fakeCache()
@@ -221,10 +234,12 @@ describe('ClassProjection.backfill', () => {
 
     await face.backfill({ 'session-live': 'bot-boss', 'session-cold': 'human' })
 
-    expect(appendPluginRecord).toHaveBeenCalledWith(live, CLASS_RECORD, { class: 'bot-boss' })
+    // The live write rides the Session's own public append (cross-copy seam).
+    expect(liveAppend).toHaveBeenCalledWith(CLASS_RECORD, { class: 'bot-boss' }, { ignorable: true })
     // The cold row still went through the write-open path.
     expect(persistence.face.open).toHaveBeenCalledTimes(1)
     expect(persistence.face.open).toHaveBeenCalledWith('session-cold', 'write')
+    face.dispose()
   })
 
   it('drops a non-triclass ledger value without touching anything', async () => {
@@ -251,33 +266,33 @@ describe('ClassProjection mount and live sync', () => {
   })
 
   it('appends only when the folded state disagrees with the ledger', async () => {
-    const session = { id: 'session-1' } as unknown as Session
+    const { session, append } = fakeSession('session-1')
     const register = vi.fn(() => () => {})
     const stateOf = vi.fn(() => 'human')
     const face = createClassProjection(fakeCtx({}, { register, stateOf }))
     await face.mount()
 
     face.syncLive(session, 'human')
-    expect(appendPluginRecord).not.toHaveBeenCalled()
+    expect(append).not.toHaveBeenCalled()
 
     face.syncLive(session, 'bot-worker')
-    expect(appendPluginRecord).toHaveBeenCalledWith(session, CLASS_RECORD, { class: 'bot-worker' })
+    expect(append).toHaveBeenCalledWith(CLASS_RECORD, { class: 'bot-worker' }, { ignorable: true })
     face.dispose()
   })
 
   it('appends unconditionally while the fold is not mounted (no dedupe, still correct)', async () => {
-    const session = { id: 'session-1' } as unknown as Session
+    const { session, append } = fakeSession('session-1')
     const face = createClassProjection(fakeCtx({}, { register: vi.fn((_definition: unknown) => { throw new Error('duplicate') }), stateOf: vi.fn() }))
     await face.mount()
 
     face.syncLive(session, 'human')
 
-    expect(appendPluginRecord).toHaveBeenCalledWith(session, CLASS_RECORD, { class: 'human' })
+    expect(append).toHaveBeenCalledWith(CLASS_RECORD, { class: 'human' }, { ignorable: true })
     face.dispose()
   })
 
   it('resolves a ledger id in the store, by either spelling, and syncs only live hits', async () => {
-    const live = { id: 'session-bare' } as unknown as Session
+    const { session: live, append } = fakeSession('session-bare')
     const store = { get: (id: string) => (id === 'session-bare' ? live : undefined) }
     const face = createClassProjection(fakeCtx({ sessions: store }, { register: vi.fn(() => () => {}), stateOf: vi.fn(() => null) }))
     await face.mount()
@@ -286,9 +301,9 @@ describe('ClassProjection mount and live sync', () => {
     face.syncById('bare', 'human')
     face.syncById('session-cold', 'human')
 
-    expect(appendPluginRecord).toHaveBeenCalledTimes(2)
-    expect(appendPluginRecord).toHaveBeenNthCalledWith(1, live, CLASS_RECORD, { class: 'human' })
-    expect(appendPluginRecord).toHaveBeenNthCalledWith(2, live, CLASS_RECORD, { class: 'human' })
+    expect(append).toHaveBeenCalledTimes(2)
+    expect(append).toHaveBeenNthCalledWith(1, CLASS_RECORD, { class: 'human' }, { ignorable: true })
+    expect(append).toHaveBeenNthCalledWith(2, CLASS_RECORD, { class: 'human' }, { ignorable: true })
     face.dispose()
   })
 
@@ -296,5 +311,136 @@ describe('ClassProjection mount and live sync', () => {
     const face = createClassProjection(fakeCtx({}))
 
     expect(() => face.syncById('session-1', 'human')).not.toThrow()
+    face.dispose()
+  })
+})
+
+describe('ClassProjection failure logging and bounded re-check', () => {
+  it('warns with the session id, class and reason when the live append rejects', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { session, append } = fakeSession('session-1', () => {
+      throw new TypeError('Receiver must be an instance of class Session')
+    })
+    const face = createClassProjection(fakeCtx({}, { register: vi.fn(() => () => {}), stateOf: vi.fn(() => null) }))
+    await face.mount()
+
+    face.syncLive(session, 'human')
+
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[session-class] live sync failed session=session-1 class=human'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('TypeError: Receiver must be an instance of class Session'))
+    // The armed re-check and its cap are part of the loud line.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('re-check armed (attempt 1/2 in 10000ms)'))
+    face.dispose()
+  })
+
+  it('retries a rejected append at 10s then 60s, then gives up loudly', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { session, append } = fakeSession('session-1', () => {
+      throw new Error('publication closed')
+    })
+    const face = createClassProjection(fakeCtx({ sessions: { get: () => session } }, { register: vi.fn(() => () => {}), stateOf: vi.fn(() => null) }))
+    await face.mount()
+
+    face.syncLive(session, 'human')
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(append).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(append).toHaveBeenCalledTimes(3)
+
+    // Budget spent: no third attempt, and the give-up names the session.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(append).toHaveBeenCalledTimes(3)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('re-check budget spent after 2 attempts'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('session=session-1'))
+    face.dispose()
+  })
+
+  it('warns and re-checks a class that settled cold after the boot backfill (case B)', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let live: Session | undefined
+    const store = { get: () => live }
+    const { session, append } = fakeSession('session-b')
+    const persistence = fakePersistence({ statHeader: header, events: [plainEvent(0)] })
+    const cache = fakeCache()
+    const face = createClassProjection(fakeCtx({
+      sessions: store,
+      sessionPersistence: persistence.face,
+      sessionProjectionCache: cache,
+    }, { register: vi.fn(() => () => {}), stateOf: vi.fn(() => null) }))
+    await face.mount()
+    await face.backfill({})
+
+    face.syncById('session-b', 'human')
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('session not in the store after the boot backfill session=session-b class=human'))
+    expect(append).not.toHaveBeenCalled()
+
+    // The Session enters the store before the re-check fires: the live write lands.
+    live = session
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(append).toHaveBeenCalledWith(CLASS_RECORD, { class: 'human' }, { ignorable: true })
+    face.dispose()
+  })
+
+  it('writes through the persistence handle when the Session stays cold', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const persistence = fakePersistence({ statHeader: header, events: [plainEvent(0)] })
+    const cache = fakeCache()
+    const face = createClassProjection(fakeCtx({
+      sessions: { get: () => undefined },
+      sessionPersistence: persistence.face,
+      sessionProjectionCache: cache,
+    }))
+
+    face.syncById('session-cold', 'bot-worker')
+    await vi.advanceTimersByTimeAsync(10_000)
+
+    expect(persistence.face.open).toHaveBeenCalledWith('session-cold', 'write')
+    expect(persistence.handle.append).toHaveBeenCalledTimes(1)
+    expect(cache.coldSnapshot).toHaveBeenCalled()
+    // A cold re-check that lands is quiet — only failures are loud.
+    expect(warn).not.toHaveBeenCalled()
+    face.dispose()
+  })
+
+  it('warns with the id and reason when a backfill write rejects', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const persistence = fakePersistence({ statHeader: header, events: [plainEvent(0)] })
+    persistence.face.open = vi.fn(async () => { throw new Error('owned handle') })
+    const cache = fakeCache()
+    const face = createClassProjection(fakeCtx({ sessionPersistence: persistence.face, sessionProjectionCache: cache }))
+
+    await face.backfill({ 'session-1': 'human' })
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[session-class] backfill failed session=session-1 class=human'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Error: owned handle'))
+    face.dispose()
+  })
+
+  it('dispose clears pending re-checks so nothing fires after teardown', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { session, append } = fakeSession('session-d', () => {
+      throw new Error('nope')
+    })
+    const face = createClassProjection(fakeCtx({}, { register: vi.fn(() => () => {}), stateOf: vi.fn(() => null) }))
+    await face.mount()
+
+    face.syncLive(session, 'human')
+    expect(append).toHaveBeenCalledTimes(1)
+    face.dispose()
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(append).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 })

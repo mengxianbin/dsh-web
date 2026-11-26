@@ -20,12 +20,22 @@
  * checkpoint refresh is mandatory: a new projection key never cues the
  * controller's cold repair (`staleCheckpointKeys` skips absent rows), so a
  * log-only backfill would leave every pre-existing Session blank forever.
+ *
+ * The live writer deliberately calls the Session's own public `append`
+ * instead of the `appendPluginRecord` helper (sessionclass-retry-1126): the
+ * helper's commit closure brand-checks against whichever copy of
+ * `@deepseek-ai/dsh-session` THIS package resolved, and a dual-copy install
+ * (plugin symlinked into a profile whose host runs another copy) rejects
+ * every Host instance with `TypeError: Receiver must be an instance of class
+ * Session` — the silent loss this unit's warns now surface. A write that
+ * still fails, or a class that settles while its Session is not yet in the
+ * store, arms a bounded delayed re-check (two attempts, 10s then 60s, then a
+ * loud give-up) instead of waiting for the next restart.
  * @module dsh-session-dispatch/host/class-projection
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import {
-  appendPluginRecord,
   pluginRecordOf,
   SessionSeq,
   type Session,
@@ -74,6 +84,67 @@ const recordSchema = z.object({ class: triclassSchema }).strict()
 
 /** Fold state = the latest class, or `null` before the first record. */
 const stateSchema = triclassSchema.nullable()
+
+/**
+ * The bounded delayed re-check schedule (sessionclass-retry-1126): one
+ * attempt at 10s, a second at 60s, then a loud give-up — the caps the task
+ * book requires so a permanently failing Session can never spin.
+ */
+const RETRY_DELAYS_MS = [10_000, 60_000] as const
+
+/** One Session's pending re-check: the class to (re)apply, attempts spent, the armed timer. */
+interface RetryEntry {
+  sessionClass: SessionClass
+  attempts: number
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
+/**
+ * The Host's public `append` behind one structural cast: the installed rc.3
+ * type view keys `append` on `SessionEventMap` with no `LogIntent` opts slot
+ * for a plugin record (keyed by `PluginRecordMap`), while the Host runtime
+ * accepts `{ ignorable: true }` and stamps the marker the fold reads back.
+ * The method dispatches on the instance's own prototype — the cross-copy
+ * seam that `appendPluginRecord`'s brand-checking closure is not.
+ */
+interface CrossCopyAppendable {
+  append(
+    type: string,
+    data: unknown,
+    opts?: { readonly ignorable: true },
+  ): { readonly ignorable?: true } | undefined
+}
+
+/**
+ * Append one class record through the Host's own `append` (the cross-copy
+ * write): dispatch lands on the instance's prototype, so the Host class's
+ * private brand always matches regardless of which `@deepseek-ai/dsh-session`
+ * copy THIS package resolved.
+ * @param session - the live Host Session to append onto.
+ * @param sessionClass - the triclass to record.
+ * @returns the committed envelope; throws when the Host did not stamp
+ *   `ignorable` — a pre-LogIntent copy would land a record the fold can
+ *   never read, and this unit refuses to swallow that silently.
+ */
+function appendClassViaHost(session: Session, sessionClass: SessionClass): { readonly ignorable?: true } | undefined {
+  const event = (session as unknown as CrossCopyAppendable).append(CLASS_RECORD, { class: sessionClass }, { ignorable: true })
+  if (event?.ignorable !== true) {
+    throw new Error('host append did not stamp the ignorable marker (pre-LogIntent host copy?)')
+  }
+  return event
+}
+
+/** One error's message for a warn line (mirrors the route layer's truncation). */
+function errorDetail(error: unknown): string {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  return text.slice(0, 300)
+}
+
+/** A retry timer must never hold a process open (host shutdown, test runners). */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const unref = (timer as { unref?: () => void }).unref
+  if (typeof unref === 'function') unref.call(timer)
+}
 
 /**
  * The definition type with `wire` required: `register`'s client-visible
@@ -205,13 +276,21 @@ async function backfillCold(persistence: PersistenceFace, cache: ProjectionCache
 export interface ClassProjection {
   /** Arm the registration fiber; resolves once the fold is mounted (or the mount failed). */
   mount(): Promise<void>
-  /** Append the class onto a live Session whose folded state disagrees. */
+  /**
+   * Append the class onto a live Session whose folded state disagrees.
+   * A rejection warns with the session id, class and reason, then arms the
+   * bounded delayed re-check (10s, 60s, then a loud give-up).
+   */
   syncLive(session: Session, sessionClass: SessionClass): void
-  /** Resolve a ledger id in the store and sync it; a cold Session waits for the backfill pass. */
+  /**
+   * Resolve a ledger id in the store and sync it; a Session the store does
+   * not hold yet arms the same bounded re-check instead of waiting for the
+   * next restart's boot backfill.
+   */
   syncById(sessionId: string, sessionClass: SessionClass): void
   /** Mirror every recorded class into its Session log, refreshing cold checkpoints. */
   backfill(classes: Readonly<Record<string, SessionClass>>): Promise<void>
-  /** Release the injection fiber and the registration (idempotent). */
+  /** Release the injection fiber, pending re-checks and the registration (idempotent). */
   dispose(): void
 }
 
@@ -231,6 +310,16 @@ export function createClassProjection(ctx: Context): ClassProjection {
   const mounted = new Promise<void>((resolve) => {
     resolveMounted = resolve
   })
+  /** Pending bounded re-checks keyed by canonical Session id. */
+  const retries = new Map<string, RetryEntry>()
+  /** Set by `dispose`: no new re-check arms and running ones stop at their next checkpoint. */
+  let disposed = false
+  /**
+   * Set when the boot backfill pass has completed: a cold settle after it
+   * (the sessionclass-retry-1126 case-B signature — the settle landed after
+   * the pass's snapshot) warns loudly instead of arming silently.
+   */
+  let backfillDone = false
 
   /** Disarm the registration; idempotent, shared by the inject cleanup and dispose. */
   const teardown = (): void => {
@@ -261,7 +350,46 @@ export function createClassProjection(ctx: Context): ClassProjection {
       : undefined
   }
 
-  const syncLive = (session: Session, sessionClass: SessionClass): void => {
+  /** Retire one Session's pending re-check — its class now stands. */
+  const dropRetry = (id: string, entry: RetryEntry): void => {
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer)
+      entry.timer = undefined
+    }
+    if (retries.get(id) === entry) retries.delete(id)
+  }
+
+  /**
+   * Arm the bounded delayed re-check for one Session: two attempts, 10s then
+   * 60s, then a loud give-up (sessionclass-retry-1126). The latest ledger
+   * class always wins over an older pending one.
+   * @param sessionId - any spelling; the entry is keyed canonically.
+   * @param sessionClass - the class that failed to land (or has not landed yet).
+   * @returns a phrase for the caller's warn line — what happens next.
+   */
+  const scheduleRetry = (sessionId: string, sessionClass: SessionClass): string => {
+    if (disposed) return 're-check skipped (projection disposed)'
+    const id = canonicalSessionId(sessionId)
+    const entry = retries.get(id) ?? { sessionClass, attempts: 0, timer: undefined }
+    entry.sessionClass = sessionClass
+    retries.set(id, entry)
+    if (entry.timer !== undefined) return `re-check already armed (attempt ${entry.attempts}/${RETRY_DELAYS_MS.length})`
+    if (entry.attempts >= RETRY_DELAYS_MS.length) {
+      retries.delete(id)
+      return `re-check budget spent after ${entry.attempts} attempts — the next boot's backfill owns it`
+    }
+    const delay = RETRY_DELAYS_MS[entry.attempts]
+    entry.attempts += 1
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined
+      void runRetry(id)
+    }, delay)
+    unrefTimer(entry.timer)
+    return `re-check armed (attempt ${entry.attempts}/${RETRY_DELAYS_MS.length} in ${delay}ms)`
+  }
+
+  /** Dedupe against the folded state, then the cross-copy append; throws on rejection. */
+  const applyLive = (session: Session, sessionClass: SessionClass): void => {
     if (registry !== undefined) {
       try {
         if (registry.stateOf(session, 'sessionClass') === sessionClass) return
@@ -270,12 +398,78 @@ export function createClassProjection(ctx: Context): ClassProjection {
         // re-reads the log when the Host next prepares the Session.
       }
     }
+    appendClassViaHost(session, sessionClass)
+  }
+
+  /**
+   * Apply one class onto a live Session and reconcile the pending re-check.
+   * A ledger write supersedes any pending re-check outright; the boot pass's
+   * snapshot may predate a newer failed settle, so a `pass` write only
+   * supersedes a re-check for the same class.
+   * @param session - the live Session to append onto.
+   * @param sessionClass - the class the caller holds now.
+   * @param source - `ledger` (authoritative settle) or `pass` (boot snapshot).
+   */
+  const applyToLive = (session: Session, sessionClass: SessionClass, source: 'ledger' | 'pass'): void => {
+    const id = canonicalSessionId(String(session.id))
     try {
-      appendPluginRecord(session, CLASS_RECORD, { class: sessionClass })
-    } catch {
-      // Store-owned append preconditions (unentered row, in-flight publication)
-      // reject without changing the log; the next ledger write retries.
+      applyLive(session, sessionClass)
+      const pending = retries.get(id)
+      if (pending !== undefined && (source === 'ledger' || pending.sessionClass === sessionClass)) {
+        dropRetry(id, pending)
+      }
+    } catch (error) {
+      const outcome = scheduleRetry(id, sessionClass)
+      console.warn(`[session-class] live sync failed session=${id} class=${sessionClass} reason=${errorDetail(error)} — ${outcome}`)
     }
+  }
+
+  /**
+   * One delayed re-check: resolve the Session again (it may have entered the
+   * store since the settle), sync it live, or — still cold — write through
+   * the persistence handle exactly like the boot pass. Success retires the
+   * entry; failure warns and arms the next slot, or gives up loudly once the
+   * two-attempt budget is spent.
+   * @param id - canonical Session id the entry is keyed by.
+   */
+  async function runRetry(id: string): Promise<void> {
+    const entry = retries.get(id)
+    if (entry === undefined || disposed) return
+    entry.timer = undefined
+    const applied = entry.sessionClass
+    const attempt = entry.attempts
+    let failure: string | undefined
+    try {
+      const session = store()?.get?.(id)
+      if (session !== undefined) {
+        applyLive(session, applied)
+      } else {
+        const persistence = probe('sessionPersistence') as PersistenceFace | undefined
+        const cache = probe('sessionProjectionCache') as ProjectionCacheFace | undefined
+        if (persistence === undefined || cache === undefined) {
+          // No write surface: this profile serves no cold writes — quiet stop,
+          // the same stance the boot pass takes for the same condition.
+          dropRetry(id, entry)
+          return
+        }
+        await backfillCold(persistence, cache, id, applied)
+      }
+    } catch (error) {
+      failure = errorDetail(error)
+    }
+    if (disposed || retries.get(id) !== entry) return
+    if (failure === undefined) {
+      if (entry.sessionClass === applied) dropRetry(id, entry)
+      // A newer class failed while this attempt ran: keep the re-check armed for it.
+      else if (entry.timer === undefined) scheduleRetry(id, entry.sessionClass)
+      return
+    }
+    const outcome = scheduleRetry(id, entry.sessionClass)
+    console.warn(`[session-class] re-check failed session=${id} class=${entry.sessionClass} attempt=${attempt}/${RETRY_DELAYS_MS.length} reason=${failure} — ${outcome}`)
+  }
+
+  const syncLive = (session: Session, sessionClass: SessionClass): void => {
+    applyToLive(session, sessionClass, 'ledger')
   }
 
   return {
@@ -308,11 +502,21 @@ export function createClassProjection(ctx: Context): ClassProjection {
     syncLive,
 
     syncById(sessionId, sessionClass): void {
+      const id = canonicalSessionId(sessionId)
       const face = store()
-      if (face === undefined) return
-      const session = face.get?.(sessionId) ?? face.get?.(canonicalSessionId(sessionId))
-      // Cold: the boot backfill pass owns the log write.
-      if (session !== undefined) syncLive(session, sessionClass)
+      const session = face?.get?.(sessionId) ?? face?.get?.(id)
+      if (session !== undefined) {
+        syncLive(session, sessionClass)
+        return
+      }
+      // Cold: the boot pass covers every class it snapshots; one that settles
+      // after the pass (the sessionclass-retry-1126 case-B signature) would
+      // otherwise wait for the next restart. The re-check re-resolves the
+      // store, then falls back to the same persistence write the pass uses.
+      const outcome = scheduleRetry(id, sessionClass)
+      if (backfillDone) {
+        console.warn(`[session-class] session not in the store after the boot backfill session=${id} class=${sessionClass} — ${outcome}`)
+      }
     },
 
     async backfill(classes): Promise<void> {
@@ -320,27 +524,41 @@ export function createClassProjection(ctx: Context): ClassProjection {
       const cache = probe('sessionProjectionCache') as ProjectionCacheFace | undefined
       if (persistence === undefined || cache === undefined) return
       const face = store()
-      for (const [id, value] of Object.entries(classes)) {
-        const sessionClass = toClass(value)
-        if (sessionClass === undefined) continue
-        try {
-          const session = face?.get?.(id) ?? face?.get?.(canonicalSessionId(id))
-          if (session !== undefined) {
-            syncLive(session, sessionClass)
-            continue
+      try {
+        for (const [id, value] of Object.entries(classes)) {
+          const sessionClass = toClass(value)
+          if (sessionClass === undefined) continue
+          try {
+            const session = face?.get?.(id) ?? face?.get?.(canonicalSessionId(id))
+            if (session !== undefined) {
+              applyToLive(session, sessionClass, 'pass')
+              continue
+            }
+            // One bad Session never stops the pass (fail-open, per-session).
+            // oxlint-disable-next-line eslint/no-await-in-loop -- the sequential pass IS the design: one Session's read+refold at a time, like the controller's repair pump.
+            await backfillCold(persistence, cache, id, sessionClass)
+          } catch (error) {
+            // Missing directory, owned handle, unreadable log: never silent —
+            // warn with the id + class + reason and arm the bounded re-check.
+            const outcome = scheduleRetry(id, sessionClass)
+            console.warn(`[session-class] backfill failed session=${id} class=${sessionClass} reason=${errorDetail(error)} — ${outcome}`)
           }
-          // One bad Session never stops the pass (fail-open, per-session).
-          // oxlint-disable-next-line eslint/no-await-in-loop -- the sequential pass IS the design: one Session's read+refold at a time, like the controller's repair pump.
-          await backfillCold(persistence, cache, id, sessionClass)
-        } catch {
-          // Missing directory, owned handle, unreadable log: skip this Session.
+          // oxlint-disable-next-line eslint/no-await-in-loop -- the pacing yield is the point: work one Session, then hand the loop back.
+          await new Promise<void>((resolve) => { setImmediate(resolve) })
         }
-        // oxlint-disable-next-line eslint/no-await-in-loop -- the pacing yield is the point: work one Session, then hand the loop back.
-        await new Promise<void>((resolve) => { setImmediate(resolve) })
+      } finally {
+        // The pass ran: a cold settle from here on is the post-pass signature
+        // and warns instead of arming silently.
+        backfillDone = true
       }
     },
 
     dispose(): void {
+      disposed = true
+      for (const entry of retries.values()) {
+        if (entry.timer !== undefined) clearTimeout(entry.timer)
+      }
+      retries.clear()
       teardown()
       const dispose = disposeInjection
       disposeInjection = undefined
