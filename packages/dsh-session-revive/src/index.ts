@@ -51,6 +51,7 @@ import { ReviveV2StateWriter } from './v2-state.ts'
 import { RevivePendingWriter, readPendingEntries } from './pending-state.ts'
 import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
 import { runTranscriptFirstGate } from './v2-transcript.ts'
+import { makeFrozenSetReader } from './fsm-frozen.ts'
 
 export const name = 'dsh-session-revive'
 export const inject = ['webServer', 'sessionController']
@@ -348,6 +349,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
     const machine = new ReviveV2Machine({
       gate: firstGate,
       resolveBaseURL: makeResolveBaseURL(ctx),
+      // §6.3 唤醒对账 (freeze-reclaim-design-1127 Phase 1): frozen/locked
+      // sessions are never auto-woken — revive, boot sweep and every wake
+      // release share this one gate (fail-open when the FSM file is unreadable).
+      frozenSet: makeFrozenSetReader(),
     })
     const v2Writer = new ReviveV2StateWriter()
     const chainPorts = createLoopbackChainPorts({ apiBase: `http://127.0.0.1:${ctx.webServer.port}` })
