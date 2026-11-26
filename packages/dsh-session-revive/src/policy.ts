@@ -239,6 +239,23 @@ export class RevivalPolicy {
     return classifyFailure(code, this.conditions)
   }
 
+  /**
+   * Whether a refined failure code would enter the revival flow right now —
+   * the read-only twin of {@link onError}'s classification (design §4.2 rule
+   * two, revive-restart-gap-1126): the learner's sticky eviction vetoes
+   * first, then the same admission-over-ruled-lists `classOf` answers, so the
+   * boot sweep's closed-error confirm and the live error path can never
+   * classify a code differently. A query, not a decision: it never feeds the
+   * trail, never counts quota, never touches state.
+   * @param code - the REFINED failure code (callers apply `refineFailureCode`
+   *   first, exactly as the turn/end error path does before `onError`).
+   * @returns true when the code is revive-class and not evicted.
+   */
+  revivable(code: string): boolean {
+    if (this.selfLearn.isEvicted(code)) return false
+    return this.classOf(code) === 'revive'
+  }
+
   /** Ledger lines for admission/eviction verdicts (拍板⑭ 决策台账,被动可查零推送). */
   private learnRecords(events: SelfLearnEvent[]): PolicyRecord[] {
     const records: PolicyRecord[] = []

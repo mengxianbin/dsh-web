@@ -33,6 +33,20 @@
  * checkpoint reading "closed" and that sub-window orphan is not screened; a
  * graceful restart flushes at session disposal and is caught.
  *
+ * Design §4.2 rule two (revive-restart-gap-1126) widens the SCREEN, not the
+ * structure: a row whose checkpoint proves the last turn closed but whose
+ * `lastTurnOutcome` projection reads `kind: 'error'` also enters the
+ * candidate face — an error-closed session's event-driven detect never
+ * replays after a restart, so without this the closed half of a revive
+ * decision slept until a manual continue (the 2026-11-26 incident). The raw
+ * confirm still owns the verdict: the tail's last `turn/end` must be an
+ * `error` AND the failure must still classify as revivable (the policy's one
+ * effective classification, bound as `reviveClass`) before `decide` may run.
+ * A closed non-error turn (completed/aborted/blocked/interrupted), a missing
+ * outcome projection or an unbound classifier stays `confirmedClosed` —
+ * 宁漏不误复活. The expansion rides the existing zero-quota `decide` channel;
+ * no parameter moves (参数零改).
+ *
  * Every failure lands as a loud `boot-sweep-failed` line and stops that
  * path (fail closed — an unconfirmed session is never nudged).
  */
@@ -114,16 +128,27 @@ interface TurnBoundaryValue {
  * Classify one list row for the sweep.
  * @param row - summary row from `sessionController.list`.
  * @returns `live` when a live Agent owns the row (running or attached — not
- *   an orphan), `closed` when the harness checkpoint proves the last turn
- *   ended, `candidate` when the checkpoint says a turn is open, `unknown`
+ *   an orphan), `candidate` when the checkpoint says a turn is open OR its
+ *   `lastTurnOutcome` projection reads `error` (design §4.2 rule two: an
+ *   error-closed session re-enters the scan face; the raw confirm still owns
+ *   the verdict), `closed` when the checkpoint proves a non-error turn ended
+ *   or no outcome projection exists (宁漏: no signal, no sweep), `unknown`
  *   when no usable checkpoint exists (the raw read decides).
  */
 export function classifySweepRow(row: SweepRow): SweepClass {
   if (row.running || row.agentAvailable) return 'live'
-  const boundary = row.projections?.values.turnBoundary as TurnBoundaryValue | undefined
+  const values = row.projections?.values
+  const boundary = values?.turnBoundary as TurnBoundaryValue | undefined
   const open = boundary?.openTurnStartSeq
   if (typeof open === 'number') return 'candidate'
-  if (open === null) return 'closed'
+  if (open === null) {
+    // Rule two screen: only an `error` outcome re-opens a closed row; every
+    // other closer (completed/aborted/blocked/interrupted/max-tokens) and a
+    // missing projection keep it closed.
+    const outcome = values?.lastTurnOutcome as { kind?: string } | null | undefined
+    if (outcome?.kind === 'error') return 'candidate'
+    return 'closed'
+  }
   return 'unknown'
 }
 
@@ -142,6 +167,15 @@ export interface SweepScan {
    * evidence a restart leaves behind.
    */
   route?: { readonly provider: string; readonly model?: string }
+  /**
+   * The tail's failure identity when the log's LAST `turn/end` was an
+   * `error` (design §4.2 rule two): the closed-error confirm reads the raw
+   * code/message off it and asks the policy's classification. Absent for any
+   * other closer (completed/aborted/blocked/interrupted/max-tokens/forked)
+   * or when no turn ever ended — a non-error tail never re-enters the decide
+   * face, whatever the checkpoint screen projected.
+   */
+  lastError?: { readonly code: string; readonly message: string }
 }
 
 /**
@@ -150,18 +184,30 @@ export interface SweepScan {
  *   them (no synthetic closers — that is what distinguishes an orphan from a
  *   session already resumed after an interruption).
  * @returns whether the log ends inside a turn, the last observed context
- *   size for the 1M watermark gate, and the route the log proves (see
- *   {@link SweepScan.route}).
+ *   size for the 1M watermark gate, the route the log proves (see
+ *   {@link SweepScan.route}), and the tail's error identity when the last
+ *   `turn/end` was an `error` (see {@link SweepScan.lastError}).
  */
 export function scanOpenTurn(events: readonly SessionEvent[]): SweepScan {
   let open = false
   let contextTokens: number | undefined
   let pending: { provider: string; model?: string } | undefined
   let lastUsed: { provider: string; model?: string } | undefined
+  let lastError: { code: string; message: string } | undefined
   for (const event of events) {
     if (event.type === 'turn/start') open = true
-    else if (event.type === 'turn/end') open = false
-    else if (event.type === 'assistant/message') {
+    else if (event.type === 'turn/end') {
+      open = false
+      // Structural read (the wire type promises a reason; fixtures may omit
+      // it): only an explicit error closer stamps the tail identity rule
+      // two's closed-error confirm reads — any other closer clears it, so
+      // the LAST turn/end always wins.
+      const reason = (event.data as { reason?: { kind?: string; error?: { code: string; message: string } } }).reason
+      lastError =
+        reason?.kind === 'error' && reason.error !== undefined
+          ? { code: reason.error.code, message: reason.error.message }
+          : undefined
+    } else if (event.type === 'assistant/message') {
       const usage = event.data.usage
       if (usage !== undefined) contextTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0)
     } else if (event.type === 'model/selection') {
@@ -183,6 +229,7 @@ export function scanOpenTurn(events: readonly SessionEvent[]): SweepScan {
     open,
     ...(contextTokens === undefined ? {} : { contextTokens }),
     ...(route === undefined ? {} : { route }),
+    ...(lastError === undefined ? {} : { lastError }),
   }
 }
 
@@ -203,6 +250,16 @@ export interface BootSweepDeps {
    * that an idle session never emits (the 2026-11-18 boot deadlock).
    */
   seedRoute?: (sessionId: string, route: { readonly provider: string; readonly model?: string }) => void
+  /**
+   * Whether a closed tail's failure would enter the revival flow (design
+   * §4.2 rule two): the policy's ONE effective classification — the raw
+   * `refineFailureCode` first, then the ruled/config lists with the
+   * learner's admission/eviction — so the sweep's screen-confirm and the
+   * live error path can never classify a code differently. Optional so
+   * older bindings keep compiling; WITHOUT it a closed-error candidate
+   * fails closed (confirmed-closed, never decided).
+   */
+  reviveClass?: (code: string, message: string) => boolean
   /** Log every record and queue the nudge for revive decisions (the existing applyRecords path). */
   apply: (records: PolicyRecord[]) => void
   /** Sweep-scoped structured evidence line. */
@@ -330,8 +387,18 @@ export async function runBootSweep(deps: BootSweepDeps): Promise<void> {
           continue
         }
         if (!scan.open) {
-          confirmedClosed += 1
-          continue
+          // Design §4.2 rule two: a closed tail re-enters the decide face
+          // only when its last `turn/end` was an `error` the policy still
+          // classifies as revivable (raw log beats the projection screen);
+          // any other closer — and any wall/other-class or evicted code, or
+          // an unbound classifier — stays confirmed-closed (宁漏不误复活).
+          const tail = scan.lastError
+          const revivable =
+            tail !== undefined && deps.reviveClass !== undefined && deps.reviveClass(tail.code, tail.message)
+          if (!revivable) {
+            confirmedClosed += 1
+            continue
+          }
         }
         // The row may have been attached between list and read (a human
         // opening it resumes the turn away); never double-drive a live owner.

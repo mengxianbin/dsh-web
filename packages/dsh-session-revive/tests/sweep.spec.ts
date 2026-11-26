@@ -13,6 +13,8 @@ function ev(type: string, data: Record<string, unknown> = {}): SessionEvent {
 
 const TB_OPEN = { values: { turnBoundary: { openTurnStartSeq: 7 } } }
 const TB_CLOSED = { values: { turnBoundary: { openTurnStartSeq: null } } }
+/** Rule two's screen: a checkpoint-proven closed row whose outcome projection reads `error`. */
+const TB_CLOSED_ERROR = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: { kind: 'error', at: 5 } } }
 
 interface Sinks {
   decided: Array<{ sessionId: string; at: number; contextTokens: number | undefined }>
@@ -328,5 +330,120 @@ describe('boot sweep orchestration', () => {
     expect(failures(sinks)).toHaveLength(1)
     expect(failures(sinks)[0]).toMatchObject({ sessionId: 'bad' })
     expect(summary(sinks)?.detail).toMatchObject({ revived: 1 })
+  })
+})
+
+describe('rule two screen + raw confirm (design §4.2, revive-restart-gap-1126)', () => {
+  it('re-opens a closed row only when the outcome projection reads error', () => {
+    expect(classifySweepRow(row('E', { projections: TB_CLOSED_ERROR }))).toBe('candidate')
+    const completed = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: { kind: 'completed', at: 5 } } }
+    const blocked = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: { kind: 'blocked', at: 5 } } }
+    const aborted = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: { kind: 'aborted', at: 5 } } }
+    const interrupted = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: { kind: 'interrupted', at: 5 } } }
+    const noOutcome = { values: { turnBoundary: { openTurnStartSeq: null }, lastTurnOutcome: null } }
+    expect(classifySweepRow(row('D', { projections: completed }))).toBe('closed')
+    expect(classifySweepRow(row('B', { projections: blocked }))).toBe('closed')
+    expect(classifySweepRow(row('A', { projections: aborted }))).toBe('closed')
+    expect(classifySweepRow(row('I', { projections: interrupted }))).toBe('closed')
+    expect(classifySweepRow(row('N', { projections: noOutcome }))).toBe('closed')
+    // A live owner always wins over the outcome projection.
+    expect(classifySweepRow(row('L', { running: true, projections: TB_CLOSED_ERROR }))).toBe('live')
+  })
+
+  it('stamps the tail identity only for an error closer — the LAST turn/end wins', () => {
+    expect(
+      scanOpenTurn([ev('turn/end', { reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } } })])
+        .lastError,
+    ).toEqual({ code: 'TRANSPORT', message: 'fetch failed' })
+    // A later non-error closer clears the identity: the tail is not an error.
+    expect(
+      scanOpenTurn([
+        ev('turn/end', { reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'x' } } }),
+        ev('turn/start'),
+        ev('turn/end', { reason: { kind: 'interrupted' } }),
+      ]).lastError,
+    ).toBeUndefined()
+    // An error closer after a non-error one stamps it.
+    expect(
+      scanOpenTurn([
+        ev('turn/end', { reason: { kind: 'completed' } }),
+        ev('turn/start'),
+        ev('turn/end', { reason: { kind: 'error', error: { code: 'TIMEOUT', message: 'slow' } } }),
+      ]).lastError,
+    ).toEqual({ code: 'TIMEOUT', message: 'slow' })
+    // No reason at all (fixtures / odd writers): never stamped.
+    expect(scanOpenTurn([ev('turn/start'), ev('turn/end')]).lastError).toBeUndefined()
+  })
+
+  it('decides an error-closed row when the classifier admits it (rule two positive)', async () => {
+    const { deps, sinks } = makeDeps(async () => [row('cerr', { projections: TB_CLOSED_ERROR })], {
+      reviveClass: (code, message) => code === 'TRANSPORT' && message === 'fetch failed',
+    })
+    deps.readEvents = async () => [
+      ev('turn/start'),
+      ev('turn/end', { reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'fetch failed' } } }),
+      ev('request/header', { header: { config: { provider: 'p', model: 'm' } } }),
+    ]
+    await runBootSweep(deps)
+    expect(sinks.decided).toEqual([{ sessionId: 'cerr', at: 1000, contextTokens: undefined }])
+    expect(sinks.applied).toHaveLength(1)
+    expect(summary(sinks)?.detail).toMatchObject({
+      rows: 1,
+      candidates: 1,
+      reads: 1,
+      revived: 1,
+      confirmedClosed: 0,
+    })
+    expect(failures(sinks)).toHaveLength(0)
+  })
+
+  it('keeps the tail confirmed-closed when the classifier says no (wall/evicted class)', async () => {
+    const { deps, sinks } = makeDeps(async () => [row('cerr', { projections: TB_CLOSED_ERROR })], {
+      reviveClass: () => false,
+    })
+    deps.readEvents = async () => [
+      ev('turn/end', { reason: { kind: 'error', error: { code: 'BAD-REQUEST', message: 'wall class' } } }),
+    ]
+    await runBootSweep(deps)
+    expect(sinks.decided).toHaveLength(0)
+    expect(summary(sinks)?.detail).toMatchObject({ reads: 1, revived: 0, confirmedClosed: 1 })
+  })
+
+  it('fails closed when no classifier is bound at all (older binding)', async () => {
+    const { deps, sinks } = makeDeps(async () => [row('cerr', { projections: TB_CLOSED_ERROR })])
+    deps.readEvents = async () => [
+      ev('turn/end', { reason: { kind: 'error', error: { code: 'TRANSPORT', message: 'x' } } }),
+    ]
+    await runBootSweep(deps)
+    expect(sinks.decided).toHaveLength(0)
+    expect(summary(sinks)?.detail).toMatchObject({ reads: 1, confirmedClosed: 1 })
+  })
+
+  it('the raw log beats the projection screen: a non-error tail never decides', async () => {
+    // The projection over-calls `error` (write-behind can lag either way);
+    // the raw tail is a completed closer, so nothing may be decided.
+    const { deps, sinks } = makeDeps(async () => [row('cerr', { projections: TB_CLOSED_ERROR })], {
+      reviveClass: () => true,
+    })
+    deps.readEvents = async () => [ev('turn/start'), ev('turn/end', { reason: { kind: 'completed' } })]
+    await runBootSweep(deps)
+    expect(sinks.decided).toHaveLength(0)
+    expect(summary(sinks)?.detail).toMatchObject({ reads: 1, confirmedClosed: 1 })
+  })
+
+  it('宁漏: a screen-closed row is never read, whatever its raw tail says', async () => {
+    // The projection says the turn completed, so the row never enters the
+    // candidate face — no IO, no decide (the documented write-behind residual).
+    const { deps, sinks } = makeDeps(async () => [row('done', { projections: TB_CLOSED })], {
+      reviveClass: () => true,
+    })
+    deps.readEvents = async (sessionId) => {
+      sinks.reads.push(sessionId)
+      return []
+    }
+    await runBootSweep(deps)
+    expect(sinks.reads).toEqual([])
+    expect(sinks.decided).toHaveLength(0)
+    expect(summary(sinks)?.detail).toMatchObject({ rows: 1, closed: 1, candidates: 0, reads: 0, revived: 0 })
   })
 })

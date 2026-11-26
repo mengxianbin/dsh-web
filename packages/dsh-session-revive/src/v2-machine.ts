@@ -78,6 +78,26 @@ export interface ReviveV2StateExport {
   sessions: Record<string, ReviveV2SessionExport>
 }
 
+/**
+ * One pending decision as the pending ledger persists it (design §4.2 rule
+ * one, revive-restart-gap-1126): the complete `releaseDue` input surface —
+ * planned time, channel, route evidence, cooldown deadline. Counters, stops,
+ * attempt and relay state are deliberately absent (restart-cleared by ruling).
+ */
+export interface RevivePendingEntry {
+  plannedAt: number
+  code?: string
+  channel: V2AttemptChannel
+  route?: { provider: string; model?: string }
+  cooldownUntil: number
+}
+
+/** The pending ledger document written to `<dsh-home>/session-revive-pending.json`. */
+export interface RevivePendingExport {
+  at: number
+  sessions: Record<string, RevivePendingEntry>
+}
+
 // ── Records the machine emits (the shell logs and executes them) ───────────
 
 /** Why a gate verdict refused or deferred an attempt. */
@@ -253,6 +273,44 @@ export class ReviveV2Machine {
   seedRoute(sessionId: string, route: { provider: string; model?: string }): void {
     const state = this.stateOf(sessionId)
     if (state.route === undefined) state.route = route
+  }
+
+  /**
+   * Idempotent replay of the persisted pending set (design §4.2 rule one,
+   * revive-restart-gap-1126): re-enter each deferred decision exactly where
+   * the dead process left it — planned time, channel, route evidence,
+   * cooldown deadline — so the release chain (probe → wake → attempt) resumes
+   * with no new decision, no new quota stamp and no new stagger (拍板⑪
+   * restart-zero-quota: this executes the decision the previous process
+   * already made). The replay is idempotent: a session that already holds a
+   * pending decision (or an in-flight attempt) is skipped, never clobbered,
+   * so replaying the same ledger twice in a row changes nothing. The shell
+   * gates this behind the fail-closed first gate — while the gate is red no
+   * writer exists either, so an un-replayed ledger is never clobbered.
+   * @param entries - the validated entries from the single boot read.
+   * @returns how many sessions received a pending decision.
+   */
+  restorePending(entries: Readonly<Record<string, RevivePendingEntry>>): number {
+    if (!this.gate.ok) return 0
+    let restored = 0
+    for (const [sessionId, entry] of Object.entries(entries)) {
+      const state = this.stateOf(sessionId)
+      // Idempotent + live-wins: the first replay's pending guards the second;
+      // an attempt already in flight consumed the revival — no second queue.
+      if (state.pending !== undefined || state.attempt !== undefined) continue
+      state.pending = {
+        plannedAt: entry.plannedAt,
+        ...(entry.code === undefined ? {} : { code: entry.code }),
+        channel: entry.channel,
+      }
+      // pending.channel ≡ nextChannel for the pending's lifetime (the attempt
+      // record reads nextChannel), so the replay restores both together.
+      state.nextChannel = entry.channel
+      if (entry.route !== undefined && state.route === undefined) state.route = { ...entry.route }
+      state.cooldownUntil = Math.max(state.cooldownUntil, entry.cooldownUntil)
+      restored += 1
+    }
+    return restored
   }
 
   /**
@@ -590,6 +648,31 @@ export class ReviveV2Machine {
         episodeSpentTokens: state.episodeSpentTokens,
         relaySessionId: state.relaySessionId,
         lastSuccessAt: state.lastSuccessAt,
+      }
+    }
+    return { at: this.now(), sessions }
+  }
+
+  /**
+   * The pending-decision ledger (design §4.2 rule one): only sessions holding
+   * a deferred decision appear, each with the complete `releaseDue` input set
+   * — planned time, channel, route evidence (the session's route, else the
+   * durable fallback the release itself would use), and the cooldown deadline.
+   * The change-only writer persists this on every flip; a restart replays it
+   * through {@link restorePending}.
+   */
+  pendingSnapshot(): RevivePendingExport {
+    const sessions: Record<string, RevivePendingEntry> = {}
+    for (const [sessionId, state] of this.sessions) {
+      const pending = state.pending
+      if (pending === undefined) continue
+      const route = state.route ?? this.currentRoute
+      sessions[sessionId] = {
+        plannedAt: pending.plannedAt,
+        ...(pending.code === undefined ? {} : { code: pending.code }),
+        channel: pending.channel,
+        ...(route === undefined ? {} : { route: { ...route } }),
+        cooldownUntil: state.cooldownUntil,
       }
     }
     return { at: this.now(), sessions }

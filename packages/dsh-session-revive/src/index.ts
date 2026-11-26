@@ -48,6 +48,7 @@ import { attributeProbeFailure, probeRoute, type ProbeResult } from './v2-probe.
 import { ReviveV2Machine, type V2ArchiveReason, type V2Record } from './v2-machine.ts'
 import { SETTINGS_READ_TTL_MS, makeTtlReader, planNudgeDelay, planProbeTimer, wakeDelayFor } from './v2-timers.ts'
 import { ReviveV2StateWriter } from './v2-state.ts'
+import { RevivePendingWriter, readPendingEntries } from './pending-state.ts'
 import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
 import { runTranscriptFirstGate } from './v2-transcript.ts'
 
@@ -409,6 +410,44 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       )
     }
 
+    // ── Pending-decision replay (design §4.2 rule one, revive-restart-gap-1126) ──
+    // A deferred decision must survive a UI restart: read the ledger ONCE at
+    // activation (single-read gate — the writer is seeded from this very read,
+    // so a replayed ledger re-stringifies byte-identically and costs zero
+    // writes) and replay it through the machine's idempotent restore — no new
+    // decision count, no quota stamp (拍板⑪ restart-zero-quota: this executes
+    // the decision the dead process already made). Fail-closed both ways: an
+    // unreadable ledger skips ALL replay AND builds no writer (宁漏不误复活 —
+    // the corrupt file is preserved for the next boot instead of being
+    // clobbered by an empty one); a red first gate replays nothing either,
+    // because every v2 entry point fails closed while it is red and the
+    // untouched ledger still holds the entries for a healthy boot.
+    const pendingRead = readPendingEntries()
+    const pendingWriter = !pendingRead.ok
+      ? undefined
+      : !firstGate.ok
+        ? undefined
+        : new RevivePendingWriter({ seed: pendingRead.entries })
+    if (!pendingRead.ok) {
+      log({
+        kind: 'log',
+        at: Date.now(),
+        event: 'pending-replay-skipped',
+        detail: { reason: 'read-failed', error: pendingRead.error.slice(0, 300) },
+      })
+    } else if (!firstGate.ok) {
+      log({ kind: 'log', at: Date.now(), event: 'pending-replay-skipped', detail: { reason: 'first-gate' } })
+    } else {
+      const restored = machine.restorePending(pendingRead.entries)
+      if (restored > 0) {
+        log({ kind: 'log', at: Date.now(), event: 'pending-replay', detail: { restored } })
+        // The restored decisions have deadlines and unprobed routes: arm both
+        // loops now, the same way a fresh defer would.
+        armV2Wake()
+        armProbeLoop()
+      }
+    }
+
     // One probe round over every route with a parked session, through the
     // GLOBAL fetch slot (same egress as real requests). A connection-layer
     // failure is attributed through L1 - attribution only, never permission.
@@ -478,6 +517,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
         }
       }
       v2Writer.sync(machine.stateSnapshot())
+      // Design §4.2 rule one: the pending ledger rides every record batch —
+      // a decision flip (defer/release/dispose-clear) lands change-only.
+      pendingWriter?.sync(machine.pendingSnapshot())
       armV2Wake()
       armProbeLoop()
     }
@@ -773,6 +815,9 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       // v2: the session is gone - drop its in-flight attempt and deferred
       // decision; the account (counters, export row) survives disposal.
       machine.onDisposed(String(session.id))
+      // The disposal cleared a pending this path never routes through
+      // applyV2 for: drop its ledger row change-only too.
+      pendingWriter?.sync(machine.pendingSnapshot())
     })
     /**
      * Durability stop-cause tap (design §7.1): when goal-round-driver's
@@ -828,6 +873,10 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       },
       isAttached: (sessionId) => (ctx.get('agents') as { get(id: string): unknown } | undefined)?.get(sessionId) !== undefined,
       seedRoute: (sessionId, route) => machine.seedRoute(sessionId, route),
+      // Design §4.2 rule two: the closed-error confirm classifies with the
+      // SAME effective flow as the live turn/end path — refine first (拍板⑬),
+      // then the policy's admission/eviction + ruled lists.
+      reviveClass: (code, message) => policy.revivable(refineFailureCode(code, message)),
       decide: (sessionId, at, contextTokens) => {
         // Fold the orphan's last observed usage first so the 1M watermark
         // gate actually bounds this revival (an unknown watermark adds no
