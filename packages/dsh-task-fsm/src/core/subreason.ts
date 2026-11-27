@@ -17,6 +17,7 @@ import { EVENT_LABELS } from './table.ts'
 function historyEventLabel(event: HistoryEntry['event']): string {
   if (event === 'rebind-in') return '换绑入'
   if (event === 'rebind-out') return '换绑出'
+  if (event === 'session-attach') return '会话挂载'
   return EVENT_LABELS[event]
 }
 

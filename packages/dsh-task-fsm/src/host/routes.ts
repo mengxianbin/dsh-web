@@ -272,8 +272,10 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
    *
    * 幂等 attach：把派发建出的会话 id 补写到记录上——钩子烧成 active ∧ session.id 空的
    * 受害两单与存量空洞的唯一合法写入通道（E1 表格拒 active，挂载不代状态转移）。
-   * ⛔ 不写 history（结构字段 ≠ 状态转移，HistoryEventSchema 白名单会 fail-closed 拒整账，
-   * 同 parent 路由口径）；只写 session.id，mode/reason 保留（节点缺失才按 E1 正形播种）
+   * 写 history（event-axis-attach-1127 翻转，判据源 = 用户「扩白名单 ok」2026-11-27）：
+   * 实际改写 session.id 时追加白名单内伪事件 `session-attach`（history-face-only，
+   * from = to = 当前态，同 rebind 伪事件形态）；同 id 幂等二发零 push；⛔ 拒路径仍零写。
+   * 只写 session.id，mode/reason 保留（节点缺失才按 E1 正形播种）
    * ——D 轴归 E1/E2/wake 语义面。
    * 拒 = 零写（update 外预检 + update 内复校，rebind Phase A/C 同型）：
    * 终态（终态完整性，协调方回函 2026-11-27 裁定）/ backlog（走 E1）/ 异 id 冲突
@@ -305,20 +307,29 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       const verdict = attachVerdictOf(pre.state, typeof pre.session?.id === 'string' ? pre.session.id : '', sessionId)
       if (verdict !== undefined) { refuse(verdict.status, verdict.kind, verdict.detail); return }
       try {
-        // Phase C — 单事务复校（TOCTOU）+ 写入；只动 session.id。
+        // Phase C — 单事务复校（TOCTOU）+ 写入；只动 session.id（+ 留痕伪事件）。
         const outcome = store.update<{ status: 200; record: TaskRecord } | { status: 409; kind: string; detail: string }>((file) => {
           const record = file.tasks[taskRef]
           if (record === undefined) return { status: 409 as const, kind: 'conflict', detail: 'record vanished (TOCTOU)' }
           const bound = typeof record.session?.id === 'string' ? record.session.id : ''
           const again = attachVerdictOf(record.state, bound, sessionId)
           if (again !== undefined) return { status: 409 as const, kind: again.kind, detail: again.detail }
-          record.session = bound === sessionId && record.session !== undefined
-            ? record.session
-            : {
-                id: sessionId,
-                mode: record.session?.mode ?? 'frozen',
-                reason: record.session?.reason ?? '排队位：等待开工核验',
-              }
+          // 同 id 幂等 = 原样返回零写（含零 history push，幂等二发不重复写）。
+          if (!(bound === sessionId && record.session !== undefined)) {
+            record.session = {
+              id: sessionId,
+              mode: record.session?.mode ?? 'frozen',
+              reason: record.session?.reason ?? '排队位：等待开工核验',
+            }
+            // event-axis-attach-1127：实际改写才留痕；history-face-only 伪事件，
+            // from = to = 当前态（同 rebind-in/out 形态，⛔ 不进 EVENTS 正表）。
+            record.history.push({
+              event: 'session-attach',
+              from: record.state,
+              to: record.state,
+              at: new Date().toISOString(),
+            })
+          }
           return { status: 200 as const, record }
         })
         if ('kind' in outcome) { refuse(outcome.status, outcome.kind, outcome.detail); return }

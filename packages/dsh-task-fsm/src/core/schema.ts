@@ -27,9 +27,21 @@ export type RebindEvent = 'rebind-in' | 'rebind-out'
 /** The two rebind history events (schema validation face). */
 export const REBIND_EVENTS: readonly RebindEvent[] = ['rebind-in', 'rebind-out']
 
+/**
+ * `session-attach` pseudo-event (event-axis-attach-1127, 设计 §2 案B): the
+ * attach handler's structural write (session.id backfill) leaves this audit
+ * trail entry — history-face only, same pattern as the rebind marks. NOT a
+ * transition-table event: from = to = current state, it never joins `EVENTS`
+ * / `EVENT_LABELS`, and it carries no `cellFor` cell (⛔ 非 E22).
+ */
+export type SessionAttachEvent = 'session-attach'
+
+/** The session-attach history event (schema validation face). */
+export const ATTACH_EVENTS: readonly SessionAttachEvent[] = ['session-attach']
+
 /** One history entry appended by every accepted transition (§2.6). */
 export interface HistoryEntry {
-  event: EventId | RebindEvent
+  event: EventId | RebindEvent | SessionAttachEvent
   from: State
   to: State
   at: string
@@ -90,10 +102,11 @@ const StateSchema = z.union(STATES.map((s) => z.const(s)) as [ReturnType<typeof 
 const QueueSchema = z.union([z.const('none'), z.const('red'), z.const('yellow')])
 const ModeSchema = z.union([z.const('active'), z.const('frozen'), z.const('locked')])
 
-/** E1–E21 plus the two rebind pseudo-events (history face only). */
+/** E1–E21 plus the rebind and session-attach pseudo-events (history face only). */
 const HistoryEventSchema = z.union([
   ...EVENTS.map((e) => z.const(e)),
   ...REBIND_EVENTS.map((e) => z.const(e)),
+  ...ATTACH_EVENTS.map((e) => z.const(e)),
 ] as [ReturnType<typeof z.const>, ...ReturnType<typeof z.const>[]])
 
 const HistorySchema = z.object({
@@ -184,7 +197,9 @@ export function parseFsmFile(raw: unknown): FsmFile {
         for (const entry of record.history) {
           const event = (entry as { event?: unknown } | null)?.event
           const known = typeof event === 'string'
-            && ((EVENTS as readonly string[]).includes(event) || (REBIND_EVENTS as readonly string[]).includes(event))
+            && ((EVENTS as readonly string[]).includes(event)
+              || (REBIND_EVENTS as readonly string[]).includes(event)
+              || (ATTACH_EVENTS as readonly string[]).includes(event))
           if (!known) {
             throw new Error(`task-fsm-state: task "${key}" history holds unknown event "${String(event)}"`)
           }

@@ -58,6 +58,30 @@ describe('parseFsmFile', () => {
     expect(() => parseFsmFile(bad)).toThrow(/unknown event/)
   })
 
+  it('accepts the session-attach pseudo-event (event-axis-attach-1127 whitelist)', () => {
+    const ok = sample()
+    ok.tasks['content/tech/ai/dsh/tasks.md#demo'].history.push(
+      { event: 'session-attach', from: 'active', to: 'active', at: '2026-11-27T12:00:00.000Z' },
+    )
+    const parsed = parseFsmFile(JSON.parse(JSON.stringify(ok)))
+    expect(parsed.tasks['content/tech/ai/dsh/tasks.md#demo'].history.at(-1)).toMatchObject({
+      event: 'session-attach', from: 'active', to: 'active',
+    })
+  })
+
+  it('closed set holds after the whitelist grew: near-miss event names still reject the whole ledger', () => {
+    // 红态回归（防扩集合变松）：白名单 +session-attach 不影响 fail-closed——
+    // 任何白名单外名字（含形近变体）仍整账拒。
+    for (const invented of ['session-attach-2', 'session_attach', 'attach', 'E22']) {
+      const bad = sample()
+      bad.tasks['content/tech/ai/dsh/tasks.md#demo'].history.push(
+        // @ts-expect-error deliberately invalid event id
+        { event: invented, from: 'active', to: 'active', at: '2026-11-27T12:00:00.000Z' },
+      )
+      expect(() => parseFsmFile(bad), `event=${invented}`).toThrow(/unknown event/)
+    }
+  })
+
   it('rejects a non-object document', () => {
     expect(() => parseFsmFile('nope')).toThrow()
     expect(() => parseFsmFile(null)).toThrow()

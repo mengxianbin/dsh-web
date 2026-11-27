@@ -5,8 +5,8 @@
  * Contract under test:
  *  ① 200 attaches `sessionId` to a non-terminal record whose session.id is empty
  *     (the victim shape: hook-burned active ∧ session.id='') — mode/reason preserved,
- *     **history byte-identical** (structure field ≠ transition; HistoryEventSchema is
- *     a whitelist, an invented event would fail-close the WHOLE ledger).
+ *     and exactly ONE whitelist pseudo-event `session-attach` is appended
+ *     (event-axis-attach-1127: 结构写入留痕；白名单闭集，parseFsmFile 整账可读).
  *  ② idempotent: same sessionId re-POST → 200 with zero drift (tasks byte-equal).
  *  ③ 非法拒零写: a different bound session → 409 conflict; terminal → 409 forbidden
  *     (终态完整性, 协调方回函 2026-11-27 裁定维持 — 受害单 taskbook-gate 已 done →
@@ -25,6 +25,7 @@ import { makeTaskFsmRoutes } from '../src/host/routes.ts'
 import { FsmStore } from '../src/host/store.ts'
 import { archivePlan } from '../src/core/archive.ts'
 import type { HistoryEntry } from '../src/core/schema.ts'
+import { parseFsmFile } from '../src/core/schema.ts'
 
 const SCOPE = 'content/tech/ai/dsh'
 const PARENT_REF = 'content/tech/ai/dsh/tasks.md#attach-route-parent'
@@ -119,7 +120,7 @@ function forceState(t: ReturnType<typeof setup>, taskRef: string, state: string)
 }
 
 describe('POST /api/task-fsm/session/attach (session 挂载口)', () => {
-  it('attaches an empty-session active record without writing any history entry', async () => {
+  it('attaches an empty-session active record and appends one session-attach pseudo-event', async () => {
     const t = setup()
     try {
       await seed(t, CHILD_REF, 'attach 夹具·子')
@@ -137,24 +138,36 @@ describe('POST /api/task-fsm/session/attach (session 挂载口)', () => {
       // D 轴不动：mode/reason 保留（E1 播种的排队位正形），只补 id。
       expect(after.tasks[CHILD_REF]?.session?.mode).toBe('frozen')
       expect(after.tasks[CHILD_REF]?.session?.reason).toBe('排队位：等待开工核验')
-      // ⛔ 不写 history：挂载 = 结构字段回写，不是状态转移。
-      expect(after.tasks[CHILD_REF]?.history).toEqual(beforeHistory)
+      // event-axis-attach-1127：留痕恰一条 session-attach（history-face-only，
+      // from = to = 当前态）；既有 E1 等条目原样。
+      const entries = after.tasks[CHILD_REF]?.history ?? []
+      expect(entries).toHaveLength(beforeHistory.length + 1)
+      const attachEntry = entries[entries.length - 1]
+      expect(attachEntry).toMatchObject({ event: 'session-attach', from: 'active', to: 'active' })
+      expect(typeof attachEntry.at).toBe('string')
+      expect(entries.slice(0, -1)).toEqual(beforeHistory)
       expect(after.tasks[CHILD_REF]?.state).toBe('active')
+      // 整账可读：store.load 已走 parseFsmFile（闭集白名单），再显式过一次。
+      expect(() => parseFsmFile(JSON.parse(JSON.stringify(after)))).not.toThrow()
     } finally {
       t.cleanup()
     }
   })
 
-  it('is idempotent: same sessionId re-POST answers 200 with zero drift', async () => {
+  it('idempotent second POST appends no duplicate session-attach (幂等二发不重复写)', async () => {
     const t = setup()
     try {
       await seed(t, CHILD_REF, 'attach 夹具·子')
       expect((await post(t.attach, { taskRef: CHILD_REF, sessionId: SESSION_A })).status).toBe(200)
       const once = t.store.load()
+      const attachCount = (once.tasks[CHILD_REF]?.history ?? []).filter((h) => h.event === 'session-attach').length
+      expect(attachCount).toBe(1)
+
       const again = await post(t.attach, { taskRef: CHILD_REF, sessionId: SESSION_A })
       expect(again.status).toBe(200)
       const twice = t.store.load()
       expect(JSON.stringify(twice.tasks)).toBe(JSON.stringify(once.tasks))
+      expect((twice.tasks[CHILD_REF]?.history ?? []).filter((h) => h.event === 'session-attach')).toHaveLength(1)
     } finally {
       t.cleanup()
     }
