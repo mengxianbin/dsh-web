@@ -16,7 +16,8 @@ import { FsmStore } from '../src/host/store.ts'
 import {
   DEFAULT_WATCH_PERIOD_MS, MemFloorWatcher, MIN_WATCH_PERIOD_MS, READ_BUDGET_MS,
 } from '../src/host/mem-floor-watcher.ts'
-import type { TaskRecord } from '../src/core/schema.ts'
+import type { ScopeDecl, TaskRecord } from '../src/core/schema.ts'
+import type { SessionClass } from '../src/host/freeze-permission.ts'
 import { EVENT_LABELS, EVENTS, cellFor } from '../src/core/table.ts'
 
 const MB = 1024 ** 2
@@ -44,8 +45,31 @@ function record(taskRef: string, extra: Partial<TaskRecord> = {}): TaskRecord {
   }
 }
 
-function seed(tasks: TaskRecord[]): void {
-  store.save({ version: 1, scopes: {}, tasks: Object.fromEntries(tasks.map((t) => [t.taskRef, t])) })
+interface SeedOptions {
+  /** 人开 scope 声明; default = every non-empty scope carried by the rows. */
+  scopes?: Record<string, ScopeDecl>
+  /** attention classes; default = every seeded session id → bot-worker (eligible). */
+  classes?: Record<string, SessionClass>
+}
+
+function seed(tasks: TaskRecord[], opts: SeedOptions = {}): void {
+  const scopes = opts.scopes ?? Object.fromEntries(
+    [...new Set(tasks.map((t) => t.scope).filter((s) => s !== ''))]
+      .map((s): [string, ScopeDecl] => [s, { intent: '', prio: 'yellow', declaredAt: '2026-11-27T00:00:00.000Z' }]),
+  )
+  store.save({ version: 1, scopes, tasks: Object.fromEntries(tasks.map((t) => [t.taskRef, t])) })
+  const classes = opts.classes ?? Object.fromEntries(
+    tasks.flatMap((t): [string, SessionClass][] => (t.session?.id ? [[t.session.id, 'bot-worker']] : [])),
+  )
+  writeFileSync(
+    join(dir, 'session-attention.json'),
+    JSON.stringify({
+      version: 1,
+      sessions: Object.fromEntries(Object.entries(classes).map(([id, cls]) =>
+        [id, { class: cls, defaultApplied: true, source: 'dispatch', updatedAt: '' }])),
+    }),
+    'utf8',
+  )
 }
 
 function makeWatcher(overrides: Partial<ConstructorParameters<typeof MemFloorWatcher>[0]> = {}): MemFloorWatcher {
@@ -317,5 +341,98 @@ describe('反例机检（spawn 子进程读内存 / 新增 E 事件 → 打回�
     // The two cells this watcher rides — both already in the table (no new cell).
     expect(cellFor('active', 'E7')).toMatchObject({ kind: 'transfer', to: 'active', effects: { cause: 'quota-wait' } })
     expect(cellFor('active', 'E4')).toMatchObject({ kind: 'transfer', to: 'active', effects: { sessionMode: 'active' } })
+  })
+})
+
+describe('权限表 §6.2（分期4 选行夹具，回执 q-perm）', () => {
+  it('human 类不入列 — a human-classified session never auto-freezes', () => {
+    seed([record('t-human', { session: { id: 'sess-human', mode: 'active', reason: '' } })],
+      { classes: { 'sess-human': 'human' } })
+    free = BELOW
+
+    const info = makeWatcher().tick()
+    expect(info.verdict).toBe('below-floor')
+    expect(info.frozen).toEqual([])
+    const after = store.load().tasks['t-human']
+    expect(after.session?.mode).toBe('active') // 底线: the machine leaves human rows alone
+    expect(after.history).toHaveLength(0)
+  })
+
+  it('undeclared class reads human — no ledger row means no auto-freeze (fail toward 底线)', () => {
+    seed([record('t-ghost', { session: { id: 'sess-ghost', mode: 'active', reason: '' } })], { classes: {} })
+    free = BELOW
+
+    expect(makeWatcher().tick().frozen).toEqual([])
+    expect(store.load().tasks['t-ghost'].history).toHaveLength(0)
+  })
+
+  it('bot 只在自己 scope 内 — a bot row in an undeclared scope stays out', () => {
+    seed(
+      [record('t-foreign', { scope: 'content/ghost', session: { id: 'sess-bot', mode: 'active', reason: '' } })],
+      { scopes: { 'content/tech/ai/dsh': { intent: '', prio: 'yellow', declaredAt: '2026-11-27T00:00:00.000Z' } } },
+    )
+    free = BELOW
+
+    expect(makeWatcher().tick().frozen).toEqual([])
+    expect(store.load().tasks['t-foreign'].history).toHaveLength(0)
+  })
+
+  it('positive control — a bot row inside its declared scope still freezes', () => {
+    seed([record('t-bot', { session: { id: 'sess-bot2', mode: 'active', reason: '' } })])
+    free = BELOW
+
+    expect(makeWatcher().tick().frozen).toEqual(['t-bot'])
+  })
+
+  it('解冻永可用 — the wake path is never gated by class (§6.2 防自锁)', () => {
+    seed(
+      [record('t-human-wake', { session: { id: 'sess-h', mode: 'frozen', reason: '内存地板' }, cause: 'quota-wait' })],
+      { classes: { 'sess-h': 'human' } },
+    )
+    free = HEALTHY
+    const watcher = makeWatcher()
+
+    expect(watcher.tick().verdict).toBe('cooldown')
+    now += COOLDOWN_MS
+    const info = watcher.tick()
+    expect(info.verdict).toBe('wake')
+    expect(info.woken).toEqual(['t-human-wake'])
+    expect(store.load().tasks['t-human-wake'].session?.mode).toBe('active')
+  })
+})
+
+describe('三信号只读接入（分期4 tick 读数，E 事件集 diff = 0）', () => {
+  it('every tick face carries the lamp + queueDepth readings', () => {
+    seed([record('t-sig', { session: { id: 'sess-sig', mode: 'active', reason: '' } })])
+    free = BELOW
+
+    const info = makeWatcher({ readSignals: () => ({ lamp: 'red', queueDepth: 3 }) }).tick()
+    expect(info.signals).toEqual({ lamp: 'red', queueDepth: 3 })
+    expect(info.verdict).toBe('below-floor') // readings never steer the verdict
+    expect(info.frozen).toEqual(['t-sig'])
+  })
+
+  it('readings ride the healthy face too (observability on every verdict)', () => {
+    seed([])
+    free = HEALTHY
+
+    const info = makeWatcher({ readSignals: () => ({ lamp: 'green', queueDepth: 0 }) }).tick()
+    expect(info.verdict).toBe('cooldown')
+    expect(info.signals).toEqual({ lamp: 'green', queueDepth: 0 })
+  })
+
+  it('a throwing signal reader fails open — empty readings, tick untouched', () => {
+    seed([record('t-sig2', { session: { id: 'sess-sig2', mode: 'active', reason: '' } })])
+    free = BELOW
+
+    const info = makeWatcher({ readSignals: () => { throw new Error('lamp socket dead') } }).tick()
+    expect(info.signals).toEqual({})
+    expect(info.verdict).toBe('below-floor')
+    expect(info.frozen).toEqual(['t-sig2'])
+  })
+
+  it('no signal reader configured = empty readings (default seam)', () => {
+    seed([])
+    expect(makeWatcher().tick().signals).toEqual({})
   })
 })

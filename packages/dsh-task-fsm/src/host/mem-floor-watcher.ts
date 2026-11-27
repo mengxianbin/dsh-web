@@ -20,6 +20,14 @@
  * ≥ `MIN_WATCH_PERIOD_MS`) and every read is held to `READ_BUDGET_MS`; an
  * over-budget or failing read makes the tick fail OPEN (no freeze, no wake)
  * — the dispatch-side floor reading stays the backstop (板行失败形态④).
+ *
+ * Two Phase-1 seams (freeze-reclaim-design-1127 分期4):
+ *   · **§6.2 权限表** — the E7 pass selects rows through `mayAutoFreeze`
+ *     (human never auto-frozen, undeclared class = human, bot only inside a
+ *     declared scope). Wake stays ungated: 解冻永可用 (§6.2 防自锁).
+ *   · **三信号只读接入** — every tick carries the 伤害 (event-loop lamp) and
+ *     竞争 (IO-gate queue depth) readings through `readSignals`; they are
+ *     observability only (E event set diff = 0, verdict unchanged).
  * @module dsh-task-fsm/host/mem-floor-watcher
  */
 import { performance } from 'node:perf_hooks'
@@ -28,6 +36,7 @@ import { applyTransition } from '../core/fsm.ts'
 import type { FsmFile, TaskRecord } from '../core/schema.ts'
 import type { FsmStore } from './store.ts'
 import { makeHostDeps } from './sources.ts'
+import { mayAutoFreeze, readAttentionTable, type AttentionTable } from './freeze-permission.ts'
 
 /** 频率有界（板行判据③）：周期下限 30s — smaller config values clamp here. */
 export const MIN_WATCH_PERIOD_MS = 30_000
@@ -39,6 +48,21 @@ export const READ_BUDGET_MS = 1
 export const DEFAULT_FLOOR_RATIO = 0.1
 /** Default wake cooldown (施工期定, 判据归人): 60s continuously healthy. */
 export const DEFAULT_COOLDOWN_MS = 60_000
+
+/** 三色灯档（伤害信号）: green = healthy, yellow = degraded, red = hurt already. */
+export type LampColor = 'green' | 'yellow' | 'red'
+
+/**
+ * 三信号只读读数（§三, 分期4）: carried on EVERY tick face for the 判据层 /
+ * 观测面 — Phase 1 never acts on them (E event set diff = 0, the verdict
+ * and every transition stay exactly as before).
+ */
+export interface FreezeSignalReadings {
+  /** 伤害: event-loop lamp (帧延迟 / ELU 三色灯). Absent = no reading. */
+  lamp?: LampColor
+  /** 竞争: heavy-io-gate queue depth (waiting count). Absent = no reading. */
+  queueDepth?: number
+}
 
 /** Result of one tick — observability seam for tests and host wiring. */
 export interface MemFloorTickInfo {
@@ -58,6 +82,8 @@ export interface MemFloorTickInfo {
   frozen: readonly string[]
   /** taskRefs woken by this tick (E4 via the `quota-free` trigger). */
   woken: readonly string[]
+  /** 三信号只读读数（分期4；空对象 = 无读数，绝不影响 verdict）。 */
+  signals: FreezeSignalReadings
   /** Anomaly detail (read failure / over-budget / corrupt store). */
   detail?: string
 }
@@ -83,6 +109,13 @@ export interface MemFloorWatcherOptions {
   now?: () => number
   /** Per-tick observability hook (tests / optional host logging). */
   onTick?: (info: MemFloorTickInfo) => void
+  /**
+   * §6.2 权限表 class reader (fixture seam; one table read per below-floor
+   * tick). Default = the attention ledger under `dshHome` (attendance 同文件).
+   */
+  readAttention?: () => AttentionTable
+  /** 三信号只读读数 (fixture seam; default = no readings — empty object). */
+  readSignals?: () => FreezeSignalReadings
 }
 
 const MB = 1024 * 1024
@@ -112,6 +145,8 @@ export class MemFloorWatcher {
   private readonly readTotalMem: () => number
   private readonly now: () => number
   private readonly onTick?: (info: MemFloorTickInfo) => void
+  private readonly readAttention: () => AttentionTable
+  private readonly readSignals: () => FreezeSignalReadings
   private recoveredAt: number | null = null
   private timer: ReturnType<typeof setInterval> | null = null
 
@@ -123,6 +158,9 @@ export class MemFloorWatcher {
     this.readTotalMem = options.readTotalMem ?? totalmem
     this.now = options.now ?? Date.now
     this.onTick = options.onTick
+    // §6.2 权限表: default = the attention ledger; a torn ledger reads {} (protect all).
+    this.readAttention = options.readAttention ?? (() => readAttentionTable(this.dshHome))
+    this.readSignals = options.readSignals ?? (() => ({}))
     // 频率有界 (判据③): the period can never be configured below 30s.
     this.periodMs = Math.max(MIN_WATCH_PERIOD_MS, Math.floor(options.periodMs ?? DEFAULT_WATCH_PERIOD_MS))
     this.cooldownMs = Math.max(0, Math.floor(options.cooldownMs ?? DEFAULT_COOLDOWN_MS))
@@ -151,7 +189,10 @@ export class MemFloorWatcher {
    */
   tick(): MemFloorTickInfo {
     const at = this.now()
-    const base = { at, free: 0, total: 0, floor: 0, readMs: 0, frozen: [] as string[], woken: [] as string[] }
+    const base = {
+      at, free: 0, total: 0, floor: 0, readMs: 0,
+      frozen: [] as string[], woken: [] as string[], signals: this.readSignalsSafe(),
+    }
 
     // ———① 廉价读（零子进程）+ 单次亚毫秒预算（超预算 =本轮 fail-open）———
     const t0 = performance.now()
@@ -194,13 +235,17 @@ export class MemFloorWatcher {
       })
     }
 
-    // ——— ② 低于地板 → 既有 E7 转移落冻结位（只打 active 且未冻结的会话行）———
+    // ——— ② 低于地板 → 既有 E7 转移落冻结位（只打 active 且未冻结、且过 §6.2 权限表的会话行）———
     if (free < floor) {
       this.recoveredAt = null
+      // §6.2 权限表: one table read per below-floor tick, then per-row selection.
+      const attention = this.readAttention()
+      const declaredScopes = new Set(Object.keys(file.scopes))
       const frozen: string[] = []
       for (const [taskRef, record] of Object.entries(file.tasks)) {
         if (record.state !== 'active') continue // E7 only applies from active (table 三分)
         if (record.session?.mode !== 'active' || record.session.id === '') continue // already ❄️/🔒 or session-less
+        if (!mayAutoFreeze(record, attention, declaredScopes)) continue // §6.2: human 不入列 / scope 外不入列
         const result = applyTransition(
           record, 'E7', this.depsFor(file, record),
           { reason: `内存地板：FreeMB ${Math.round(free / MB)} < 地板 ${Math.round(floor / MB)}（mem-floor watcher）` },
@@ -251,6 +296,18 @@ export class MemFloorWatcher {
       maxRedisp: this.maxRedisp,
       redisp: record.attempts.redisp,
     })
+  }
+
+  /**
+   * 三信号只读读数（分期4）: a throwing reader answers `{}` — readings are
+   * observability, never a reason to fail or delay the tick.
+   */
+  private readSignalsSafe(): FreezeSignalReadings {
+    try {
+      return this.readSignals()
+    } catch {
+      return {}
+    }
   }
 
   private emit(info: MemFloorTickInfo): MemFloorTickInfo {
