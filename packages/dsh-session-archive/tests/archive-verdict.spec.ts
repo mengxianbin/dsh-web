@@ -27,7 +27,7 @@ import { makeArchiveRoutes } from '../src/host/routes.ts'
 import { ArchiveService } from '../src/host/janitor.ts'
 import { sessionSealProjection } from '../src/host/seal-projection.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { FIXTURE_ROOT, FIXTURE_SAVE_GREEN, createFakeHost, fakeContext, fixtureSources, type FakeHost } from './fixtures.ts'
+import { FIXTURE_ROOT, FIXTURE_SAVE_GREEN, createFakeHost, fakeContext, fixtureSources, modelHostAppend, type FakeHost } from './fixtures.ts'
 
 function startServer(routes: WebRoute[]): Promise<{ server: Server; url: string }> {
   return new Promise((resolve) => {
@@ -285,6 +285,10 @@ describe('POST /seal-check + POST /archive — fail-closed, any dim unreadable',
 function legHarness(host: FakeHost, sources: VerdictSources): { ctx: Context; service: ArchiveService; session: Session; stateOf: () => unknown } {
   const ctx = new Context()
   const session = Session.create(SessionId(SID))
+  // The push leg's record write dispatches through the Host's public `append`
+  // and verifies the ignorable stamp (seal-write-crosscopy-1127); model that
+  // contract on the rc.3 test copy, whose own append has no LogIntent slot.
+  modelHostAppend(session)
   let registered: typeof sessionSealProjection | undefined
   const stateOf = (): unknown => {
     if (registered === undefined) return undefined

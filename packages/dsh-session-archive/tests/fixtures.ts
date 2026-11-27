@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { zstdCompressSync } from 'node:zlib'
+import { appendPluginRecord, type Session } from '@deepseek-ai/dsh-session'
 import type { LedgerDocument } from '../src/host/ledger.ts'
 import type { InventorySources } from '../src/host/inventory.ts'
 import type { AliveBinding, FsmTaskLike, VerdictSources } from '../src/host/archive-verdict.ts'
@@ -163,6 +164,30 @@ export function createFakeHost(options: {
 /** One transcript message event in the shape the seal layer reads (`data.message.content`). */
 export function transcriptMessage(role: 'assistant' | 'user', text: string): Record<string, unknown> {
   return { type: `${role}/message`, data: { message: { content: [{ type: 'text', text }] } } }
+}
+
+/**
+ * Model the Host's LogIntent `append` on a detached test Session
+ * (seal-write-crosscopy-1127): the installed rc.3 test copy's public `append`
+ * has no `{ ignorable: true }` slot — it accepts the opts, lands the event and
+ * silently drops the marker, so `pluginRecordOf` answers `undefined` and the
+ * fold never reads the record. The live Host (harness alpha.2) DOES stamp the
+ * marker (verified against `packages/core/session/lib/index.js`: seal record
+ * `ignorable=true`, `pluginRecordOf` round-trips). This wrapper routes an
+ * ignorable plugin-record append through the same-copy `appendPluginRecord`
+ * (brand check passes in tests) and answers with the stamped log event — the
+ * exact contract {@link appendSealViaHost} verifies in production.
+ * Non-ignorable appends (turn/end etc.) ride the native method untouched.
+ */
+export function modelHostAppend(session: Session): void {
+  const native = session.append.bind(session) as (...args: unknown[]) => unknown
+  const patched = (type: string, data: unknown, opts?: { readonly ignorable?: true }): unknown => {
+    if (opts?.ignorable !== true) return native(type, data, opts)
+    appendPluginRecord(session, type as Parameters<typeof appendPluginRecord>[1], data as Parameters<typeof appendPluginRecord>[2])
+    const events = session.snapshotEvents()
+    return events[events.length - 1]
+  }
+  ;(session as unknown as { append: unknown }).append = patched
 }
 
 /** Shorthand for an assistant transcript message. */
