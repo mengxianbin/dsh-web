@@ -7,12 +7,13 @@
  *   GET  /api/task-fsm/archive-plan?taskRef= — §5 archive layering verdict
  *   POST /api/task-fsm/scope            — human-opened scope declaration (§8.2)
  *   POST /api/task-fsm/create           — pre-establish a task record (E1 预立)
- *   POST /api/task-fsm/transition       — apply E1–E21 through the guard table
+ *   POST /api/task-fsm/transition       — apply the E set (E1, E3–E21) through the guard table
  *   POST /api/task-fsm/wake             — the two wake triggers (§3.3)
  *   POST /api/task-fsm/ack              — E19 human receipt
  *   POST /api/task-fsm/rebind           — 换绑原子事件 (fsm-rebind-1126 §3.1)
  *   POST /api/task-fsm/parent           — 板 → FSM parent 镜像最小写入口 (fsm-turnend-wire-1126)
  *   POST /api/task-fsm/session/attach   — session 挂载口，幂等补写非终态记录 session.id (e1-burn-fix-1127)
+ *   POST /api/task-fsm/freeze-control   — §6.4 三态控制态人面写入口 (freeze-reclaim-phase2-1127)
  * @module dsh-task-fsm/host/routes
  */
 
@@ -22,7 +23,7 @@ import { applyTransition, type TransitionPayload, type TransitionRefusal } from 
 import { deriveQueue } from '../core/queue.ts'
 import { deriveSubReasons } from '../core/subreason.ts'
 import { archivePlan, pendingReceipts } from '../core/archive.ts'
-import type { FsmFile, ScopeDecl, TaskRecord } from '../core/schema.ts'
+import type { FsmFile, FreezeControl, ScopeDecl, TaskRecord } from '../core/schema.ts'
 import { EVENTS, type EventId } from '../core/table.ts'
 import { FsmStore } from './store.ts'
 import { ArchiveLeg } from './archive-leg.ts'
@@ -172,6 +173,11 @@ function isEventId(value: unknown): value is EventId {
   return typeof value === 'string' && (EVENTS as readonly string[]).includes(value)
 }
 
+/** §6.4 三态控制态白名单（裁定 #16）：三值之外一律 400（schema 同枚举）。 */
+function isFreezeControl(value: unknown): value is FreezeControl {
+  return value === 'auto' || value === 'human-freeze' || value === 'human-thaw'
+}
+
 function isObject(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 }
@@ -275,8 +281,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
    * 写 history（event-axis-attach-1127 翻转，判据源 = 用户「扩白名单 ok」2026-11-27）：
    * 实际改写 session.id 时追加白名单内伪事件 `session-attach`（history-face-only，
    * from = to = 当前态，同 rebind 伪事件形态）；同 id 幂等二发零 push；⛔ 拒路径仍零写。
-   * 只写 session.id，mode/reason 保留（节点缺失才按 E1 正形播种）
-   * ——D 轴归 E1/E2/wake 语义面。
+   * 只写 session.id，mode/reason 保留（节点缺失才按 E1 正形播种
+   * ——§6.5 拆冻结副作用后 E1 正形 = 生而 active，不再播种 frozen/排队位）
+   * ——D 轴归 E1/wake 语义面（核验过事件已退役, freeze-reclaim-phase2-1127 分期4）。
    * 拒 = 零写（update 外预检 + update 内复校，rebind Phase A/C 同型）：
    * 终态（终态完整性，协调方回函 2026-11-27 裁定）/ backlog（走 E1）/ 异 id 冲突
    * （防双跑）/ 404 / 400 / 405 / 403。
@@ -318,8 +325,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
           if (!(bound === sessionId && record.session !== undefined)) {
             record.session = {
               id: sessionId,
-              mode: record.session?.mode ?? 'frozen',
-              reason: record.session?.reason ?? '排队位：等待开工核验',
+              // §6.5: E1 正形 = 生而 active（冻结只由 watcher/宣告面显式驱动）。
+              mode: record.session?.mode ?? 'active',
+              reason: record.session?.reason ?? '',
             }
             // event-axis-attach-1127：实际改写才留痕；history-face-only 伪事件，
             // from = to = 当前态（同 rebind-in/out 形态，⛔ 不进 EVENTS 正表）。
@@ -459,7 +467,7 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const event = isEventId(body?.event) ? body.event : undefined
       if (body === undefined || taskRef === '' || event === undefined) {
-        writeJson(res, 400, { ok: false, error: 'body needs { taskRef, event: E1..E21, evidence?, payload? }' }); return
+        writeJson(res, 400, { ok: false, error: 'body needs { taskRef, event: E1|E3..E21, evidence?, payload? }' }); return
       }
       const evidence = (isObject(body.evidence) ?? {}) as TransitionEvidence
       const rawPayload = isObject(body.payload) ?? {}
@@ -761,5 +769,51 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
     },
   }
 
-  return [state, session, attach, notify, archive, scope, create, transition, wake, ack, rebind, parent]
+  /**
+   * POST /api/task-fsm/freeze-control — §6.4 三态控制态的人面写入口（裁定 #16）。
+   *
+   * `freezeControl` 是**结构字段**（每记录一个控制态，缺省 = 自动托管），不是状态转移：
+   * ⛔ 不写 history —— HistoryEventSchema 是白名单，未知事件会被 parseFsmFile fail-closed
+   * 拒掉整份账（parent/attach 同口径）。冻结/解冻本体走既有面（transition E7 / wake 路由），
+   * 本端点只写门控位（谁改: 人）：
+   *   · `human-freeze` 人冻的 —— watcher 自动醒跳过（只有人能解）；
+   *   · `human-thaw`   人保的 —— watcher 自动冻跳过（豁免期不入自动冻列）；
+   *   · `auto`         回自动托管（缺省语义，显式写入留痕，豁免可撤）。
+   * 幂等（同值重写 = 无变化），404 = 查无 taskRef，control 非三值 = 400。
+   */
+  const freezeControl: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_FSM_API_PREFIX}/freeze-control`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
+      let body: Record<string, unknown> | undefined
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
+      const rawControl: unknown = body?.control
+      const control = isFreezeControl(rawControl) ? rawControl : undefined
+      if (body === undefined || taskRef === '' || control === undefined) {
+        writeJson(res, 400, { ok: false, error: 'body needs { taskRef, control: auto|human-freeze|human-thaw }' }); return
+      }
+      try {
+        const outcome = store.update<{ status: 200; record: TaskRecord } | { status: 404; error: string }>((file) => {
+          const record = file.tasks[taskRef]
+          if (record === undefined) return { status: 404 as const, error: 'unknown taskRef' }
+          record.freezeControl = control
+          return { status: 200 as const, record }
+        })
+        if ('error' in outcome) {
+          // 本端点的失败分支只有 404（union 第二成员），hint 恒适用。
+          console.warn(`[task-fsm] freeze-control REFUSED status=${outcome.status} taskRef=${taskRef}`)
+          writeJson(res, outcome.status, { ok: false, error: outcome.error, hint: HINT_UNKNOWN_TASKREF })
+          return
+        }
+        writeJson(res, 200, { ok: true, record: outcome.record })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
+  return [state, session, attach, notify, archive, scope, create, transition, wake, ack, rebind, parent, freezeControl]
 }

@@ -279,6 +279,7 @@ function createGateQueue(): <T>(taskRef: string, run: () => Promise<T>) => Promi
     tails.set(taskRef, settled)
     void settled.then(() => {
       if (tails.get(taskRef) === settled) tails.delete(taskRef)
+      return undefined // fire-and-forget; explicit return keeps promise/always-return green
     })
     return result
   }
@@ -473,7 +474,8 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           sessionId = created.sessionId
           // S1: transition E1 带 payload.sessionId —— fsm.ts:102 的既有 sessionId
           // 合并语义就是 session id 回写（schema 零改，§3.2 决定⑤）：记录落
-          // {id, mode:'frozen', reason:'排队位：等待开工核验'} 设计正形。
+          // {id, mode:'active'} 生而 active（§6.5 拆冻结副作用，分期2：E1 不再写
+          // frozen/排队位，冻结改由 watcher（E7）/ 宣告面显式驱动）。
           // kind 字面修正（e1-burn-fix-1127 §4 施工发现）：fsm.ts wire 上的 refusal
           // kind = 'forbidden'（旧判 'forbid' 恒 false，幂等跳过从未生效）。
           // forbidden 分流：session.id 空 → B 案兜底补挂（§2-③b）；非空 → 迟到活会话 409。

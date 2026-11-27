@@ -13,7 +13,9 @@
  *                         （409 拒派不落 backlog 记录；G1 在 create 门 fail-closed）
  *   transition E1       = session create 之后（E1 payload 带 sessionId —— §3.2 决定⑤
  *                         的 session id 回写就走这条既有合并语义，schema 零改；
- *                         E1 后记录 = {id, mode:'frozen', reason:'排队位'} 设计正形）
+ *                         E1 后记录 = {id, mode:'active'} 生而 active——§6.5 拆冻结
+ *                         副作用（freeze-reclaim-phase2-1127 分期2），冻结改由
+ *                         watcher（E7）/ 宣告面显式驱动）
  * 豁免（boss 合成锚）：taskRef 无 '#' 锚（taskbot-takeover-* 等）或
  * sessionClass=bot-boss → 不入 FSM（防 boss 轮换被 G1/G3 误拦，§2.3.2）。
  * 失败形态：任何一段失败 = 拒派 4xx 响亮（fail-closed，不回静默放行）；

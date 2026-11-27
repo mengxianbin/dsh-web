@@ -17,7 +17,7 @@ import { FsmStore, defaultFsmPath } from './host/store.ts'
 import { makeTaskFsmRoutes } from './host/routes.ts'
 import { ArchiveLeg } from './host/archive-leg.ts'
 import {
-  DEFAULT_COOLDOWN_MS, DEFAULT_FLOOR_RATIO, DEFAULT_WATCH_PERIOD_MS,
+  DEFAULT_FLOOR_RATIO, DEFAULT_TIME_AXIS_MS, DEFAULT_WATCH_PERIOD_MS,
   MemFloorWatcher,
 } from './host/mem-floor-watcher.ts'
 
@@ -30,14 +30,14 @@ export interface Config {
   enabled?: boolean
   /** G5 redisp circuit-breaker cap (design §6.1 N 建议初值 3, 判据归人). */
   maxRedisp?: number
-  /** Memory-floor watcher switch — the E7 trigger (mem-floor-freeze-wiring-1124, default on). */
+  /** Memory-floor watcher switch — the §6.4 dual-threshold E7/E4 trigger (freeze-reclaim-phase2-1127, default on). */
   memFloorWatcher?: boolean
-  /** Free-memory floor as a ratio of total (default 0.10, 施工期定判据归人). */
+  /** Free-memory floor as a ratio of total (default 0.10, 地板值零改 — reported reading only since §6.4). */
   memFloorRatio?: number
   /** Watcher period ms — clamped to ≥30s regardless of config (判据③). */
   memFloorPeriodMs?: number
-  /** Continuous-healthy cooldown before a `quota-free` wake (default 60s, 施工期定判据归人). */
-  memFloorCooldownMs?: number
+  /** §6.4 时间轴 ms — a zone must hold before the watcher acts (default 30s, 裁定 #17). */
+  memFloorTimeAxisMs?: number
   /** S2 archive execution leg — auto E18 on root done + archive POSTs (default on, fsm-seam-archive-build-1125). */
   archiveLeg?: boolean
 }
@@ -48,7 +48,7 @@ export const Config: z<Config> = z.object({
   memFloorWatcher: z.boolean().default(true),
   memFloorRatio: z.number().default(DEFAULT_FLOOR_RATIO),
   memFloorPeriodMs: z.number().default(DEFAULT_WATCH_PERIOD_MS),
-  memFloorCooldownMs: z.number().default(DEFAULT_COOLDOWN_MS),
+  memFloorTimeAxisMs: z.number().default(DEFAULT_TIME_AXIS_MS),
   archiveLeg: z.boolean().default(true),
 })
 
@@ -64,16 +64,17 @@ export const apply = mountOnce('dsh-task-fsm', (ctx: Context, config?: Config): 
     const leg = parsed.archiveLeg === false ? undefined : new ArchiveLeg()
     const routes = makeTaskFsmRoutes({ store, dshHome, maxRedisp: parsed.maxRedisp ?? 3, ...(leg === undefined ? {} : { leg }) })
     const disposers = routes.map((route) => ctx.webServer.register(route))
-    // E7 扳机 (mem-floor-freeze-wiring-1124): bounded low-frequency watcher;
-    // period is clamped ≥30s inside the class, reads are os.freemem-class
-    // (zero subprocess) and every anomaly fails open.
+    // §6.4 双阈值扳机 (freeze-reclaim-phase2-1127): bounded low-frequency
+    // watcher; period is clamped ≥30s inside the class, reads are os.freemem-class
+    // (zero subprocess) and every anomaly fails open.进场 800M 冻结 / 中带死区 /
+    // 唤醒 1600M 放行, each line held ≥30s (memFloorTimeAxisMs) before acting.
     const watcher = parsed.memFloorWatcher === false ? null : new MemFloorWatcher({
       store,
       dshHome,
       maxRedisp: parsed.maxRedisp ?? 3,
       floorRatio: parsed.memFloorRatio,
       periodMs: parsed.memFloorPeriodMs,
-      cooldownMs: parsed.memFloorCooldownMs,
+      timeAxisMs: parsed.memFloorTimeAxisMs,
     })
     watcher?.start()
     return () => {

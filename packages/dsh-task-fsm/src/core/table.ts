@@ -4,7 +4,7 @@
  * explicit three-way entry: `transfer` (with guards + design-row note),
  * `forbid` (event recognized but refused here) or `na` (event cannot occur
  * here). The completeness spec asserts the three buckets of each state cover
- * exactly the 21 events — a missing cell fails the test, never the runtime
+ * exactly the event set — a missing cell fails the test, never the runtime
  * (§2.3: 完备性测试期炸、不留运行期).
  *
  * States mirror the six-value `state` enum of §2.6: backlog = `[ ]`,
@@ -22,20 +22,26 @@ export const STATES: readonly State[] = [
   'backlog', 'active', 'deferred', 'blocked', 'done', 'cancelled',
 ]
 
-/** Event set (E) — design §2.3, E1–E21. */
+/**
+ * Event set (E) — design §2.3, E1, E3–E21 (20 events). The former 开工核验过
+ * event was deleted by freeze-reclaim-phase2-1127 分期4 (裁定 #19: 核验前置
+ * 到派发 → 失去存在前提, 设计 §6.5); legacy history entries of it are
+ * tolerated on the read face only (schema `RETIRED_EVENTS`) and the event
+ * itself is unfirable.
+ */
 export type EventId =
-  | 'E1' | 'E2' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7' | 'E8' | 'E9' | 'E10' | 'E11'
+  | 'E1' | 'E3' | 'E4' | 'E5' | 'E6' | 'E7' | 'E8' | 'E9' | 'E10' | 'E11'
   | 'E12' | 'E13' | 'E14' | 'E15' | 'E16' | 'E17' | 'E18' | 'E19' | 'E20' | 'E21'
 
 /** Every event in numeric order (completeness iteration order). */
 export const EVENTS: readonly EventId[] = [
-  'E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8', 'E9', 'E10', 'E11',
+  'E1', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8', 'E9', 'E10', 'E11',
   'E12', 'E13', 'E14', 'E15', 'E16', 'E17', 'E18', 'E19', 'E20', 'E21',
 ]
 
 /** Human labels for the events (docs + hover copy anchors). */
 export const EVENT_LABELS: Readonly<Record<EventId, string>> = {
-  E1: '派发', E2: '开工核验过', E3: '开工核验拦', E4: '步进', E5: '缺前置发现',
+  E1: '派发', E3: '开工核验拦', E4: '步进', E5: '缺前置发现',
   E6: '前置终态到达', E7: '配额空到达', E8: '验收过', E9: '验收不过（可修）',
   E10: '修 N 轮熔断', E11: '判据争议', E12: '不可逆损害', E13: '断链（心跳死）',
   E14: '机械重派', E15: '人中止', E16: 'scope 取消', E17: '收口 save',
@@ -90,7 +96,7 @@ export interface StateCells {
 }
 
 /**
- * The full 6 x 21 matrix. Design rows keep their §2.3 guard text in `note`;
+ * The full 6 x 20 matrix. Design rows keep their §2.3 guard text in `note`;
  * cells the design table does not spell out are completed here with a
  * `补格` note (mechanical completion of the cartesian product, not a design
  * change — the design demands every cell carry one of the three verdicts).
@@ -101,7 +107,10 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E1: {
         kind: 'transfer', to: 'active', guards: ['G1', 'G2', 'G3'],
         note: 'taskRef 409 无活绑定 ∧ 任务书含 worktree 预案 ∧ scope 在册（§2.3 设计行）',
-        effects: { sessionMode: 'frozen', reason: '排队位：等待开工核验' },
+        // §6.5 拆冻结副作用（freeze-reclaim-phase2-1127 分期2）：核验前置到派发
+        // （G1/G2/G3 在派发缝）→ E1 只做 session id 绑定、会话生而 active，
+        // 不再写 mode=frozen / 排队位 reason；冻结改由 watcher（E7）/ 人面显式驱动。
+        effects: { sessionMode: 'active' },
       },
       E16: {
         kind: 'transfer', to: 'cancelled', guards: ['G6'],
@@ -114,7 +123,6 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E9: { kind: 'forbid', why: '未开工无验收可修' },
     },
     na: {
-      E2: { kind: 'na', why: '开工核验只发生在开工后（active）' },
       E3: { kind: 'na', why: '核验拦截回退只发生在开工后（active）' },
       E4: { kind: 'na', why: '未开工无步进' },
       E5: { kind: 'na', why: '未开工无缺前置发现' },
@@ -135,11 +143,6 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
   },
   active: {
     transfer: {
-      E2: {
-        kind: 'transfer', to: 'active', guards: [],
-        note: '开工核验过：开工继续（设计行隐含，D 轴记活跃）',
-        effects: { sessionMode: 'active', clearCause: true },
-      },
       E3: {
         kind: 'transfer', to: 'backlog', guards: [],
         note: '预案缺失 → 拦截即回退，不开工（§2.3 设计行，G1 失败路径）',
@@ -253,7 +256,6 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E9: { kind: 'forbid', why: '等待中无验收可修' },
     },
     na: {
-      E2: { kind: 'na', why: '开工核验只发生在开工后（active）' },
       E3: { kind: 'na', why: '核验拦截回退只发生在开工后（active）' },
       E4: { kind: 'na', why: '等待中无步进' },
       E5: { kind: 'na', why: '已在等待（缺前置已落地）' },
@@ -311,7 +313,6 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E9: { kind: 'forbid', why: '停手期间无验收可修' },
     },
     na: {
-      E2: { kind: 'na', why: '开工核验只发生在开工后（active）' },
       E3: { kind: 'na', why: '核验拦截回退只发生在开工后（active）' },
       E4: { kind: 'na', why: '停手中无步进' },
       E5: { kind: 'na', why: '已在阻塞' },
@@ -346,7 +347,7 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E15: { kind: 'forbid', why: '终态不可回改；人撤销走板行人工通道' },
     },
     na: {
-      E2: { kind: 'na', why: '非施工态' }, E3: { kind: 'na', why: '非施工态' },
+      E3: { kind: 'na', why: '非施工态' },
       E4: { kind: 'na', why: '非施工态' }, E5: { kind: 'na', why: '非施工态' },
       E6: { kind: 'na', why: '非等待态' }, E7: { kind: 'na', why: '非排队态' },
       E8: { kind: 'na', why: '已验收' }, E9: { kind: 'na', why: '已验收' },
@@ -370,7 +371,7 @@ export const MATRIX: Readonly<Record<State, StateCells>> = {
       E16: { kind: 'forbid', why: '已取消' },
     },
     na: {
-      E2: { kind: 'na', why: '非施工态' }, E3: { kind: 'na', why: '非施工态' },
+      E3: { kind: 'na', why: '非施工态' },
       E4: { kind: 'na', why: '非施工态' }, E5: { kind: 'na', why: '非施工态' },
       E6: { kind: 'na', why: '非等待态' }, E7: { kind: 'na', why: '非排队态' },
       E8: { kind: 'na', why: '已取消无验收' }, E9: { kind: 'na', why: '已取消无验收' },

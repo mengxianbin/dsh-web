@@ -50,7 +50,7 @@ const refuse = (kind: RefusalKind, detail: string, guard?: string): TransitionRe
 /**
  * Apply one event to one record.
  * @param record - current record (not mutated).
- * @param event - E1–E21.
+ * @param event - E1, E3–E21 (the former 开工核验过 event retired, freeze-reclaim-phase2-1127 分期4).
  * @param deps - injected guard sources (fail-closed inside each guard).
  * @param payload - event payload (clock, ruling target, freeze reason).
  * @returns the new record or a structured refusal.

@@ -38,12 +38,14 @@ const at = '2026-11-23T12:00:00.000Z'
 const payload: TransitionPayload = { at }
 
 describe('E1 dispatch (预立行, §3.1)', () => {
-  it('backlog → active with a frozen queue-position mark carrying the reason', () => {
+  it('backlog → active binds the session id, born active with zero freeze side-effect (§6.5)', () => {
     const result = applyTransition(record('backlog'), 'E1', deps(), { ...payload, sessionId: 'session-abc' })
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.record.state).toBe('active')
-    expect(result.record.session).toEqual({ id: 'session-abc', mode: 'frozen', reason: '排队位：等待开工核验' })
+    // §6.5 拆冻结副作用：E1 只做 id 绑定，不再写 frozen/排队位。
+    expect(result.record.session).toEqual({ id: 'session-abc', mode: 'active', reason: '' })
+    expect(JSON.stringify(result.record)).not.toContain('frozen')
     expect(result.record.history).toHaveLength(1)
   })
 
