@@ -8,11 +8,12 @@ import { join } from 'node:path'
 import z from 'schemastery'
 import { mountOnce } from './mount-once.ts'
 import { resolveDshHome } from './dsh-home.ts'
-import { defaultStorePaths, FileBindingStore } from './host/bindings.ts'
+import { defaultStorePaths, FileBindingStore, canonicalSessionId } from './host/bindings.ts'
 import { AttentionLedger, defaultAttentionPath, type AttentionRegistry } from './host/attention.ts'
 import { createClassProjection } from './host/class-projection.ts'
 import { makeDispatchRoutes, makeSessionSendRoute, makeSessionStopRoute, type DispatchSessionApi } from './host/routes.ts'
 import { makeLoopbackFsmSeam } from './host/fsm-seam.ts'
+import { createTurnEndFsmSync } from './host/turn-end-fsm.ts'
 import { TaskbotBossGate } from './host/boss-gate.ts'
 import { SteerAckTracker } from './host/steer-ack.ts'
 
@@ -129,6 +130,33 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
       makeSessionStopRoute({ sessions }),
     ]
     const disposers = routes.map((route) => ctx.webServer.register(route))
+    // C leg — host-side full-coverage FSM entry (fsm-turnend-wire-1126 §3.3):
+    // every session's `turn/end` reconciles its ledger-bound taskRef into the
+    // FSM (absent → create+E1 入机 / backlog → E1 推进 / past backlog → no-op),
+    // covering the trees where the Stop hook cannot run. Same entry judgment
+    // as the A leg (exemptions → scope → create/E1), loopback through the very
+    // seam dispatch uses. ⛔ No new config key: this rides the existing plugin,
+    // so it lands on the next dsh web restart — 生效重启归人，本单不自行重启。
+    const turnEndFsm = createTurnEndFsmSync(ctx, {
+      // Quick ledger, read-only through the store's own list() — ⛔ no binding
+      // semantics are touched (that surface belongs to #bindings-retire-1126).
+      // Latest row wins: a re-dispatched session points at its newest taskRef.
+      resolveTaskRef: async (sessionId) => {
+        const id = canonicalSessionId(sessionId)
+        const rows = await store.list().catch(() => [])
+        let hit: string | undefined
+        for (const row of rows) {
+          if (canonicalSessionId(row.sessionId) === id) hit = row.taskRef
+        }
+        return hit
+      },
+      // bot-boss exemption parity with the dispatch seam (防分裂).
+      resolveClass: async (sessionId) =>
+        (await attention.classes().catch(() => undefined))?.[sessionId],
+      fsm: makeLoopbackFsmSeam(),
+      origin: () => ctx.webServer.getOrigin(),
+    })
+    turnEndFsm.start()
     // First real user message is the classification fallback: a Session the
     // startup pass and its dispatch never covered (created in the UI mid-run)
     // gets the human default here. The membership gate lives in the ledger,
@@ -142,6 +170,7 @@ export const apply = mountOnce('dsh-session-dispatch', (ctx: Context, config?: C
       void attention.ensureFirstMessage(String(session.id)).catch(() => {})
     })
     return () => {
+      turnEndFsm.stop() // idempotent teardown (spec ③)
       classProjection.dispose()
       disposeEvents()
       for (const dispose of disposers) {
