@@ -102,11 +102,14 @@ export function sealMarker(result: { readonly verdict: SealVerdict; readonly det
   return isStaleSeal(result) ? 'stale' : `${result.verdict}:${result.detail}`
 }
 
-/** The endorsement-line shape save-status.py prints (seal-remedy-1119 receipt). */
-const ENDORSEMENT_SHAPE = 'SAVE_STATUS=DONE repo=<仓路径> commits=n/n pushedBranch=n/n merged=n/n pushedMain=n/n auditCleaned=yes dirty=0 hashes=<h1>,<h2>,…'
+/** The endorsement-line shape save-status.py prints (seal-remedy-1119 receipt).
+ * Multi-repo batches ride one command's paired `--repo`/`--hashes` args and still
+ * print exactly one combined line — `repo=<仓A>+<仓B>` — including the `repos=n/n`
+ * seventh cell (2026-11-27 save-multirepo-1127). */
+const ENDORSEMENT_SHAPE = 'SAVE_STATUS=DONE repo=<仓路径|仓A+仓B> commits=n/n pushedBranch=n/n merged=n/n pushedMain=n/n auditCleaned=yes dirty=0 repos=n/n hashes=<h1>,<h2>,…'
 
 /** The paste-one-line remedy for an unsealed turn (seal-remedy-1119 receipt). */
-const PASTE_REMEDY = '末行须原样粘贴 save-status.py 输出的整行背书（禁引用、禁改写、禁加尾注）：python scripts/git/save-status.py --hashes <本批hash>，把输出行作为末条助手消息的末行后重试归档'
+const PASTE_REMEDY = '末行须原样粘贴 save-status.py 输出的整行背书（禁引用、禁改写、禁加尾注）：python scripts/git/save-status.py --hashes <本批hash>（多仓一批 = 一条命令多个参数：--repo <仓A> --hashes "<A批>" --repo <仓B> --hashes "<B批>" 逐对配参、仍输出一行），把输出行作为末条助手消息的末行后重试归档'
 
 /** The save-first remedy for a pending turn (seal-remedy-1119 receipt). */
 const SAVE_FIRST_REMEDY = 'save 未完成（PENDING）：先完成 save（清 dirty / 合入 / 推送），重跑 python scripts/git/save-status.py 取 DONE 背书行整行作为末条助手消息末行后重试归档'
