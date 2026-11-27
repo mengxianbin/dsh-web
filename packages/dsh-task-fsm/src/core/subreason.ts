@@ -10,13 +10,16 @@ import { deriveQueue } from './queue.ts'
 import { EVENT_LABELS } from './table.ts'
 
 /**
- * Label of any history event: E1–E21 come from the design table; the two
+ * Label of any history event: E1, E3–E21 come from the design table; the two
  * rebind pseudo-events (fsm-rebind-1126 §3.1) are history-only marks and
- * deliberately stay out of `EVENT_LABELS` (轴封闭, E1–E21 表不扩).
+ * deliberately stay out of `EVENT_LABELS` (轴封闭, 事件表不扩); retired E2
+ * (freeze-reclaim-phase2-1127 分期4) keeps a frozen label so legacy ledger
+ * rows still render — the event itself is unfirable.
  */
 function historyEventLabel(event: HistoryEntry['event']): string {
   if (event === 'rebind-in') return '换绑入'
   if (event === 'rebind-out') return '换绑出'
+  if (event === 'E2') return '开工核验过（已退役）'
   return EVENT_LABELS[event]
 }
 

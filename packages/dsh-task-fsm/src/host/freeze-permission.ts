@@ -63,8 +63,8 @@ export function mayAutoFreeze(
 /**
  * Tolerant synchronous read of the attention ledger → lookup table.
  *
- * One small-file read per below-floor tick (the healthy path never calls
- * it). Every failure mode — missing file, torn JSON, foreign shape, legacy
+ * One small-file read per sustained below-enter tick (the healthy path and
+ * the 30s time-axis hold never call it). Every failure mode — missing file, torn JSON, foreign shape, legacy
  * `bot` rows — resolves to a partial table or `{}`, never a throw: the
  * failure direction is always "fewer rows freeze".
  * @param dshHome - DSH home holding `session-attention.json`.

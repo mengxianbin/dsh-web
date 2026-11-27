@@ -1,8 +1,10 @@
 /**
- * Completeness spec (design §2.3): the 6 states x 21 events cartesian
- * product must be fully covered by explicit transfer/forbid/na entries —
- * a missing cell fails HERE (测试期炸), never at runtime. Also pins the
- * guard vocabulary: every G1–G6 id is referenced by the table.
+ * Completeness spec (design §2.3): the 6 states x 20 events cartesian
+ * product (E1, E3–E21; the former 开工核验过 event retired by
+ * freeze-reclaim-phase2-1127 分期4) must be fully covered by explicit
+ * transfer/forbid/na entries — a missing cell fails HERE (测试期炸), never
+ * at runtime. Also pins the guard vocabulary: every G1–G6 id is referenced
+ * by the table.
  */
 import { describe, expect, it } from 'vitest'
 import { EVENTS, MATRIX, STATES, cellFor, type EventId, type State } from '../src/core/table.ts'
@@ -35,7 +37,7 @@ describe('state x event completeness (§2.3)', () => {
     }
   })
 
-  it('cellFor returns an entry for all 126 cells', () => {
+  it('cellFor returns an entry for all 120 cells', () => {
     let checked = 0
     for (const state of STATES) {
       for (const event of EVENTS) {
@@ -70,7 +72,7 @@ describe('state x event completeness (§2.3)', () => {
   })
 
   it('terminal states refuse every mutating work event (done/cancelled safety)', () => {
-    const workEvents: EventId[] = ['E2', 'E3', 'E4', 'E5', 'E7', 'E9', 'E10', 'E14']
+    const workEvents: EventId[] = ['E3', 'E4', 'E5', 'E7', 'E9', 'E10', 'E14']
     for (const state of ['done', 'cancelled'] as const) {
       for (const event of workEvents) {
         const cell = cellFor(state, event)

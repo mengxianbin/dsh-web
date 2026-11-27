@@ -113,20 +113,39 @@ async function seed(t: ReturnType<typeof setup>, taskRef: string, title: string,
 }
 
 describe('GET /api/task-fsm/session (bound 200 / unknown 404 / empty id never resolves)', () => {
-  it('a bound record answers 200 with the frozen view the UI mark renders from', async () => {
+  it('a bound record answers 200 with its session view (E1 binds id, born active per §6.5)', async () => {
     const t = setup()
     try {
       await seed(t, TASK_REF, 'session 路由夹具', SESSION_ID)
       // Acceptance ① reading: E1 carried sessionId into the record.
       expect(t.store.load().tasks[TASK_REF]?.session?.id).toBe(SESSION_ID)
+      // §6.5 拆冻结副作用（分期2）：E1 只绑 id，会话生而 active，零 freeze 副作用。
+      expect(t.store.load().tasks[TASK_REF]?.session?.mode).toBe('active')
       const hit = await call(t.session, get(`/api/task-fsm/session?id=${encodeURIComponent(SESSION_ID)}`))
       expect(hit.status).toBe(200)
       expect(hit.body.ok).toBe(true)
       expect(hit.body.found).toBe(true)
       expect(hit.body.view?.session?.id).toBe(SESSION_ID)
-      // E1 queue-position freeze: the mark renders on frozen with a reason.
+      expect(hit.body.view?.session?.mode).toBe('active')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it('a legacy frozen record still answers 200 with the frozen view (存量 frozen 不回退)', async () => {
+    const t = setup()
+    try {
+      await seed(t, TASK_REF, 'session 路由夹具（存量 frozen）', SESSION_ID)
+      // 存量 frozen 行的形态由 watcher/宣告面产生；夹具手术直接构造（§6.5：冻结不走 E1）。
+      const file = t.store.load()
+      const record = file.tasks[TASK_REF]
+      if (record === undefined) throw new Error('fixture missing')
+      record.session = { id: SESSION_ID, mode: 'frozen', reason: '排队位：等待开工核验' }
+      t.store.save(file)
+      const hit = await call(t.session, get(`/api/task-fsm/session?id=${encodeURIComponent(SESSION_ID)}`))
+      expect(hit.status).toBe(200)
       expect(hit.body.view?.session?.mode).toBe('frozen')
-      expect(hit.body.view?.session?.reason ?? '').not.toBe('')
+      expect(hit.body.view?.session?.reason).toBe('排队位：等待开工核验')
     } finally {
       t.cleanup()
     }
@@ -151,7 +170,9 @@ describe('GET /api/task-fsm/session (bound 200 / unknown 404 / empty id never re
       await seed(t, TASK_REF, 'session 路由夹具', SESSION_ID)
       await seed(t, UNBOUND_REF, 'session 路由夹具（未绑）')
       const unbound = t.store.load().tasks[UNBOUND_REF]
+      // §6.5：E1 无 payload 生而 active、id 空——空 id 永不解析。
       expect(unbound?.session?.id).toBe('')
+      expect(unbound?.session?.mode).toBe('active')
       const empty = await call(t.session, get('/api/task-fsm/session?id='))
       expect(empty.status).toBe(404)
       expect(empty.body.ok).toBe(false)

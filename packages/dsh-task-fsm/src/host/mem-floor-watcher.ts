@@ -1,20 +1,31 @@
 /**
- * Memory-floor watcher — the E7 trigger the design left unwired
- * (pure-worker-design-1123 §事件集「host 配额闸 → E7」/ §3.2 冻结时机;
- * board row `mem-floor-freeze-wiring-1124`).
+ * Memory-floor watcher — the E7/E4 trigger on the §6.4 dual threshold
+ * (freeze-reclaim-design-1127 分期3, 裁定 #16/#17; supersedes the single-line
+ * floor trigger wired in mem-floor-freeze-wiring-1124).
  *
  * One low-frequency tick reads system free memory with `os.freemem()` — a
  * cheap synchronous syscall, **no child process is ever started** (reading
  * memory by spawning a subprocess is the availability gate's anti-pattern):
- *   · free < floor  →  the EXISTING E7 transition freezes active sessions
- *     (D 轴 ❄️, cause `quota-wait`, hover reason carries the readings);
- *   · free ≥ floor continuously for the cooldown  →  the EXISTING wake
- *     trigger `quota-free` (E4, §3.3 唤醒两触发) releases those freezes.
+ *   · free < 进场线 800M, held ≥ 时间轴 30s  →  the EXISTING E7 transition
+ *     freezes active sessions (D 轴 frozen mark, cause `quota-wait`);
+ *   · 800M–1600M 中带 (dead band)  →  no action at all (新照常、旧排队);
+ *   · free ≥ 唤醒线 1600M, held ≥ 30s  →  the EXISTING wake trigger
+ *     `quota-free` (E4, §3.3 唤醒两触发) releases those freezes.
+ * The 800M gap between the lines IS the hysteresis (进场与唤醒不来回抖,
+ * 空间轴为主); the 30s hold is the anti-jitter auxiliary (时间轴为辅).
+ * The old single line floor (total×10% = 1611M) no longer triggers anything —
+ * it is still *reported* on every tick (地板值零改: the value itself and the
+ * dispatch-side gate built on it are untouched).
  *
- * Hard boundaries (board row ⛔): the E event set is untouched — this
- * module only ever *emits* E7 and E4 — and no session body is killed
- * (freeze = mark + input hiding; reclamation of already-spawned
- * subprocesses is natural drain, documented in the construction doc).
+ * 三态 (§6.4, 裁定 #16): a record may carry `freezeControl` —
+ *   · `human-thaw`    豁免期不入自动冻列 (the freeze pass skips the row);
+ *   · `human-freeze`  只有人能解 (the wake pass skips the row);
+ *   · absent / `auto` 自动托管 (the machine manages both directions).
+ *
+ * Hard boundaries (board row ⛔): the E event set is untouched — this module
+ * only ever *emits* E7 and E4 — and no session body is killed (freeze = mark
+ * + input hiding; reclamation of already-spawned subprocesses is natural
+ * drain, documented in the construction doc).
  *
  * Frequency is bounded by construction (period clamped to
  * ≥ `MIN_WATCH_PERIOD_MS`) and every read is held to `READ_BUDGET_MS`; an
@@ -24,7 +35,7 @@
  * Two Phase-1 seams (freeze-reclaim-design-1127 分期4):
  *   · **§6.2 权限表** — the E7 pass selects rows through `mayAutoFreeze`
  *     (human never auto-frozen, undeclared class = human, bot only inside a
- *     declared scope). Wake stays ungated: 解冻永可用 (§6.2 防自锁).
+ *     declared scope). Wake stays ungated by class: 解冻永可用 (§6.2 防自锁).
  *   · **三信号只读接入** — every tick carries the 伤害 (event-loop lamp) and
  *     竞争 (IO-gate queue depth) readings through `readSignals`; they are
  *     observability only (E event set diff = 0, verdict unchanged).
@@ -44,13 +55,26 @@ export const MIN_WATCH_PERIOD_MS = 30_000
 export const DEFAULT_WATCH_PERIOD_MS = 60_000
 /** Single-read budget (板行判据③ 单次亚毫秒): over budget = fail-open tick. */
 export const READ_BUDGET_MS = 1
-/** Default floor = 10% free memory (与派发侧地板读数同口径; 施工期定判据归人). */
+/**
+ * 地板读数 = 10% 空闲（地板值零改 — 裁定边界⛔）。只上报不再触发：§6.4 起
+ * 触发线 = 进场/唤醒双阈值（本档头注）；派发侧同口径的 1611MB 闸在 dsh-web 之外，本单零接触。
+ */
 export const DEFAULT_FLOOR_RATIO = 0.1
-/** Default wake cooldown (施工期定, 判据归人): 60s continuously healthy. */
-export const DEFAULT_COOLDOWN_MS = 60_000
+/** §6.4 新会话进场线（裁定 #17）：free < this → 冻结区. 800 MiB. */
+export const ENTER_LINE_BYTES = 800 * 1024 * 1024
+/** §6.4 旧会话唤醒线（裁定 #17）：free ≥ this → 唤醒区. 1600 MiB. */
+export const WAKE_LINE_BYTES = 1600 * 1024 * 1024
+/** §6.4 时间轴（裁定 #17）：水位越线持续 ≥ this 才动作（时间轴为辅）. 30s. */
+export const DEFAULT_TIME_AXIS_MS = 30_000
 
 /** 三色灯档（伤害信号）: green = healthy, yellow = degraded, red = hurt already. */
 export type LampColor = 'green' | 'yellow' | 'red'
+
+/**
+ * §6.4 空间分区（主判据）：进场线之下 / 中带死区 / 唤醒线之上。
+ * verdict = 本区名，或 `anomaly`（fail-open，本拍无分区知识）。
+ */
+export type MemFloorZone = 'below-enter' | 'mid-band' | 'above-wake'
 
 /**
  * 三信号只读读数（§三, 分期4）: carried on EVERY tick face for the 判据层 /
@@ -72,10 +96,18 @@ export interface MemFloorTickInfo {
   free: number
   /** Total bytes read this tick (0 on anomaly). */
   total: number
-  /** Floor bytes = total × floorRatio. */
+  /**
+   * Floor bytes = total × floorRatio — reported reading only (地板值零改;
+   * §6.4 起不再作触发线，触发 = 下方 verdict 的双阈值分区).
+   */
   floor: number
-  /** What the tick decided. */
-  verdict: 'below-floor' | 'cooldown' | 'wake' | 'anomaly'
+  /** What the tick decided: the §6.4 spatial zone, or anomaly (fail-open). */
+  verdict: MemFloorZone | 'anomaly'
+  /**
+   * How long the reading has held this zone (ms; 0 on anomaly) — the 时间轴
+   * input: an action fires only when this reaches `timeAxisMs`.
+   */
+  zoneHeldMs: number
   /** Duration of the memory reads (ms, `performance.now()` — budget check). */
   readMs: number
   /** taskRefs frozen by this tick (E7). */
@@ -95,23 +127,24 @@ export interface MemFloorWatcherOptions {
   dshHome: string
   /** G5 redisp breaker cap (wiring parity with `makeTaskFsmRoutes`). */
   maxRedisp: number
-  /** Free/total ratio floor; clamped into [0, 1]. Default 0.10. */
+  /** Free/total ratio floor (reported reading only, 地板值零改); clamped into [0, 1]. Default 0.10. */
   floorRatio?: number
   /** Tick period ms; clamped to ≥ `MIN_WATCH_PERIOD_MS`. Default 60s. */
   periodMs?: number
-  /** Continuous-healthy time before a wake fires. Default 60s. */
-  cooldownMs?: number
+  /** §6.4 时间轴: a zone must hold ≥ this before the tick acts. Default 30s (裁定 #17). */
+  timeAxisMs?: number
   /** Free-memory reader (fixture seam). Default `os.freemem`. */
   readFreeMem?: () => number
   /** Total-memory reader (fixture seam). Default `os.totalmem`. */
   readTotalMem?: () => number
-  /** Clock (cooldown bookkeeping only; read budget uses `performance.now()`). */
+  /** Clock (zone-hold bookkeeping only; read budget uses `performance.now()`). */
   now?: () => number
   /** Per-tick observability hook (tests / optional host logging). */
   onTick?: (info: MemFloorTickInfo) => void
   /**
-   * §6.2 权限表 class reader (fixture seam; one table read per below-floor
-   * tick). Default = the attention ledger under `dshHome` (attendance 同文件).
+   * §6.2 权限表 class reader (fixture seam; one table read per sustained
+   * below-enter tick). Default = the attention ledger under `dshHome`
+   * (attendance 同文件).
    */
   readAttention?: () => AttentionTable
   /** 三信号只读读数 (fixture seam; default = no readings — empty object). */
@@ -126,13 +159,15 @@ function clamp(value: number, min: number, max: number): number {
 
 /**
  * The host-side memory floor watcher. One bounded timer; every tick is a
- * cheap read + an optional state-machine transfer (E7 freeze / E4 wake) —
- * never a new event, never a subprocess, never a high-frequency poll.
+ * cheap read + at most one state-machine pass (E7 freeze below the enter
+ * line / E4 wake above the wake line) — never a new event, never a
+ * subprocess, never a high-frequency poll.
  */
 export class MemFloorWatcher {
   /** Effective period after the ≥30s clamp (frequency bound, 判据③). */
   readonly periodMs: number
-  readonly cooldownMs: number
+  /** §6.4 时间轴 ms (anti-jitter hold, 裁定 #17). */
+  readonly timeAxisMs: number
   readonly floorRatio: number
 
   /** Duration of the last completed memory read (ms, 判据③ sub-ms assertion). */
@@ -147,7 +182,10 @@ export class MemFloorWatcher {
   private readonly onTick?: (info: MemFloorTickInfo) => void
   private readonly readAttention: () => AttentionTable
   private readonly readSignals: () => FreezeSignalReadings
-  private recoveredAt: number | null = null
+  /** Current §6.4 zone (null before the first zoned tick). */
+  private zone: MemFloorZone | null = null
+  /** When the reading entered the current zone (越区即重数时间轴). */
+  private zoneSince = 0
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(options: MemFloorWatcherOptions) {
@@ -163,7 +201,7 @@ export class MemFloorWatcher {
     this.readSignals = options.readSignals ?? (() => ({}))
     // 频率有界 (判据③): the period can never be configured below 30s.
     this.periodMs = Math.max(MIN_WATCH_PERIOD_MS, Math.floor(options.periodMs ?? DEFAULT_WATCH_PERIOD_MS))
-    this.cooldownMs = Math.max(0, Math.floor(options.cooldownMs ?? DEFAULT_COOLDOWN_MS))
+    this.timeAxisMs = Math.max(0, Math.floor(options.timeAxisMs ?? DEFAULT_TIME_AXIS_MS))
     this.floorRatio = clamp(options.floorRatio ?? DEFAULT_FLOOR_RATIO, 0, 1)
   }
 
@@ -183,14 +221,15 @@ export class MemFloorWatcher {
   }
 
   /**
-   * One watch tick: cheap read (sub-ms budget, fail-open) → floor compare
-   * → E7 freeze pass or cooldown/wake pass over the fsm file.
+   * One watch tick: cheap read (sub-ms budget, fail-open) → §6.4 zone
+   * (进场线 / 中带 / 唤醒线, 空间轴主判据) → 时间轴 hold check → at most one
+   * pass (E7 freeze below the enter line / E4 wake above the wake line).
    * @returns the tick's decision record (tests assert on it).
    */
   tick(): MemFloorTickInfo {
     const at = this.now()
     const base = {
-      at, free: 0, total: 0, floor: 0, readMs: 0,
+      at, free: 0, total: 0, floor: 0, readMs: 0, zoneHeldMs: 0,
       frozen: [] as string[], woken: [] as string[], signals: this.readSignalsSafe(),
     }
 
@@ -222,6 +261,7 @@ export class MemFloorWatcher {
         detail: `non-finite memory reading (fail-open, no freeze): free=${String(free)} total=${String(total)}`,
       })
     }
+    // 地板读数（地板值零改）：只上报，不再是触发线（§6.4 双阈值接管）。
     const floor = Math.floor(total * this.floorRatio)
 
     // ——— 机器权威读（损坏 = fail-open，绝不在 watcher 里静默重建）———
@@ -235,20 +275,39 @@ export class MemFloorWatcher {
       })
     }
 
-    // ——— ② 低于地板 → 既有 E7 转移落冻结位（只打 active 且未冻结、且过 §6.2 权限表的会话行）———
-    if (free < floor) {
-      this.recoveredAt = null
-      // §6.2 权限表: one table read per below-floor tick, then per-row selection.
+    // ——— ② §6.4 空间分区（主判据）：进场线之下 / 中带死区 / 唤醒线之上 ———
+    const zone: MemFloorZone = free < ENTER_LINE_BYTES
+      ? 'below-enter'
+      : free >= WAKE_LINE_BYTES ? 'above-wake' : 'mid-band'
+    if (zone !== this.zone) {
+      this.zone = zone
+      this.zoneSince = at // 越区即重数时间轴（防瞬时抖动）
+    }
+    const zoneHeldMs = at - this.zoneSince
+
+    // 中带 800–1600M = 死区：新照常、旧排队 —— 两向都不动作（滞回的另一半）。
+    if (zone === 'mid-band') {
+      return this.emit({ ...base, free, total, floor, readMs, zoneHeldMs, verdict: 'mid-band' })
+    }
+    // 时间轴为辅：水位越线持续 ≥30s 才动作；未满只报数、零写盘。
+    if (zoneHeldMs < this.timeAxisMs) {
+      return this.emit({ ...base, free, total, floor, readMs, zoneHeldMs, verdict: zone })
+    }
+
+    if (zone === 'below-enter') {
+      // ——— ③ 进场线之下（持续满轴）→ 既有 E7 转移落冻结位（只打 active 且未冻结、过 §6.2 权限表、非人工解冻豁免的会话行）———
+      // §6.2 权限表: one table read per sustained below-enter tick, then per-row selection.
       const attention = this.readAttention()
       const declaredScopes = new Set(Object.keys(file.scopes))
       const frozen: string[] = []
       for (const [taskRef, record] of Object.entries(file.tasks)) {
         if (record.state !== 'active') continue // E7 only applies from active (table 三分)
-        if (record.session?.mode !== 'active' || record.session.id === '') continue // already ❄️/🔒 or session-less
+        if (record.session?.mode !== 'active' || record.session.id === '') continue // already frozen/locked or session-less
+        if (record.freezeControl === 'human-thaw') continue // §6.4 三态: 豁免期不入自动冻列
         if (!mayAutoFreeze(record, attention, declaredScopes)) continue // §6.2: human 不入列 / scope 外不入列
         const result = applyTransition(
           record, 'E7', this.depsFor(file, record),
-          { reason: `内存地板：FreeMB ${Math.round(free / MB)} < 地板 ${Math.round(floor / MB)}（mem-floor watcher）` },
+          { reason: `内存让路：FreeMB ${Math.round(free / MB)} < 进场线 ${Math.round(ENTER_LINE_BYTES / MB)}M（mem-floor watcher）` },
         )
         if (result.ok) {
           file.tasks[taskRef] = result.record
@@ -256,24 +315,14 @@ export class MemFloorWatcher {
         }
       }
       if (frozen.length > 0) this.store.save(file) // no write when nothing changed
-      return this.emit({ ...base, free, total, floor, verdict: 'below-floor', readMs, frozen })
+      return this.emit({ ...base, free, total, floor, readMs, zoneHeldMs, verdict: 'below-enter', frozen })
     }
 
-    // ——— ③ 回地板 + 冷却 → 既有 `quota-free` 唤醒（E4；只放 quota-wait 冻结行）———
+    // ——— ④ 唤醒线之上（持续满轴）→ 既有 `quota-free` 唤醒（E4；只放 quota-wait 冻结行、非人工冻结锁行）———
     const wakeTargets = Object.entries(file.tasks).filter(([, record]) =>
       record.cause === 'quota-wait'
-      && (record.session?.mode === 'frozen' || record.session?.mode === 'locked'))
-    if (wakeTargets.length === 0) {
-      this.recoveredAt = null
-      return this.emit({ ...base, free, total, floor, verdict: 'cooldown', readMs })
-    }
-    if (this.recoveredAt === null) {
-      this.recoveredAt = at
-      return this.emit({ ...base, free, total, floor, verdict: 'cooldown', readMs })
-    }
-    if (at - this.recoveredAt < this.cooldownMs) {
-      return this.emit({ ...base, free, total, floor, verdict: 'cooldown', readMs })
-    }
+      && (record.session?.mode === 'frozen' || record.session?.mode === 'locked')
+      && record.freezeControl !== 'human-freeze') // §6.4 三态: 只有人能解
     const woken: string[] = []
     for (const [taskRef, record] of wakeTargets) {
       const result = applyTransition(record, 'E4', this.depsFor(file, record), {})
@@ -283,8 +332,7 @@ export class MemFloorWatcher {
       }
     }
     if (woken.length > 0) this.store.save(file)
-    this.recoveredAt = at // further wake attempts wait another cooldown (bounded retry)
-    return this.emit({ ...base, free, total, floor, verdict: 'wake', readMs, woken })
+    return this.emit({ ...base, free, total, floor, readMs, zoneHeldMs, verdict: 'above-wake', woken })
   }
 
   /** Guard deps for one record — parity with the route-side wiring (§2.4). */

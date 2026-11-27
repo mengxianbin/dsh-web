@@ -3,10 +3,12 @@
  * the REAL handler over a REAL FsmStore on a scratch file.
  *
  * Contract under test:
- *  ① 200 attaches `sessionId` to a non-terminal record whose session.id is empty
- *     (the victim shape: hook-burned active ∧ session.id='') — mode/reason preserved,
- *     **history byte-identical** (structure field ≠ transition; HistoryEventSchema is
- *     a whitelist, an invented event would fail-close the WHOLE ledger).
+ *  ① 200 attaches `sessionId` to a non-terminal record whose session node is missing
+ *     (§6.5 拆冻结副作用后 E1 无 payload 的产物：active ∧ session 缺位) — seeds born-active
+ *     {mode:'active', reason:''}, **history byte-identical** (structure field ≠ transition;
+ *     HistoryEventSchema is a whitelist, an invented event would fail-close the WHOLE ledger).
+ *  ①b legacy victim shape (hook-burned active ∧ session.id='' with frozen/排队位) still
+ *     attaches by filling only the id — mode/reason preserved (存量 frozen 不回退).
  *  ② idempotent: same sessionId re-POST → 200 with zero drift (tasks byte-equal).
  *  ③ 非法拒零写: a different bound session → 409 conflict; terminal → 409 forbidden
  *     (终态完整性, 协调方回函 2026-11-27 裁定维持 — 受害单 taskbook-gate 已 done →
@@ -24,7 +26,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { makeTaskFsmRoutes } from '../src/host/routes.ts'
 import { FsmStore } from '../src/host/store.ts'
 import { archivePlan } from '../src/core/archive.ts'
-import type { HistoryEntry } from '../src/core/schema.ts'
+import type { HistoryEntry, TaskRecord } from '../src/core/schema.ts'
 
 const SCOPE = 'content/tech/ai/dsh'
 const PARENT_REF = 'content/tech/ai/dsh/tasks.md#attach-route-parent'
@@ -94,7 +96,7 @@ function setup() {
   }
 }
 
-/** scope → create → E1(no payload): the victim shape — active ∧ session.id=''. */
+/** scope → create → E1(no payload): §6.5 后 E1 不播种 session 节点 — active ∧ session 缺位。 */
 async function seed(t: ReturnType<typeof setup>, taskRef: string, title: string): Promise<void> {
   const sc = await post(t.scope, { key: SCOPE, prio: 'yellow', intent: 'dsh 板（attach 路由夹具）' })
   expect([200, 409]).toContain(sc.status)
@@ -109,23 +111,31 @@ async function seed(t: ReturnType<typeof setup>, taskRef: string, title: string)
   expect(e1.status).toBe(200)
 }
 
-/** Direct fixture surgery for states E1 alone cannot reach (terminal seed). */
-function forceState(t: ReturnType<typeof setup>, taskRef: string, state: string): void {
+/** Direct fixture surgery for shapes events alone cannot reach (terminal seed / legacy victim). */
+function surgery(t: ReturnType<typeof setup>, taskRef: string, mutate: (record: TaskRecord) => void): void {
   const file = t.store.load()
   const record = file.tasks[taskRef]
   if (record === undefined) throw new Error(`fixture missing: ${taskRef}`)
-  record.state = state as typeof record.state
+  mutate(record)
   t.store.save(file)
 }
 
+function forceState(t: ReturnType<typeof setup>, taskRef: string, state: string): void {
+  surgery(t, taskRef, (record) => {
+    record.state = state as typeof record.state
+  })
+}
+
 describe('POST /api/task-fsm/session/attach (session 挂载口)', () => {
-  it('attaches an empty-session active record without writing any history entry', async () => {
+  it('attaches a session-less active record, seeding born-active (§6.5), without any history entry', async () => {
     const t = setup()
     try {
       await seed(t, CHILD_REF, 'attach 夹具·子')
       const before = t.store.load()
       expect(before.tasks[CHILD_REF]?.state).toBe('active')
+      // §6.5：E1 不再播种 frozen/排队位——节点生而 active，只是 id 尚空（attach 补绑）。
       expect(before.tasks[CHILD_REF]?.session?.id).toBe('')
+      expect(before.tasks[CHILD_REF]?.session?.mode).toBe('active')
       const beforeHistory: HistoryEntry[] = [...(before.tasks[CHILD_REF]?.history ?? [])]
 
       const hit = await post(t.attach, { taskRef: CHILD_REF, sessionId: SESSION_A })
@@ -134,12 +144,36 @@ describe('POST /api/task-fsm/session/attach (session 挂载口)', () => {
 
       const after = t.store.load()
       expect(after.tasks[CHILD_REF]?.session?.id).toBe(SESSION_A)
-      // D 轴不动：mode/reason 保留（E1 播种的排队位正形），只补 id。
-      expect(after.tasks[CHILD_REF]?.session?.mode).toBe('frozen')
-      expect(after.tasks[CHILD_REF]?.session?.reason).toBe('排队位：等待开工核验')
+      // 节点缺位才播种：生而 active（冻结只由 watcher/宣告面显式驱动，§6.5）。
+      expect(after.tasks[CHILD_REF]?.session?.mode).toBe('active')
+      expect(after.tasks[CHILD_REF]?.session?.reason).toBe('')
       // ⛔ 不写 history：挂载 = 结构字段回写，不是状态转移。
       expect(after.tasks[CHILD_REF]?.history).toEqual(beforeHistory)
       expect(after.tasks[CHILD_REF]?.state).toBe('active')
+    } finally {
+      t.cleanup()
+    }
+  })
+
+  it('attaches the legacy victim shape (frozen/排队位) by filling only the id (存量 frozen 不回退)', async () => {
+    const t = setup()
+    try {
+      await seed(t, CHILD_REF, 'attach 夹具·子（存量形态）')
+      // 存量 hook-burned 形态：E1 旧正形播种的 {id:'', frozen, 排队位}。
+      surgery(t, CHILD_REF, (record) => {
+        record.session = { id: '', mode: 'frozen', reason: '排队位：等待开工核验' }
+      })
+      const beforeHistory: HistoryEntry[] = [...(t.store.load().tasks[CHILD_REF]?.history ?? [])]
+
+      const hit = await post(t.attach, { taskRef: CHILD_REF, sessionId: SESSION_A })
+      expect(hit.status).toBe(200)
+
+      const after = t.store.load()
+      expect(after.tasks[CHILD_REF]?.session?.id).toBe(SESSION_A)
+      // D 轴不动：存量 mode/reason 原样保留，只补 id。
+      expect(after.tasks[CHILD_REF]?.session?.mode).toBe('frozen')
+      expect(after.tasks[CHILD_REF]?.session?.reason).toBe('排队位：等待开工核验')
+      expect(after.tasks[CHILD_REF]?.history).toEqual(beforeHistory)
     } finally {
       t.cleanup()
     }

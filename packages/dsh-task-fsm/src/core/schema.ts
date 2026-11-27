@@ -18,8 +18,17 @@ export type QueueTier = 'none' | 'red' | 'yellow'
 export type SessionMode = 'active' | 'frozen' | 'locked'
 
 /**
+ * 冻结控制态（§6.4 三态，裁定 #16）: per-record machine-authority pin.
+ *   · `auto`（缺省 = 自动托管）— 机器按 §6.2 权限表 + 双阈值该冻冻该醒醒;
+ *   · `human-freeze`（人工冻结）— 人冻的，机器自动醒一律跳过（只有人能解）;
+ *   · `human-thaw`（人工解冻）— 人保的豁免期，机器自动冻一律跳过（可撤回 auto）.
+ * 落 TaskRecord 顶层（⛔ 不落 session 节点 — E4/E7 会整节点重建，附加字段会丢）。
+ */
+export type FreezeControl = 'auto' | 'human-freeze' | 'human-thaw'
+
+/**
  * Rebind pseudo-events (fsm-rebind-1126, 设计 §3.1 换绑原子事件): history-only
- * marks — NOT transition-table events. The six-state × E1–E21 matrix stays
+ * marks — NOT transition-table events. The six-state matrix stays
  * closed (⛔ 非 E22), and these never join `EVENTS` / `EVENT_LABELS`.
  */
 export type RebindEvent = 'rebind-in' | 'rebind-out'
@@ -27,9 +36,23 @@ export type RebindEvent = 'rebind-in' | 'rebind-out'
 /** The two rebind history events (schema validation face). */
 export const REBIND_EVENTS: readonly RebindEvent[] = ['rebind-in', 'rebind-out']
 
+/**
+ * Retired transition events (freeze-reclaim-phase2-1127 分期4, 裁定 #19):
+ * E2「开工核验过」lost its premise (核验前置到派发, 设计 §6.5) and was deleted
+ * from the transition table — but existing ledgers still carry E2 history
+ * entries and `parseFsmFile` fail-closes on unknown events, so the READ face
+ * keeps tolerating them exactly like the rebind marks: history-only, never
+ * in `EVENTS` / `EVENT_LABELS`, and unfirable (the transition route rejects
+ * them through `isEventId`).
+ */
+export type RetiredEvent = 'E2'
+
+/** The retired history events (schema validation face). */
+export const RETIRED_EVENTS: readonly RetiredEvent[] = ['E2']
+
 /** One history entry appended by every accepted transition (§2.6). */
 export interface HistoryEntry {
-  event: EventId | RebindEvent
+  event: EventId | RebindEvent | RetiredEvent
   from: State
   to: State
   at: string
@@ -66,6 +89,11 @@ export interface TaskRecord {
   cause?: string
   /** `[x] 待查收` 子注（E18/E19, §5）。 */
   pendingAck?: boolean
+  /**
+   * 冻结控制态（§6.4 三态，裁定 #16）；缺省 = 自动托管。人面写入 =
+   * `POST /api/task-fsm/freeze-control`（结构字段，不写 history）。
+   */
+  freezeControl?: FreezeControl
   session?: SessionNode
   attempts: { redisp: number; autofix: number }
   history: HistoryEntry[]
@@ -90,10 +118,11 @@ const StateSchema = z.union(STATES.map((s) => z.const(s)) as [ReturnType<typeof 
 const QueueSchema = z.union([z.const('none'), z.const('red'), z.const('yellow')])
 const ModeSchema = z.union([z.const('active'), z.const('frozen'), z.const('locked')])
 
-/** E1–E21 plus the two rebind pseudo-events (history face only). */
+/** E1, E3–E21 plus the two rebind pseudo-events and retired E2 (history face only). */
 const HistoryEventSchema = z.union([
   ...EVENTS.map((e) => z.const(e)),
   ...REBIND_EVENTS.map((e) => z.const(e)),
+  ...RETIRED_EVENTS.map((e) => z.const(e)),
 ] as [ReturnType<typeof z.const>, ...ReturnType<typeof z.const>[]])
 
 const HistorySchema = z.object({
@@ -123,6 +152,8 @@ const RecordSchema = z.object({
   parent: z.string(),
   cause: z.string(),
   pendingAck: z.boolean(),
+  // §6.4 三态（裁定 #16）：缺省缺位 = 自动托管；在位则必须是三值之一（fail-closed）。
+  freezeControl: z.union([z.const('auto'), z.const('human-freeze'), z.const('human-thaw')]),
   session: SessionSchema,
   attempts: z.object({ redisp: z.number().default(0), autofix: z.number().default(0) }),
   history: z.array(HistorySchema).default([]),
@@ -156,7 +187,8 @@ export const FsmFileSchema: z<FsmFileShape> = z.object({
 /**
  * Semantic checks first (loud, specific messages), then the structural
  * schema: a record must live under its own taskRef key, its state must be
- * one of the six, and history events must be E1–E21. The structural layer
+ * one of the six, and history events must be E1, E3–E21 (plus rebind marks
+ * and retired E2 — read-face tolerance, see `RETIRED_EVENTS`). The structural layer
  * is permissive about missing keys (schemastery object semantics), so this
  * layer carries the invariants the machine depends on.
  * @param raw - unknown JSON value.
@@ -184,7 +216,9 @@ export function parseFsmFile(raw: unknown): FsmFile {
         for (const entry of record.history) {
           const event = (entry as { event?: unknown } | null)?.event
           const known = typeof event === 'string'
-            && ((EVENTS as readonly string[]).includes(event) || (REBIND_EVENTS as readonly string[]).includes(event))
+            && ((EVENTS as readonly string[]).includes(event)
+              || (REBIND_EVENTS as readonly string[]).includes(event)
+              || (RETIRED_EVENTS as readonly string[]).includes(event))
           if (!known) {
             throw new Error(`task-fsm-state: task "${key}" history holds unknown event "${String(event)}"`)
           }

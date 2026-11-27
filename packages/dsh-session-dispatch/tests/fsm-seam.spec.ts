@@ -155,7 +155,8 @@ describe('E1 dispatch seam (host route registers + fires E1 before session work)
     expect(record?.state).toBe('active')
     // session id 回写（S1 前置缺口 8/8 空 → 现落 id）：E1 payload.sessionId 合并语义。
     expect(record?.session?.id).toBe(r.body.sessionId)
-    expect(record?.session?.mode).toBe('frozen')
+    // §6.5 拆冻结副作用（分期2）：E1 生而 active，冻结改由 watcher/宣告面显式驱动。
+    expect(record?.session?.mode).toBe('active')
     expect(record?.history.map((h) => h.event)).toEqual(['E1'])
     expect(counters.prompted).toBe(1)
     expect(counters.bindings).toBe(1)
