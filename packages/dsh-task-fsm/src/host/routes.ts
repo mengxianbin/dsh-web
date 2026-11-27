@@ -11,6 +11,7 @@
  *   POST /api/task-fsm/wake             — the two wake triggers (§3.3)
  *   POST /api/task-fsm/ack              — E19 human receipt
  *   POST /api/task-fsm/rebind           — 换绑原子事件 (fsm-rebind-1126 §3.1)
+ *   POST /api/task-fsm/parent           — 板 → FSM parent 镜像最小写入口 (fsm-turnend-wire-1126)
  * @module dsh-task-fsm/host/routes
  */
 
@@ -618,5 +619,49 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
     },
   }
 
-  return [state, session, notify, archive, scope, create, transition, wake, ack, rebind]
+  /**
+   * POST /api/task-fsm/parent — 板 → FSM parent 镜像的最小写入口（#fsm-turnend-wire-1126）。
+   *
+   * parent 是**结构边字段**（archive.ts childrenOf / root 判据的输入），不是状态转移：
+   * ⛔ 不写 history —— HistoryEventSchema 是白名单，未知事件会被 parseFsmFile fail-closed
+   * 拒掉整份账；扩事件轴属另案。权威在板（fsm-dispatch-design-1126 §1「边权威在板」），
+   * 本端点只被轮尾对账调用；幂等（同值重写 = 无变化），404 = 查无 taskRef。
+   */
+  const parent: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_FSM_API_PREFIX}/parent`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
+      let body: Record<string, unknown> | undefined
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
+      const parentRef = typeof body?.parent === 'string' ? body.parent : ''
+      if (body === undefined || taskRef === '' || parentRef === '') {
+        writeJson(res, 400, { ok: false, error: 'body needs { taskRef, parent }' }); return
+      }
+      if (!parentRef.includes('#')) {
+        writeJson(res, 400, { ok: false, error: 'parent must be a taskRef (<board path>#<anchor>)' }); return
+      }
+      try {
+        const outcome = store.update<{ status: 200; record: TaskRecord } | { status: 404; error: string }>((file) => {
+          const record = file.tasks[taskRef]
+          if (record === undefined) return { status: 404 as const, error: 'unknown taskRef' }
+          record.parent = parentRef
+          return { status: 200 as const, record }
+        })
+        if ('error' in outcome) {
+          // 本端点的失败分支只有 404（union 第二成员），hint 恒适用。
+          console.warn(`[task-fsm] parent REFUSED status=${outcome.status} taskRef=${taskRef}`)
+          writeJson(res, outcome.status, { ok: false, error: outcome.error, hint: HINT_UNKNOWN_TASKREF })
+          return
+        }
+        writeJson(res, 200, { ok: true, record: outcome.record })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
+  return [state, session, notify, archive, scope, create, transition, wake, ack, rebind, parent]
 }
