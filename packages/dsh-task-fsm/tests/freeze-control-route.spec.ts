@@ -172,6 +172,8 @@ describe('POST /api/task-fsm/freeze-control (§6.4 三态人面写入口)', () =
     const t = setup()
     try {
       await seed(t, TARGET_REF, 'freeze-control 夹具·三态')
+      // seed史（E1 + attach 留痕）冻结为参照：三态切换是结构字段，一条史都不加。
+      const seedHistory = JSON.stringify(t.store.load().tasks[TARGET_REF]?.history ?? [])
       const first = await post(t.freezeControl, { taskRef: TARGET_REF, control: 'human-freeze' })
       expect(first.status).toBe(200)
       expect(t.store.load().tasks[TARGET_REF]?.freezeControl).toBe('human-freeze')
@@ -181,7 +183,7 @@ describe('POST /api/task-fsm/freeze-control (§6.4 三态人面写入口)', () =
       const third = await post(t.freezeControl, { taskRef: TARGET_REF, control: 'auto' })
       expect(third.status).toBe(200)
       expect(t.store.load().tasks[TARGET_REF]?.freezeControl).toBe('auto')
-      expect(t.store.load().tasks[TARGET_REF]?.history).toHaveLength(1) // only the seeded E1
+      expect(JSON.stringify(t.store.load().tasks[TARGET_REF]?.history ?? [])).toBe(seedHistory)
     } finally {
       t.cleanup()
     }
