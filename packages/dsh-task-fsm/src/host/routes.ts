@@ -12,6 +12,7 @@
  *   POST /api/task-fsm/ack              — E19 human receipt
  *   POST /api/task-fsm/rebind           — 换绑原子事件 (fsm-rebind-1126 §3.1)
  *   POST /api/task-fsm/parent           — 板 → FSM parent 镜像最小写入口 (fsm-turnend-wire-1126)
+ *   POST /api/task-fsm/session/attach   — session 挂载口，幂等补写非终态记录 session.id (e1-burn-fix-1127)
  * @module dsh-task-fsm/host/routes
  */
 
@@ -203,6 +204,30 @@ export function sessionView(record: TaskRecord) {
   }
 }
 
+/**
+ * `session/attach` 预检谓词（e1-burn-fix-1127 设计 §2-②）——纯函数，update 外
+ * Phase A 与 update 内复校共用。`undefined` = 可挂载（含同 id 幂等）；否则 = 结构化拒。
+ * 判序：同 id 幂等放行 → 终态拒（终态完整性，协调方回函 2026-11-27 裁定维持；
+ * 受害单 taskbook-gate 已 done → 不挂、非残留）→ backlog 拒（走 E1）→ 异 id 冲突（防双跑）。
+ */
+export function attachVerdictOf(
+  state: string,
+  bound: string,
+  want: string,
+): { status: 409; kind: string; detail: string } | undefined {
+  if (bound === want) return undefined
+  if (state === 'done' || state === 'cancelled') {
+    return { status: 409, kind: 'forbidden', detail: '终态已定；挂载只对非终态（终态完整性）' }
+  }
+  if (state === 'backlog') {
+    return { status: 409, kind: 'forbidden', detail: 'backlog 记录走 E1（派发缝），挂载不代 E1' }
+  }
+  if (bound !== '') {
+    return { status: 409, kind: 'conflict', detail: `session 已挂载异 id（防双跑）: ${bound}` }
+  }
+  return undefined
+}
+
 export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
   const { store } = services
 
@@ -236,6 +261,68 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
         const record = Object.values(file.tasks).find((r) => r.session?.id === id)
         if (record === undefined) { writeJson(res, 404, { ok: false, found: false }); return }
         writeJson(res, 200, { ok: true, found: true, view: sessionView(record) })
+      } catch (error) {
+        writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    },
+  }
+
+  /**
+   * POST /api/task-fsm/session/attach — session 挂载口（e1-burn-fix-1127 设计 §2-②）。
+   *
+   * 幂等 attach：把派发建出的会话 id 补写到记录上——钩子烧成 active ∧ session.id 空的
+   * 受害两单与存量空洞的唯一合法写入通道（E1 表格拒 active，挂载不代状态转移）。
+   * ⛔ 不写 history（结构字段 ≠ 状态转移，HistoryEventSchema 白名单会 fail-closed 拒整账，
+   * 同 parent 路由口径）；只写 session.id，mode/reason 保留（节点缺失才按 E1 正形播种）
+   * ——D 轴归 E1/E2/wake 语义面。
+   * 拒 = 零写（update 外预检 + update 内复校，rebind Phase A/C 同型）：
+   * 终态（终态完整性，协调方回函 2026-11-27 裁定）/ backlog（走 E1）/ 异 id 冲突
+   * （防双跑）/ 404 / 400 / 405 / 403。
+   * 路径取 `session/attach` 而非同路径 POST：webserver exact 路由 = Map 键位、
+   * duplicate (kind, path) 即 throw（harness packages/host/webserver/src/index.ts:441-449）。
+   */
+  const attach: WebRoute = {
+    kind: 'exact',
+    path: `${TASK_FSM_API_PREFIX}/session/attach`,
+    handler: async (req, res) => {
+      if (!fenced(req, res)) return
+      if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
+      let body: Record<string, unknown> | undefined
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
+      if (body === undefined || taskRef === '' || sessionId === '') {
+        writeJson(res, 400, { ok: false, error: 'body needs { taskRef, sessionId }' }); return
+      }
+      const refuse = (status: number, kind: string, detail: string): void => {
+        // S3 可见性：host 侧拒绝留痕（与 transition/wake/ack/rebind 同形）。
+        console.warn(`[task-fsm] session/attach REFUSED status=${status} taskRef=${taskRef} kind=${kind} detail=${detail}`)
+        writeJson(res, status, { ok: false, kind, detail })
+      }
+      // Phase A — 只读预检（拒 = 不进 store.update，真零写）。
+      const pre = store.load().tasks[taskRef]
+      if (pre === undefined) { writeJson(res, 404, { ok: false, error: 'unknown taskRef', hint: HINT_UNKNOWN_TASKREF }); return }
+      const verdict = attachVerdictOf(pre.state, typeof pre.session?.id === 'string' ? pre.session.id : '', sessionId)
+      if (verdict !== undefined) { refuse(verdict.status, verdict.kind, verdict.detail); return }
+      try {
+        // Phase C — 单事务复校（TOCTOU）+ 写入；只动 session.id。
+        const outcome = store.update<{ status: 200; record: TaskRecord } | { status: 409; kind: string; detail: string }>((file) => {
+          const record = file.tasks[taskRef]
+          if (record === undefined) return { status: 409 as const, kind: 'conflict', detail: 'record vanished (TOCTOU)' }
+          const bound = typeof record.session?.id === 'string' ? record.session.id : ''
+          const again = attachVerdictOf(record.state, bound, sessionId)
+          if (again !== undefined) return { status: 409 as const, kind: again.kind, detail: again.detail }
+          record.session = bound === sessionId && record.session !== undefined
+            ? record.session
+            : {
+                id: sessionId,
+                mode: record.session?.mode ?? 'frozen',
+                reason: record.session?.reason ?? '排队位：等待开工核验',
+              }
+          return { status: 200 as const, record }
+        })
+        if ('kind' in outcome) { refuse(outcome.status, outcome.kind, outcome.detail); return }
+        writeJson(res, 200, { ok: true, record: outcome.record })
       } catch (error) {
         writeJson(res, 500, { ok: false, error: error instanceof Error ? error.message : String(error) })
       }
@@ -663,5 +750,5 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
     },
   }
 
-  return [state, session, notify, archive, scope, create, transition, wake, ack, rebind, parent]
+  return [state, session, attach, notify, archive, scope, create, transition, wake, ack, rebind, parent]
 }

@@ -13,7 +13,7 @@ import { decideBossGate, type BossGateDecision, type DispatchBossGate } from './
 import {
   fsmLiveGateOf,
   planSeam,
-  recordStateOf,
+  recordBriefOf,
   type DispatchFsmSeam,
 } from './fsm-seam.ts'
 import { readBoundedJson, writeJson } from './http.ts'
@@ -391,11 +391,37 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
             })
             return
           }
+          // 回归门（e1-burn-fix-1127 设计 §2-④，20:48 双跑事故的反向门）：FSM 判
+          // clear（无记录 / 终态 / 非终态但 session.id 空）∧ 快账有**活绑定** → 该
+          // taskRef 已有真会话在跑，重派必须 409（钩子烧空的记录对 G2 盲，活绑定不盲）。
+          // 快账只读复用 findAlive（#bindings-retire-1126 面 = 写入退役，读口复用零改）；
+          // 读失败 = 503 fail-closed（与 FSM 读同向）；bindings 未组成 = 跳过（既有可选形）。
+          if (verdict.kind === 'clear' && taskRef !== undefined && services.bindings !== undefined) {
+            let alive: DispatchBinding | undefined
+            try {
+              alive = await services.bindings.findAlive(taskRef)
+            } catch (error) {
+              console.warn(`[dispatch-gate] 409 gate REFUSED status=503 taskRef=${taskRef} source=bindings detail=${errorDetail(error)} (fail-closed)`)
+              writeJson(res, 503, { ok: false, error: `bindings unreadable (fail-closed): ${errorDetail(error)}`, taskRef })
+              return
+            }
+            if (alive !== undefined) {
+              console.warn(`[dispatch-gate] 409 taskRef=${taskRef} source=bindings sessionId=${alive.sessionId}`)
+              writeJson(res, 409, {
+                ok: false,
+                error: `taskRef already has a live session: ${alive.sessionId}`,
+                taskRef,
+                sessionId: alive.sessionId,
+              })
+              return
+            }
+          }
         }
         // S1: FSM 注册（G1 在 create 门 fail-closed；create 409 = 按 state 分流幂等
-        // —— active 跳 E1 / backlog 续 / 终态·冻结拒派，同 dispatch-send.mjs）。
+        // —— active 走 B 案兜底 / backlog 续 E1 / 终态·冻结拒派，同 dispatch-send.mjs）。
         // 排在 409 活会话闸之后：被 409 拒的派发不落 backlog 记录（零残留）。
         let needE1 = seam !== undefined
+        let needAttach = false // B 案兜底（e1-burn-fix-1127 §2-③a）：active ∧ session.id 空 → 建会话后补挂
         if (seam !== undefined && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
           const created = await fsmSeam.post(origin, 'create', {
             taskRef,
@@ -404,14 +430,28 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
             ...(title === undefined ? {} : { title }),
           })
           if (created.status === 409) {
-            const state = recordStateOf(await fsmSeam.get(origin, 'state'), taskRef)
-            if (state === 'active') {
-              // 幂等跳过：该记录已 E1（session.id 可能仍空 = E1 前置期历史残留，
-              // 不回补——FSM 是前瞻账，见收口随注）。
-              needE1 = false
-            } else if (state !== 'backlog') {
-              console.warn(`[dispatch-fsm-e1] REFUSED status=409 taskRef=${taskRef} detail=记录态=${state ?? '查无'} 非 backlog/active（终态/冻结拒派）`)
-              writeJson(res, 409, { ok: false, error: `E1_BLOCKED 记录态=${state ?? '查无'} 非 backlog/active（终态/冻结拒派）`, taskRef })
+            const brief = recordBriefOf(await fsmSeam.get(origin, 'state'), taskRef)
+            if (brief.state === 'active') {
+              if (brief.sessionId === '') {
+                // 钩子烧成的空洞记录（E1 前置期历史残留）：本次会话建出后经
+                // session/attach 补挂——取代原「不回补（前瞻账）」决定，变更记录
+                // = content/tech/ai/dsh/e1-burn-fix-design-1127.md §3。
+                needE1 = false
+                needAttach = true
+              } else {
+                // 分流读与闸①读之间记录被挂上 id（外部写入）= 迟到的活会话 → 防双跑。
+                console.warn(`[dispatch-gate] 409 taskRef=${taskRef} source=fsm sessionId=${brief.sessionId} (gate re-read)`)
+                writeJson(res, 409, {
+                  ok: false,
+                  error: `taskRef already has a live session: ${brief.sessionId}`,
+                  taskRef,
+                  sessionId: brief.sessionId,
+                })
+                return
+              }
+            } else if (brief.state !== 'backlog') {
+              console.warn(`[dispatch-fsm-e1] REFUSED status=409 taskRef=${taskRef} detail=记录态=${brief.state ?? '查无'} 非 backlog/active（终态/冻结拒派）`)
+              writeJson(res, 409, { ok: false, error: `E1_BLOCKED 记录态=${brief.state ?? '查无'} 非 backlog/active（终态/冻结拒派）`, taskRef })
               return
             }
           } else if (created.status !== 200) {
@@ -433,13 +473,30 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
           sessionId = created.sessionId
           // S1: transition E1 带 payload.sessionId —— fsm.ts:102 的既有 sessionId
           // 合并语义就是 session id 回写（schema 零改，§3.2 决定⑤）：记录落
-          // {id, mode:'frozen', reason:'排队位：等待开工核验'} 设计正形。409 forbid
-          // = 幂等跳过（并发下已被 E1）。E1 拒（G2/G3 等）= 拒派 + orphanSession
-          // 留痕（会话已建未投递，warn 带 id 供清理；fail-closed 不放行）。
+          // {id, mode:'frozen', reason:'排队位：等待开工核验'} 设计正形。
+          // kind 字面修正（e1-burn-fix-1127 §4 施工发现）：fsm.ts wire 上的 refusal
+          // kind = 'forbidden'（旧判 'forbid' 恒 false，幂等跳过从未生效）。
+          // forbidden 分流：session.id 空 → B 案兜底补挂（§2-③b）；非空 → 迟到活会话 409。
+          // E1 拒（G2/G3 等）= 拒派 + orphanSession 留痕（会话已建未投递，warn 带 id
+          // 供清理；fail-closed 不放行）。
           if (seam !== undefined && needE1 && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
             const e1 = await fsmSeam.post(origin, 'transition', { taskRef, event: 'E1', payload: { sessionId } })
-            const forbidden = e1.status === 409 && e1.json.kind === 'forbid'
-            if (e1.status !== 200 && !forbidden) {
+            const forbidden = e1.status === 409 && e1.json.kind === 'forbidden'
+            if (forbidden) {
+              const brief = recordBriefOf(await fsmSeam.get(origin, 'state'), taskRef)
+              if (brief.sessionId === '') {
+                needAttach = true
+              } else {
+                console.warn(`[dispatch-fsm-e1] REFUSED status=409 taskRef=${taskRef} event=E1 kind=forbidden detail=已有活会话 ${brief.sessionId} orphanSession=${sessionId}`)
+                writeJson(res, 409, {
+                  ok: false,
+                  error: `taskRef already has a live session: ${brief.sessionId}`,
+                  taskRef,
+                  sessionId: brief.sessionId,
+                })
+                return
+              }
+            } else if (e1.status !== 200) {
               const guard = typeof e1.json.guard === 'string' ? e1.json.guard : undefined
               const detail = typeof e1.json.detail === 'string' ? e1.json.detail
                 : typeof e1.json.error === 'string' ? e1.json.error : JSON.stringify(e1.json)
@@ -454,6 +511,16 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
                 taskRef,
               })
               return
+            }
+          }
+          // B 案兜底挂载（§2-③）：会话已建，把 id 补写到空洞记录。失败 = 留痕继续
+          // 派发（可用性四问④：兜底失败不累派发本体；记录仍空洞归轮尾对账）。
+          if (needAttach && taskRef !== undefined && fsmSeam !== undefined && origin !== undefined) {
+            const attached = await fsmSeam.post(origin, 'session/attach', { taskRef, sessionId })
+            if (attached.status !== 200) {
+              const detail = typeof attached.json.detail === 'string' ? attached.json.detail
+                : typeof attached.json.error === 'string' ? attached.json.error : JSON.stringify(attached.json)
+              console.warn(`[dispatch-fsm-e1] attach fallback FAILED status=${attached.status} taskRef=${taskRef} sessionId=${sessionId} detail=${detail} — 留痕继续派发（记录仍空洞，归轮尾对账）`)
             }
           }
           if (services.attention !== undefined) {

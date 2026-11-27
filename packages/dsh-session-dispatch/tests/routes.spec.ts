@@ -405,6 +405,61 @@ describe('dispatch route taskRef bindings', () => {
     expect(captured.status).toBe(200)
     expect(captured.body).toMatchObject({ ok: true, sessionId: 'session-abc', bindingRecorded: false })
   })
+
+  it('双跑回归门：FSM 空洞（active ∧ session.id 空）∧ 快账活绑定 → 重派 409 拒、零建会话（20:48 事故反向门）', async () => {
+    // Given the 20:48 accident shape: the hook burned the record to active with an
+    // empty session id (闸① fsmLiveGateOf 判 clear), while the quick ledger still
+    // holds a LIVE binding — the second session was minted exactly through this gap.
+    const fsm = fakeFsm({ state: 'active', session: { id: '' } })
+    const bindings = fakeBindings({
+      async findAlive() {
+        return { taskRef: GATE_REF, sessionId: 'session-alive-binding', workspaceId: 'ws-1', createdAt: '2026-11-27T12:48:48.000Z' }
+      },
+    })
+    let created = false
+    const services = happyServices({
+      fsm,
+      bindings,
+      sessions: {
+        async create() { created = true; return { sessionId: 's' } },
+        async rename() { return {} },
+        async prompt() { return { accepted: true } },
+        async cancel() { return { accepted: true } },
+      },
+    })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    // When the operator re-dispatches that taskRef (plan-bearing task book)
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    // Then it answers 409 with the unchanged live-session body shape and mints no session
+    expect(captured.status).toBe(409)
+    expect(captured.body).toMatchObject({ ok: false, taskRef: GATE_REF, sessionId: 'session-alive-binding' })
+    expect(String((captured.body as { error: string }).error)).toBe('taskRef already has a live session: session-alive-binding')
+    expect(created).toBe(false)
+  })
+
+  it('回归门只看活绑定：快账无活绑定的空洞记录照常放行（清态语义不回归）', async () => {
+    // FSM 空洞 + findAlive → undefined（死绑定/无绑定）→ 闸放行，派发照走
+    const fsm = fakeFsm({ state: 'active', session: { id: '' } })
+    const bindings = fakeBindings({ async findAlive() { return undefined } })
+    const services = happyServices({ fsm, bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-abc' })
+  })
+
+  it('快账读失败 → 503 fail-closed（回归门与 FSM 读同向，不静默放行）', async () => {
+    const fsm = fakeFsm({ state: 'active', session: { id: '' } })
+    const bindings = fakeBindings({
+      async findAlive() { throw new Error('ledger corrupt') },
+    })
+    const services = happyServices({ fsm, bindings })
+    const handler = makeDispatchRoutes(services)[0].handler!
+    const captured = await run(handler, fakeReq('POST', { workspaceId: 'ws-1', prompt: PLAN_PROMPT, taskRef: GATE_REF }))
+    expect(captured.status).toBe(503)
+    expect(String((captured.body as { error: string }).error)).toContain('fail-closed')
+    expect(captured.body).toMatchObject({ ok: false, taskRef: GATE_REF })
+  })
 })
 
 describe('dispatch gate serialization', () => {

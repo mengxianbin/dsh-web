@@ -225,8 +225,8 @@ describe('E1 dispatch seam (host route registers + fires E1 before session work)
     expect(store.load().tasks[TASK_REF]?.session?.id).toBe(firstId) // 记录零改
   })
 
-  it('operator re-dispatches through the idempotent path when the active record carries no session id', async () => {
-    // Given the active record with its session id cleared (E1 前置期历史残留 形态)
+  it("operator's re-dispatch backfills the burned record via session/attach (B 案兜底)", async () => {
+    // Given the active record with its session id cleared (钩子烧成的空洞形态)
     access = []
     const seeded = store.load()
     seeded.tasks[TASK_REF]!.session = { id: '', mode: 'active', reason: '' }
@@ -234,12 +234,14 @@ describe('E1 dispatch seam (host route registers + fires E1 before session work)
     const beforeTransition = fsmHits('POST /api/task-fsm/transition')
     // When the same taskRef dispatches again
     const again = await dispatch({ prompt: PROMPT, taskRef: TASK_REF, title: 'seam 夹具', sessionClass: 'bot-worker' })
-    // Then the gate clears (session.id 空), create 409 → active skips E1, record untouched
+    // Then the gate clears (session.id 空 ∧ 快账无活绑定), create 409 → active 空洞
+    // 分流 → 会话建出后经 session/attach 补挂（e1-burn-fix-1127 §2-③a 回补）
     expect(again.status).toBe(200)
     expect(fsmHits('POST /api/task-fsm/create')).toBe(1) // 409 幂等分流
     expect(fsmHits('GET /api/task-fsm/state')).toBe(2) // 闸①读 + 分流读
     expect(fsmHits('POST /api/task-fsm/transition')).toBe(beforeTransition) // E1 跳过
-    expect(store.load().tasks[TASK_REF]?.session?.id).toBe('') // 残留如实（前瞻账不回补）
-    expect(store.load().tasks[TASK_REF]?.history.map((h) => h.event)).toEqual(['E1'])
+    expect(fsmHits('POST /api/task-fsm/session/attach')).toBe(1) // B 案兜底挂载
+    expect(store.load().tasks[TASK_REF]?.session?.id).toBe(again.body.sessionId) // 回补：id 落账
+    expect(store.load().tasks[TASK_REF]?.history.map((h) => h.event)).toEqual(['E1']) // 零 history 写
   })
 })

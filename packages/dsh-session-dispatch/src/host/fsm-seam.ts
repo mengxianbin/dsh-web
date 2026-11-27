@@ -189,3 +189,23 @@ export function recordStateOf(response: FsmSeamResponse, taskRef: string): strin
   const state = body.file?.tasks?.[taskRef]?.state
   return typeof state === 'string' ? state : undefined
 }
+
+/**
+ * Read one record's `{state, sessionId}` brief out of a `GET state` response
+ * (e1-burn-fix-1127 §2-③): the create-409 分流 and the E1-forbidden 兜底 both
+ * need the bound session id, not just the state (absent record = `{}`).
+ */
+export function recordBriefOf(
+  response: FsmSeamResponse,
+  taskRef: string,
+): { state?: string; sessionId?: string } {
+  const body = response.json as FsmStateBody
+  const record = body.file?.tasks?.[taskRef]
+  if (record === undefined) return {}
+  const state = typeof record.state === 'string' ? record.state : undefined
+  const id = record.session?.id
+  return {
+    ...(state === undefined ? {} : { state }),
+    ...(typeof id === 'string' ? { sessionId: id } : {}),
+  }
+}
