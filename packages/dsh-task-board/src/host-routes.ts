@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { TaskBoardHostService } from './host-service.ts'
-import { writeJson } from './http.ts'
+import { CHARSET_GUIDANCE, writeJson } from './http.ts'
 import { isForwardedLoopbackRequest, isLoopbackAddress, isLoopbackRequest } from './loopback.ts'
 import { TaskParseError, TASK_PARSE_MAX_INPUT } from './host-ai.ts'
 import {
@@ -231,7 +231,15 @@ async function readBody(req: IncomingMessage): Promise<{ raw: string; value: unk
     if (size > IMPORT_LIMIT) throw new Error('body-too-large')
     chunks.push(buffer)
   }
-  const raw = Buffer.concat(chunks).toString('utf8')
+  let raw: string
+  try {
+    // `fatal` so legacy-coded bytes fail loudly instead of silently becoming
+    // U+FFFD: `raw` is stored verbatim on import, so a substitution would
+    // persist mojibake in the board.
+    raw = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
+  } catch {
+    throw new Error(CHARSET_GUIDANCE)
+  }
   return { raw, value: JSON.parse(raw) }
 }
 

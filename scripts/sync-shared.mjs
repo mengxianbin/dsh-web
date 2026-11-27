@@ -226,6 +226,10 @@ const MANIFEST = [
       'packages/dsh-remote-web-ui/src/http.ts',
       'packages/dsh-task-board/src/http.ts',
       'packages/dsh-task-board-github/src/host/http.ts',
+      // task-fsm keeps a generated copy too (its routes readBoundedJson); it was
+      // missing from this list, so its copy silently went stale until a typecheck
+      // caught the drift (session-charset-guard-1127).
+      'packages/dsh-task-fsm/src/host/http.ts',
       'packages/dsh-usage/src/host/http.ts',
       'packages/dsh-session-archive/src/host/http.ts',
       'packages/dsh-session-dispatch/src/host/http.ts',
