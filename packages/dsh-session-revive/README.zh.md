@@ -71,6 +71,13 @@ live 与 shadow 一律——都必须先过 v2 门才可能发出 nudge。上面
 - **fail-closed 首核**：激活时先证明某个已归档会话的转录仍能解码（多帧 zstd
   逐帧走、坏帧为零、事件至少一条）。证明不通期间一切复活停在 `v2-halt` 日志
   行上——接力 save 全靠那份转录，不许凭感觉放行。
+- **ask 卡唤醒门（2026-11-27 裁定）**：开试之前先读 harness 既有的
+  user-questions 投影（读它的投影缓存，每次门调用一次同步读——零新定时器、
+  零轮询）。会话尾巴上还挂着未结算 ask 卡（`active` 非空，`open` 或
+  `continued`）就记 `why: 'ask-pending'` defer，park 进 60 秒复检周期，直到
+  回答或显式跳过把 `active` 清空才沿正常链路放行；投影读不到则 fail-closed
+  记 `why: 'ask-unknown'`——读不到的卡投影绝不当成「没有卡」。事件驱动判定、
+  boot sweep 与每次唤醒放行共用这一个谓词，因为三路都汇到状态机那两道门。
 - **L2 探针门**：开试之前用全局 fetch 槽（真实请求同一条出口）探测当前路由的
   provider baseURL，只在有会话被 park 时事件驱动、60–120 秒随机节奏。任何
   HTTP 响应（4xx/5xx 也算）即路径存活；只有连接层失败才 park，并由 L1 TCP

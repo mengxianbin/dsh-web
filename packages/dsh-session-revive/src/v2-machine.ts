@@ -24,6 +24,7 @@
  * @module dsh-session-revive/v2-machine
  */
 
+import type { AskPendingState } from './ask-pending.ts'
 import type { TranscriptFirstGate } from './v2-transcript.ts'
 import {
   PROBE_MIN_INTERVAL_MS,
@@ -108,6 +109,8 @@ export type V2GateWhy =
   | 'route-unknown'
   | 'cooldown'
   | 'frozen'
+  | 'ask-pending'
+  | 'ask-unknown'
   | 'stopped'
   | 'relay-chain'
   | 'attempt-in-flight'
@@ -116,7 +119,10 @@ export type V2GateWhy =
 /**
  * §6.3 frozen re-check cadence (freeze-reclaim-design-1127 Phase 1): a
  * frozen-deferred decision parks in 60s cycles — the mem-floor watcher's own
- * tick — so an E4 wake (or a human unfreeze) is picked up on the next cycle.
+ * tick — so an E4 wake (a human unfreeze, or in the ask gate's case the
+ * card's settlement) is picked up on the next cycle. revive-askcard-skip-1127
+ * reuses this same cadence for an ask-deferred decision: the machine gets no
+ * "card settled" event, so the re-check is what releases it.
  */
 const FSM_RECHECK_MS = 60_000
 
@@ -246,6 +252,17 @@ export interface ReviveV2Options {
    * = no FSM authority injected = the gate is off (test and legacy callers).
    */
   frozenSet?: () => ReadonlySet<string>
+  /**
+   * revive-askcard-skip-1127: the shell's synchronous view of the tail's
+   * unsettled ask card (the harness user-questions projection). A session
+   * whose projection still holds an active card is never nudged — the nudge
+   * would burn quota and break the waiting-on-human state; the decision parks
+   * and releases on the frozen gate's re-check cadence once the card settles.
+   * The reader is fail-closed by the rule's semantics (`unknown` parks like
+   * `pending`). Undefined = no projection authority injected = the gate is off
+   * (test and legacy callers).
+   */
+  askPending?: (sessionId: string) => AskPendingState
 }
 
 /**
@@ -258,6 +275,7 @@ export class ReviveV2Machine {
   private readonly resolveBaseURL: ReviveV2Options['resolveBaseURL']
   private readonly now: () => number
   private readonly frozenSet?: () => ReadonlySet<string>
+  private readonly askPending?: (sessionId: string) => AskPendingState
   private readonly sessions = new Map<string, SessionState>()
   private readonly routes = new Map<string, RouteState>()
   /** Relay generation seeds: a spawned relay carries depth 1 from its first state. */
@@ -269,6 +287,7 @@ export class ReviveV2Machine {
     this.resolveBaseURL = options.resolveBaseURL
     this.now = options.now ?? (() => Date.now())
     this.frozenSet = options.frozenSet
+    this.askPending = options.askPending
   }
 
   // ── inputs ───────────────────────────────────────────────────────────────
@@ -355,7 +374,8 @@ export class ReviveV2Machine {
 
   /**
    * A revive decision from the ruled account: the v2 gate answers whether the
-   * attempt may run - stopped and relay-chain scenes deny, a red or unprobed
+   * attempt may run - stopped and relay-chain scenes deny, a frozen or
+   * unsettled-ask-card session defers to its re-check, a red or unprobed
    * route parks, a running cooldown defers to its deadline, otherwise the
    * attempt opens immediately (the shell sends it, live mode only).
    * @returns gate records plus at most one attempt record.
@@ -382,6 +402,28 @@ export class ReviveV2Machine {
         ...(input.code === undefined ? {} : { code: input.code }),
       }
       return [{ kind: 'v2-gate', at: input.at, sessionId: input.sessionId, verdict: 'defer', why: 'frozen' }]
+    }
+    // revive-askcard-skip-1127: a tail still holding an unsettled ask card is
+    // never nudged (defer ≠ kill: the card's answer or explicit skip settles
+    // it and the next re-check releases the parked decision). The reader is
+    // fail-closed — an unreadable projection is not "no card" — so `unknown`
+    // parks on the same evidence line as `pending`, with its own reason.
+    const askState = this.askPending?.(input.sessionId)
+    if (askState !== undefined && askState !== 'clear') {
+      state.pending = {
+        plannedAt: input.plannedAt,
+        channel: state.nextChannel,
+        ...(input.code === undefined ? {} : { code: input.code }),
+      }
+      return [
+        {
+          kind: 'v2-gate',
+          at: input.at,
+          sessionId: input.sessionId,
+          verdict: 'defer',
+          why: askState === 'pending' ? 'ask-pending' : 'ask-unknown',
+        },
+      ]
     }
     const route = state.route ?? this.currentRoute
     if (route === undefined) {
@@ -633,8 +675,9 @@ export class ReviveV2Machine {
   /**
    * Release every deferred decision whose deadline passed on a green path;
    * red or unprobed routes keep their sessions parked (no attempt, no
-   * transcript event). Called by the shell's wake timer and after probe
-   * results.
+   * transcript event), and a frozen or unsettled-ask-card session re-parks
+   * for one more re-check cycle. Called by the shell's wake timer and after
+   * probe results.
    * @param at - the firing time.
    * @returns attempt records for due, probe-green sessions.
    */
@@ -656,6 +699,22 @@ export class ReviveV2Machine {
       if (this.frozenSet?.().has(sessionId)) {
         state.pending = { ...pending, plannedAt: at + FSM_RECHECK_MS }
         records.push({ kind: 'v2-gate', at, sessionId, verdict: 'defer', why: 'frozen' })
+        continue
+      }
+      // revive-askcard-skip-1127: never open an attempt for a session whose
+      // tail still holds an unsettled ask card — same one-cycle push, same
+      // parked decision; the reader's fail-closed `unknown` parks with its own
+      // reason so an unreadable projection is never mistaken for "no card".
+      const askState = this.askPending?.(sessionId)
+      if (askState !== undefined && askState !== 'clear') {
+        state.pending = { ...pending, plannedAt: at + FSM_RECHECK_MS }
+        records.push({
+          kind: 'v2-gate',
+          at,
+          sessionId,
+          verdict: 'defer',
+          why: askState === 'pending' ? 'ask-pending' : 'ask-unknown',
+        })
         continue
       }
       records.push(...this.openAttempt(state, at, fireAt, pending.code))

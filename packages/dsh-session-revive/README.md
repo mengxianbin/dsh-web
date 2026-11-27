@@ -103,6 +103,16 @@ and the watermark exactly as before; the v2 gate only withholds sends:
   frames, at least one event). While that proof fails, every revival stays
   halted with a `v2-halt` log line — the relay save depends on that
   transcript, so nothing runs on a hunch.
+- **Ask-card wake gate (2026-11-27 ruling)**: before an attempt opens, the
+  tail is read from the harness user-questions projection (its projection
+  cache, one synchronous read per gate call — no new timer, no polling). A
+  session still holding an unsettled ask card — `active` non-empty, `open` or
+  `continued` — defers with `why: 'ask-pending'` and parks in 60s re-check
+  cycles until the card's answer or explicit skip empties `active`, then
+  releases through the normal chain. An unreadable projection fails CLOSED
+  with `why: 'ask-unknown'`: an unreadable card projection is never read as
+  "no card". Event-driven decisions, the boot sweep and every wake release
+  share this predicate, because all three reach the same two machine gates.
 - **L2 probe gate**: before an attempt opens, the current route's provider
   baseURL is probed through the global fetch slot (the same egress real
   requests use), event-driven only while a session is parked, on a

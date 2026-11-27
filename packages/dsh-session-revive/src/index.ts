@@ -52,6 +52,7 @@ import { RevivePendingWriter, readPendingEntries } from './pending-state.ts'
 import { createLoopbackChainPorts, runArchiveRelayChain } from './v2-chain.ts'
 import { runTranscriptFirstGate } from './v2-transcript.ts'
 import { makeFrozenSetReader } from './fsm-frozen.ts'
+import { makeAskPendingReader } from './ask-pending.ts'
 
 export const name = 'dsh-session-revive'
 export const inject = ['webServer', 'sessionController']
@@ -353,6 +354,12 @@ export const apply = mountOnce('dsh-session-revive', (ctx: Context, config?: Con
       // sessions are never auto-woken — revive, boot sweep and every wake
       // release share this one gate (fail-open when the FSM file is unreadable).
       frozenSet: makeFrozenSetReader(),
+      // revive-askcard-skip-1127: a session whose tail still holds an
+      // unsettled ask card is never nudged — same two gates, so event-driven
+      // decisions, the boot sweep and every wake release all share it (they
+      // converge on onReviveDecision / releaseDue). Fail-closed: an
+      // unreadable projection parks the decision instead of sending.
+      askPending: makeAskPendingReader(),
     })
     const v2Writer = new ReviveV2StateWriter()
     const chainPorts = createLoopbackChainPorts({ apiBase: `http://127.0.0.1:${ctx.webServer.port}` })
