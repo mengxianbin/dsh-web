@@ -243,6 +243,7 @@ describe('E1 dispatch seam (host route registers + fires E1 before session work)
     expect(fsmHits('POST /api/task-fsm/transition')).toBe(beforeTransition) // E1 跳过
     expect(fsmHits('POST /api/task-fsm/session/attach')).toBe(1) // B 案兜底挂载
     expect(store.load().tasks[TASK_REF]?.session?.id).toBe(again.body.sessionId) // 回补：id 落账
-    expect(store.load().tasks[TASK_REF]?.history.map((h) => h.event)).toEqual(['E1']) // 零 history 写
+    // event-axis-attach-1127：attach 实际改写 → 留痕一条 session-attach 伪事件（幂等二发不重复写）。
+    expect(store.load().tasks[TASK_REF]?.history.map((h) => h.event)).toEqual(['E1', 'session-attach'])
   })
 })
