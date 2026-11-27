@@ -28,7 +28,7 @@ import { Worker } from 'node:worker_threads'
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
-import { appendPluginRecord, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { SEAL_RECORD, sessionSealProjection, type SessionSealProjectionState } from './seal-projection.ts'
 import type { SealCheckResult, SealVerdictPayload } from '../core/types.ts'
 
@@ -146,6 +146,73 @@ function samePayload(left: SessionSealProjectionState, right: SealVerdictPayload
 }
 
 /**
+ * The bounded delayed re-check schedule (seal-write-crosscopy-1127, same
+ * shape as sessionclass-retry-1126): one attempt at 10s, a second at 60s,
+ * then a loud give-up — the caps that keep a permanently rejecting Session
+ * from spinning, while the old "the next turn end retries" comment promised
+ * a retry that never existed.
+ */
+const RETRY_DELAYS_MS = [10_000, 60_000] as const
+
+/** One Session's pending seal-record re-write: the payload that failed, attempts spent, the armed timer. */
+interface RetryEntry {
+  session: Session
+  payload: SealVerdictPayload
+  attempts: number
+  timer: ReturnType<typeof setTimeout> | undefined
+}
+
+/**
+ * The Host's public `append` behind one structural cast (the cross-copy
+ * seam, mirroring `appendClassViaHost` in class-projection): the installed
+ * rc.3 type view keys `append` on `SessionEventMap` with no `LogIntent` opts
+ * slot for a plugin record (keyed by `PluginRecordMap`), while the Host
+ * runtime accepts `{ ignorable: true }` and stamps the marker the fold reads
+ * back. The method dispatches on the instance's own prototype — the seam
+ * `appendPluginRecord`'s brand-checking closure is not: a dual-copy install
+ * rejects every Host instance with `TypeError: Receiver must be an instance
+ * of class Session` (seal-write-crosscopy-1127 根因).
+ */
+interface CrossCopyAppendable {
+  append(
+    type: string,
+    data: unknown,
+    opts?: { readonly ignorable: true },
+  ): { readonly ignorable?: true } | undefined
+}
+
+/**
+ * Append one seal record through the Host's own `append` (the cross-copy
+ * write): dispatch lands on the instance's prototype, so the Host class's
+ * private brand always matches regardless of which `@deepseek-ai/dsh-session`
+ * copy THIS package resolved.
+ * @param session - the live Host Session to append onto.
+ * @param payload - the computed verdict payload.
+ * @returns the committed envelope; throws when the Host did not stamp
+ *   `ignorable` — a pre-LogIntent copy would land a record the fold can
+ *   never read, and this unit refuses to swallow that silently.
+ */
+function appendSealViaHost(session: Session, payload: SealVerdictPayload): { readonly ignorable?: true } | undefined {
+  const event = (session as unknown as CrossCopyAppendable).append(SEAL_RECORD, payload, { ignorable: true })
+  if (event?.ignorable !== true) {
+    throw new Error('host append did not stamp the ignorable marker (pre-LogIntent host copy?)')
+  }
+  return event
+}
+
+/** One error's message for a warn line (mirrors the route layer's truncation). */
+function errorDetail(error: unknown): string {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+  return text.slice(0, 300)
+}
+
+/** A retry timer must never hold a process open (host shutdown, test runners). */
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  const unref = (timer as { unref?: () => void }).unref
+  if (typeof unref === 'function') unref.call(timer)
+}
+
+/**
  * Create the sync instance for one archive-surface mount.
  * @param ctx - the plugin context (events + soft service inject).
  * @param options - the dir resolver and optional compute seam.
@@ -164,8 +231,80 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
   let registry: { stateOf(session: Session, key: 'seal'): SessionSealProjectionState | undefined } | undefined
   /** Sessions waiting for (or re-waiting for) a compute; Set identity dedupes concurrent turn ends. */
   const pending = new Set<Session>()
+  /** Pending bounded re-checks keyed by session id (seal-write-crosscopy-1127). */
+  const retries = new Map<string, RetryEntry>()
   let pumping = false
   let stopped = false
+
+  /** Retire one Session's pending re-check — its record now stands. */
+  const dropRetry = (id: string, entry: RetryEntry): void => {
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer)
+      entry.timer = undefined
+    }
+    if (retries.get(id) === entry) retries.delete(id)
+  }
+
+  /**
+   * Arm the bounded delayed re-check for one Session's failed record write:
+   * two attempts, 10s then 60s, then a loud give-up (seal-write-crosscopy-1127,
+   * same schedule as sessionclass-retry-1126). A newer failed payload for the
+   * same Session replaces the pending one.
+   * @param id - session id the entry is keyed by.
+   * @param session - the live Session whose append rejected.
+   * @param payload - the verdict record that failed to land.
+   * @returns a phrase for the caller's warn line — what happens next.
+   */
+  const scheduleRetry = (id: string, session: Session, payload: SealVerdictPayload): string => {
+    if (stopped) return 're-check skipped (sync stopped)'
+    const entry = retries.get(id) ?? { session, payload, attempts: 0, timer: undefined }
+    entry.session = session
+    entry.payload = payload
+    retries.set(id, entry)
+    if (entry.timer !== undefined) return `re-check already armed (attempt ${entry.attempts}/${RETRY_DELAYS_MS.length})`
+    if (entry.attempts >= RETRY_DELAYS_MS.length) {
+      retries.delete(id)
+      return `re-check budget spent after ${entry.attempts} attempts — the record waits for the next restart's boot path`
+    }
+    const delay = RETRY_DELAYS_MS[entry.attempts]
+    entry.attempts += 1
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined
+      runRetry(id)
+    }, delay)
+    unrefTimer(entry.timer)
+    return `re-check armed (attempt ${entry.attempts}/${RETRY_DELAYS_MS.length} in ${delay}ms)`
+  }
+
+  /**
+   * One delayed re-write: re-check the fold (a later turn end may have
+   * landed the record already), then append through the Host again. Success
+   * retires the entry; failure warns with the attempt count and arms the
+   * next slot, or gives up loudly once the two-attempt budget is spent.
+   * @param id - session id the entry is keyed by.
+   */
+  function runRetry(id: string): void {
+    const entry = retries.get(id)
+    if (entry === undefined || stopped) return
+    entry.timer = undefined
+    const attempt = entry.attempts
+    try {
+      let current: SessionSealProjectionState = null
+      try {
+        current = registry?.stateOf(entry.session, 'seal') ?? null
+      } catch {
+        // Unreadable fold: attempt the append anyway — fail visible, not silent.
+      }
+      if (!samePayload(current, entry.payload)) appendSealViaHost(entry.session, entry.payload)
+    } catch (error) {
+      if (stopped || retries.get(id) !== entry) return
+      const outcome = scheduleRetry(id, entry.session, entry.payload)
+      console.warn(`[seal] record re-check failed session=${id} verdict=${entry.payload.verdict} attempt=${attempt}/${RETRY_DELAYS_MS.length} reason=${errorDetail(error)} — ${outcome}`)
+      return
+    }
+    if (stopped || retries.get(id) !== entry) return
+    dropRetry(id, entry)
+  }
 
   const computeOne = async (session: Session): Promise<void> => {
     const id = String(session.id)
@@ -194,7 +333,7 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
     // Probe via ctx.get (reflect store, no inject gate): the plugin's inject
     // list never declared 'sessions', and a direct `ctx.sessions` throws
     // "without inject" — fatal to the host (2026-11-11). No store ⇒ record
-    // anyway; appendPluginRecord's preconditions below are the backstop.
+    // anyway; the write's own rejection handling below is the backstop.
     try {
       const store = (ctx as unknown as { get(name: string): unknown }).get('sessions') as { get?(id: string): unknown } | undefined
       if (typeof store?.get === 'function' && store.get(session.id) !== session) return
@@ -215,10 +354,19 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
     }
     if (samePayload(current, payload)) return
     try {
-      appendPluginRecord(session, SEAL_RECORD, payload)
-    } catch {
-      // Store-owned append preconditions (unentered row, in-flight publication)
-      // reject without changing the log; the next turn end retries.
+      // Cross-copy write (seal-write-crosscopy-1127): the Host's own public
+      // `append`, never the brand-checking `appendPluginRecord` helper —
+      // a dual-copy install made the helper throw on every Host instance.
+      appendSealViaHost(session, payload)
+      // A landed record supersedes any re-check still armed for this Session.
+      const armed = retries.get(id)
+      if (armed !== undefined) dropRetry(id, armed)
+    } catch (error) {
+      // Never silent: name the Session, the verdict and the cause, then arm
+      // the bounded re-check — the old empty catch promised "the next turn
+      // end retries" while the histogram showed the writes just stopped.
+      const outcome = scheduleRetry(id, session, payload)
+      console.warn(`[seal] record write failed session=${id} verdict=${payload.verdict} reason=${errorDetail(error)} — ${outcome}`)
     }
   }
 
@@ -293,6 +441,11 @@ export function createSealStateSync(ctx: Context, options: SealStateOptions): Se
     stop(): void {
       stopped = true
       pending.clear()
+      // Bounded re-checks die with the mount: no timer fires after teardown.
+      for (const entry of retries.values()) {
+        if (entry.timer !== undefined) clearTimeout(entry.timer)
+      }
+      retries.clear()
       // Synchronous disarm first — a service stop must release the key and
       // the listener now, not when the injection fiber's async dispose lands.
       teardown()

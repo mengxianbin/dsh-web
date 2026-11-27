@@ -18,7 +18,7 @@ import { SEAL_RECORD, sessionSealProjection } from '../src/host/seal-projection.
 import { SealComputeError, computeSealInWorker, createSealStateSync } from '../src/host/seal-state.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SealCheckResult } from '../src/core/types.ts'
-import { assistantMsg, createFakeHost, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
+import { assistantMsg, createFakeHost, modelHostAppend, userMsg, writeTranscript, type FakeHost } from './fixtures.ts'
 
 interface EndorsedRepo {
   dir: string
@@ -109,6 +109,10 @@ describe('sessionSealProjection fold', () => {
 function makeHarness(sessionsStore?: { get(id: string): unknown }) {
   const ctx = new Context()
   const session = Session.create(SessionId('session-seal-sync'))
+  // The write leg dispatches through the Host's public `append` and verifies
+  // the ignorable stamp (seal-write-crosscopy-1127); model that contract on
+  // the rc.3 test copy, whose own append has no LogIntent slot.
+  modelHostAppend(session)
   let registered: typeof sessionSealProjection | undefined
   const records = (): number => session.snapshotEvents()
     .filter((event) => (event as { type?: string }).type === SEAL_RECORD).length
@@ -302,10 +306,110 @@ describe('createSealStateSync', () => {
   })
 })
 
+/** Wrap the harness Session so every ignorable plugin-record write rejects like the cross-copy brand check. */
+function failSealWrites(session: Session): ReturnType<typeof vi.fn> {
+  const sealAppend = vi.fn((_type: string, _data: unknown, _opts?: unknown): never => {
+    throw new TypeError('Receiver must be an instance of class Session')
+  })
+  const previous = session.append.bind(session) as (...args: unknown[]) => unknown
+  ;(session as unknown as { append: unknown }).append = (type: string, data: unknown, opts?: { readonly ignorable?: true }): unknown => {
+    if (opts?.ignorable === true) return sealAppend(type, data, opts)
+    return previous(type, data, opts)
+  }
+  return sealAppend
+}
+
+describe('seal record write failure logging and bounded re-check', () => {
+  it('operator warns with the session id, verdict and reason when the host append rejects', async () => {
+    // Given a mounted sync whose write leg rejects like the dual-copy brand
+    // check, When a turn end computes a verdict, Then the failure is loud —
+    // sessionId + verdict + reason + the armed re-check — never a silent catch.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { ctx, session, records, registered } = makeHarness()
+    const sealAppend = failSealWrites(session)
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'DONE', detail: 'sentinel-ok' }))
+    const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(ctx, session, 1)
+    await vi.waitFor(() => { expect(warn).toHaveBeenCalledTimes(1) })
+
+    expect(sealAppend).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[seal] record write failed session=session-seal-sync verdict=DONE'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('TypeError: Receiver must be an instance of class Session'))
+    // The armed re-check and its cap are part of the loud line.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('re-check armed (attempt 1/2 in 10000ms)'))
+    expect(records()).toBe(0)
+    sync.stop()
+    await ctx.fiber.dispose()
+    warn.mockRestore()
+  })
+
+  it('operator retries a rejected append at 10s then 60s, then gives up loudly', async () => {
+    // Given a write that rejects on every attempt, When the re-check schedule
+    // runs under the clock, Then attempts land at 10s and 60s only, and the
+    // two-attempt budget ends in a loud give-up naming the session.
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { ctx, session, records, registered } = makeHarness()
+    const sealAppend = failSealWrites(session)
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'UNSEALED', detail: 'sentinel-pending' }))
+    const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(ctx, session, 1)
+    await vi.waitFor(() => { expect(warn).toHaveBeenCalledTimes(1) })
+    expect(sealAppend).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(sealAppend).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(sealAppend).toHaveBeenCalledTimes(3)
+
+    // Budget spent: no fourth attempt, and the give-up names the session.
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(sealAppend).toHaveBeenCalledTimes(3)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('re-check budget spent after 2 attempts'))
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('session=session-seal-sync'))
+    expect(records()).toBe(0)
+    sync.stop()
+    await ctx.fiber.dispose()
+    vi.useRealTimers()
+    warn.mockRestore()
+  })
+
+  it('operator stop clears pending re-checks so nothing fires after teardown', async () => {
+    // Given a failed write with a re-check armed, When the sync stops, Then
+    // the timer dies with the mount — no attempt, no warn after teardown.
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { ctx, session, registered } = makeHarness()
+    const sealAppend = failSealWrites(session)
+    const compute = vi.fn((): SealCheckResult => ({ id: String(session.id), verdict: 'DONE', detail: 'sentinel-ok' }))
+    const sync = createSealStateSync(ctx, { resolveDir: () => '/workspace/demo', compute })
+    sync.start()
+    await vi.waitFor(() => { expect(registered()).toBe(sessionSealProjection) })
+
+    turnEnd(ctx, session, 1)
+    await vi.waitFor(() => { expect(warn).toHaveBeenCalledTimes(1) })
+    expect(sealAppend).toHaveBeenCalledTimes(1)
+    sync.stop()
+
+    await vi.advanceTimersByTimeAsync(120_000)
+    expect(sealAppend).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(1)
+    await ctx.fiber.dispose()
+    vi.useRealTimers()
+    warn.mockRestore()
+  })
+})
+
 function dirOf(host: FakeHost, id: string): string {
   return `${host.home}/sessions/--Users-demo--/${id.startsWith('session-') ? id.slice('session-'.length) : id}`
 }
-
 describe('computeSealInWorker (default off-loop path)', () => {
   it('operator gets DONE through the worker script for a real sentinel transcript', async () => {
     // Given a session dir with an endorsed DONE sentinel transcript, When the
