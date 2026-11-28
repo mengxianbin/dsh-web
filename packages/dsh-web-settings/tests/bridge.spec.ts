@@ -483,4 +483,49 @@ describe('mutate route json body failure contract', () => {
     expect(state.headers['referrer-policy']).toBe('no-referrer')
     expect(destroy).not.toHaveBeenCalled()
   })
+
+  it('user posting a non-UTF-8 body gets 400 E_CHARSET_INVALID instead of settings-rejected', async () => {
+    // Given: a loopback /mutate request whose bytes are GBK, not UTF-8
+    // (charset-code-surface-1128)
+    const destroy = vi.fn()
+    const req = {
+      method: 'POST',
+      url: WEB_UI_SETTINGS_BRIDGE_PREFIX + '/mutate',
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+      destroy,
+      [Symbol.asyncIterator]: async function* iterate() {
+        yield Buffer.concat([Buffer.from('{"a":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+      },
+    } as unknown as IncomingMessage
+
+    // When: the route handler reads the body
+    const { res, state } = fakeRouteResponse()
+    await mutateRoute().handler(req, res)
+
+    // Then: the refusal carries the charset code and guidance
+    expect(state.status).toBe(400)
+    const parsed = JSON.parse(state.body) as { ok: boolean; code?: string; error?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.code).toBe('E_CHARSET_INVALID')
+    expect(parsed.error).toContain('E_CHARSET_INVALID')
+    expect(destroy).not.toHaveBeenCalled()
+  })
+
+  it('user posting UTF-8 Chinese JSON keeps the existing success path', async () => {
+    // Given: a loopback /mutate request with valid UTF-8 Chinese content
+    const { req } = fakeRouteRequest('{"ns":"中文键"}')
+
+    // When: the route handler reads the body
+    const { res, state } = fakeRouteResponse()
+    await mutateRoute().handler(req, res)
+
+    // Then: the reader accepts the body and the surface's own validation
+    // answers (never the charset envelope)
+    expect(state.status).toBe(200)
+    const parsed = JSON.parse(state.body) as { ok: boolean; code?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.code).toBe('settings-rejected')
+    expect(state.body).not.toContain('E_CHARSET_INVALID')
+  })
 })

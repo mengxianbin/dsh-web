@@ -457,7 +457,7 @@ function fakeJsonResponse(): { res: ServerResponse; state: { status: number; hea
 }
 
 /** One fake IncomingMessage: loopback socket + Host, optional raw body, destroy spy. */
-function fakeJsonRequest(url: string, rawBody?: string, method = 'POST'): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
+function fakeJsonRequest(url: string, rawBody?: string | Buffer, method = 'POST'): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
   const destroy = vi.fn()
   const req = {
     method,
@@ -470,7 +470,8 @@ function fakeJsonRequest(url: string, rawBody?: string, method = 'POST'): { req:
     destroy,
     ...(rawBody === undefined ? {} : {
       [Symbol.asyncIterator]: async function* iterate() {
-        if (rawBody !== '') yield Buffer.from(rawBody)
+        const bytes = typeof rawBody === 'string' ? Buffer.from(rawBody) : rawBody
+        if (bytes.length > 0) yield bytes
       },
     }),
   } as unknown as IncomingMessage
@@ -539,6 +540,47 @@ describe('json body failure contract', () => {
     expect(state.headers['content-type']).toBe('application/json; charset=utf-8')
     expect(state.headers['referrer-policy']).toBe('no-referrer')
     expect(destroy).not.toHaveBeenCalled()
+  })
+})
+
+// charset-code-surface-1128: every body-reading ssh route answers a non-UTF-8
+// body with its own code instead of collapsing into the generic validation 400.
+describe('charset failure contract', () => {
+  const gbk = () => Buffer.concat([Buffer.from('{"alias":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+  const charsetMakes = () => makeRoutes({
+    store: new HostStore(join(dir, 'charset-hosts.json')),
+    engine: engine(new StubEngine()),
+    stagingDir: join(dir, 'charset-staging'),
+  }).routes
+
+  const cases: Array<[string, string]> = [
+    [SSH_API.hosts, 'POST'],
+    [SSH_API.hosts, 'PATCH'],
+    [SSH_API.test, 'POST'],
+    [SSH_API.exec, 'POST'],
+    [SSH_API.cluster, 'POST'],
+    [SSH_API.tunnel, 'POST'],
+  ]
+  for (const [path, method] of cases) {
+    it(`answers a non-UTF-8 body on ${method} ${path} with 400 and E_CHARSET_INVALID`, async () => {
+      const url = method === 'PATCH' ? path + '?alias=x' : path
+      const { req, destroy } = fakeJsonRequest(url, gbk(), method)
+      const { res, state } = fakeJsonResponse()
+      await handlerFor(path, charsetMakes()).handler(req, res)
+      expect(state.status).toBe(400)
+      const parsed = JSON.parse(state.body) as { ok: boolean; code?: string; error?: string }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.code).toBe('E_CHARSET_INVALID')
+      expect(parsed.error).toContain('E_CHARSET_INVALID')
+      expect(destroy).not.toHaveBeenCalled()
+    })
+  }
+
+  it('keeps a valid UTF-8 Chinese body on the existing path (no charset envelope)', async () => {
+    const { req } = fakeJsonRequest(SSH_API.test, JSON.stringify({ alias: '中文别名' }))
+    const { res, state } = fakeJsonResponse()
+    await handlerFor(SSH_API.test, charsetMakes()).handler(req, res)
+    expect(state.body).not.toContain('E_CHARSET_INVALID')
   })
 })
 

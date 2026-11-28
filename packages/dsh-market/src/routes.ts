@@ -17,7 +17,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { dshHome } from './dsh-home.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { installAsset, isSafeRel, MARKET_ORIGIN, type MarketKind } from './core/installer.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 
 export const MARKET_API_PREFIX = '/api/market'
 
@@ -59,9 +59,11 @@ export function makeMarketRoutes(deps: MakeMarketRoutesDeps = {}): WebRoute[] {
     // { ok: false, error } envelope (the stream-error catch stays as a guard).
     let body: { id?: unknown; force?: unknown }
     try {
-      body = ((await readJsonBody(req, { maxBytes: 16 * 1024 })) ?? {}) as { id?: unknown; force?: unknown }
-    } catch {
-      writeJson(res, 400, { ok: false, error: 'invalid-body' }, { 'cache-control': 'no-store' })
+      body = ((await readJsonBody(req, { maxBytes: 16 * 1024, throwOnCharset: true })) ?? {}) as { id?: unknown; force?: unknown }
+    } catch (error) {
+      // Charset bad sample (non-UTF-8) → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128); other stream errors keep the legacy guard.
+      writeBodyReadError(res, error, { 'cache-control': 'no-store' })
       return
     }
     const id = typeof body.id === 'string' ? body.id : ''

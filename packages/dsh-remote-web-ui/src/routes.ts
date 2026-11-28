@@ -26,7 +26,7 @@ import { z, type ZodType } from 'zod'
 import { UnknownLanAddressError, type PairingService, type PairingSnapshot } from './pairing.ts'
 import { isLoopbackAddress, isProxiedRequest } from './loopback.ts'
 import { isLoopbackClient, isLoopbackUpstream, readCookie } from './gate.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import { createPairGrantStore, type PairGrantStore } from './pair-grant.ts'
 import { REMOTE_HOST_GRANT_GLOBAL } from './remote-channel-rules.ts'
 import { appShellLanSwitchScript, type LanSourceHop } from './lan-source.ts'
@@ -844,7 +844,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     const payload = parsePairPayload(issuePayloadSchema, body)
     if (payload === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
@@ -909,7 +917,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 429, { ok: false, code: 'rate-limited' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     const payload = parsePairPayload(acceptPayloadSchema, body)
     if (payload === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
@@ -943,7 +959,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     if (parsePairPayload(pairActionPayloadSchema, body) === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
       return
@@ -958,7 +982,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     const payload = parsePairPayload(revokePayloadSchema, body)
     if (payload === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
@@ -983,7 +1015,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     const payload = parsePairPayload(renamePayloadSchema, body)
     if (payload === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
@@ -1008,7 +1048,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     const payload = parsePairPayload(mergePayloadSchema, body)
     if (payload === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
@@ -1028,7 +1076,15 @@ export function makeRoutes(deps: PairRoutesDeps): WebRoute[] {
       writeJson(res, 403, { ok: false, code: 'forbidden' })
       return
     }
-    const body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true })
+    let body: unknown
+    try {
+      body = await readJsonBody(req, { maxBytes: MAX_BODY_BYTES, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+      // (charset-code-surface-1128)
+      writeBodyReadError(res, error)
+      return
+    }
     if (parsePairPayload(pairActionPayloadSchema, body) === undefined) {
       writeJson(res, 400, { ok: false, code: 'bad-payload' })
       return

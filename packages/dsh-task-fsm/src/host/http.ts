@@ -96,10 +96,16 @@ export async function readBoundedJson(req: IncomingMessage, maxBytes: number): P
  * also yield null, and so does a body that is not valid UTF-8 — the charset
  * guard rejects instead of transcoding, matching how this reader already
  * reports malformed JSON.
+ *
+ * With throwOnCharset, a non-UTF-8 body throws {@link CharsetError} instead
+ * of yielding null, so a route can surface the failure as
+ * `{ ok: false, code: 'E_CHARSET_INVALID', error: 指引 }` through
+ * writeBodyReadError. Default off keeps the reject-as-null contract for
+ * callers that do not opt in (charset-code-surface-1128).
  */
 export async function readJsonBody(
   req: IncomingMessage,
-  opts: { maxBytes?: number; objectOnly?: boolean } = {},
+  opts: { maxBytes?: number; objectOnly?: boolean; throwOnCharset?: boolean } = {},
 ): Promise<unknown | null> {
   const maxBytes = opts.maxBytes ?? DEFAULT_JSON_BODY_MAX_BYTES
   const chunks: Buffer[] = []
@@ -116,7 +122,8 @@ export async function readJsonBody(
   let text: string
   try {
     text = decodeUtf8Body(Buffer.concat(chunks))
-  } catch {
+  } catch (error) {
+    if (opts.throwOnCharset === true) throw error
     return null
   }
   if (text === '') return null
@@ -181,11 +188,12 @@ export function writeJson(
  * generic message it had before the guard existed.
  * @param res - the response to write.
  * @param error - the error thrown by a body reader.
+ * @param headers - extra response headers (e.g. a family's cache-control).
  */
-export function writeBodyReadError(res: ServerResponse, error: unknown): void {
+export function writeBodyReadError(res: ServerResponse, error: unknown, headers: OutgoingHttpHeaders = {}): void {
   if (error instanceof CharsetError) {
-    writeJson(res, 400, { ok: false, code: error.code, error: error.message })
+    writeJson(res, 400, { ok: false, code: error.code, error: error.message }, headers)
     return
   }
-  writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+  writeJson(res, 400, { ok: false, error: 'body must be valid JSON' }, headers)
 }

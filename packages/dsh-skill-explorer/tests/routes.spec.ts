@@ -756,7 +756,7 @@ describe('registry degradation', () => {
 })
 
 /** One set-enabled request with a raw (possibly malformed) body, plus its destroy spy. */
-function rawSetEnabledRequest(rawBody: string): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
+function rawSetEnabledRequest(rawBody: string | Buffer): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
   const destroy = vi.fn()
   const req = {
     method: 'POST',
@@ -765,7 +765,8 @@ function rawSetEnabledRequest(rawBody: string): { req: IncomingMessage; destroy:
     headers: { host: 'localhost:3080', 'content-type': 'application/json' },
     destroy,
     [Symbol.asyncIterator]: async function* iterate() {
-      if (rawBody !== '') yield Buffer.from(rawBody)
+      const bytes = typeof rawBody === 'string' ? Buffer.from(rawBody) : rawBody
+      if (bytes.length > 0) yield bytes
     },
   } as unknown as IncomingMessage
   return { req, destroy }
@@ -852,6 +853,54 @@ describe('set-enabled json body failure contract (128 KiB object-only reader)', 
     // Then: the shared writer's family headers are on the response
     expect(res.headers()['content-type']).toBe('application/json; charset=utf-8')
     expect(res.headers()['referrer-policy']).toBe('no-referrer')
+  })
+})
+
+// charset-code-surface-1128: a non-UTF-8 body carries its own code on every
+// body-reading route instead of collapsing into the generic invalid-JSON 400.
+describe('charset failure contract', () => {
+  const gbk = () => Buffer.concat([Buffer.from('{"name":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+  /** One request to an arbitrary body-reading route, with raw bytes. */
+  function rawRequest(url: string, bytes: Buffer): { req: IncomingMessage; destroy: ReturnType<typeof vi.fn> } {
+    const destroy = vi.fn()
+    const req = {
+      method: 'POST',
+      url,
+      socket: { remoteAddress: '127.0.0.1' },
+      headers: { host: 'localhost:3080', 'content-type': 'application/json' },
+      destroy,
+      [Symbol.asyncIterator]: async function* iterate() { yield bytes },
+    } as unknown as IncomingMessage
+    return { req, destroy }
+  }
+
+  const routesWithBody = [
+    ROUTES.setEnabled,
+    ROUTES.setProviderEnabled,
+    ROUTES.create,
+    ROUTES.import,
+    ROUTES.update,
+    ROUTES.delete,
+  ]
+  for (const route of routesWithBody) {
+    it(`answers a non-UTF-8 body on ${route} with 400 and E_CHARSET_INVALID`, async () => {
+      const { req, destroy } = rawRequest(route, gbk())
+      const res = responseWithHeaders()
+      await find(route)!.handler(req, res.res)
+      expect(res.status()).toBe(400)
+      const parsed = JSON.parse(res.body()) as { ok: boolean; code?: string; error?: string }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.code).toBe('E_CHARSET_INVALID')
+      expect(parsed.error).toContain('E_CHARSET_INVALID')
+      expect(destroy).not.toHaveBeenCalled()
+    })
+  }
+
+  it('keeps a valid UTF-8 Chinese body on the existing path (no charset envelope)', async () => {
+    const { req } = rawRequest(ROUTES.setEnabled, Buffer.from('{"name":"中文技能","path":"p","enabled":true}', 'utf8'))
+    const res = responseWithHeaders()
+    await find(ROUTES.setEnabled)!.handler(req, res.res)
+    expect(res.body()).not.toContain('E_CHARSET_INVALID')
   })
 })
 

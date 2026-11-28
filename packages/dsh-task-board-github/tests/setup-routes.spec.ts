@@ -38,8 +38,8 @@ function recordingSetup() {
 }
 
 /** One request double; defaults are a loopback GET from the local GUI. */
-function request(overrides: { method?: string; address?: string; host?: string; fetchSite?: string; origin?: string; body?: unknown } = {}): IncomingMessage {
-  const payload = overrides.body === undefined ? undefined : Buffer.from(JSON.stringify(overrides.body))
+function request(overrides: { method?: string; address?: string; host?: string; fetchSite?: string; origin?: string; body?: unknown; rawBody?: Buffer } = {}): IncomingMessage {
+  const payload = overrides.rawBody ?? (overrides.body === undefined ? undefined : Buffer.from(JSON.stringify(overrides.body)))
   return {
     method: overrides.method ?? 'GET',
     socket: { remoteAddress: overrides.address ?? '127.0.0.1' },
@@ -47,6 +47,7 @@ function request(overrides: { method?: string; address?: string; host?: string; 
       host: overrides.host ?? '127.0.0.1:19387',
       ...(overrides.fetchSite === undefined ? {} : { 'sec-fetch-site': overrides.fetchSite }),
       ...(overrides.origin === undefined ? {} : { origin: overrides.origin }),
+      ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
     },
     async *[Symbol.asyncIterator]() { if (payload !== undefined) yield payload },
     destroy() { /* the lenient reader destroys an oversized body */ },
@@ -231,6 +232,44 @@ describe('GitHub setup routes', () => {
     // Then the report is answered and the target reached the setup surface
     expect(out.state.status).toBe(200)
     expect(out.json().report).toMatchObject({ login: 'octocat' })
+    expect(calls).toEqual(['test deepseek-ai'])
+  })
+})
+
+// charset-code-surface-1128: a non-UTF-8 body carries its own code instead of
+// falling through route()'s generic 500 mapping.
+describe('GitHub setup charset failure contract', () => {
+  const gbk = () => Buffer.concat([Buffer.from('{"owner":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+
+  const cases: Array<[string, string]> = [
+    ['/test', 'POST'],
+    ['/credential', 'POST'],
+    ['/repositories', 'PUT'],
+    ['/proxy', 'PUT'],
+  ]
+  for (const [suffix, method] of cases) {
+    it(`answers a non-UTF-8 body on ${method} ${suffix} with 400 and E_CHARSET_INVALID`, async () => {
+      const { setup, calls } = recordingSetup()
+      const routes = makeGitHubSetupRoutes(setup)
+      const out = await call(routes, suffix, request({ method, rawBody: gbk() }))
+      expect(out.state.status).toBe(400)
+      const parsed = out.json() as { ok: boolean; code?: string; error?: string }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.code).toBe('E_CHARSET_INVALID')
+      expect(parsed.error).toContain('E_CHARSET_INVALID')
+      expect(calls).toEqual([])
+    })
+  }
+
+  it('keeps a valid UTF-8 Chinese body on the existing success path', async () => {
+    const { setup, calls } = recordingSetup()
+    const routes = makeGitHubSetupRoutes(setup)
+    const out = await call(routes, '/test', request({
+      method: 'POST',
+      body: { owner: 'deepseek-ai', repository: 'dsh-web', note: '中文备注' },
+    }))
+    expect(out.state.status).toBe(200)
+    expect(out.state.payload).not.toContain('E_CHARSET_INVALID')
     expect(calls).toEqual(['test deepseek-ai'])
   })
 })

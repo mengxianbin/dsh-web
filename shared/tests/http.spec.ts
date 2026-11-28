@@ -219,6 +219,34 @@ describe('charset guard', () => {
     expect(destroyCalls()).toBe(0)
   })
 
+  it('keeps the reject-as-null default when throwOnCharset is not set (zero contract drift)', async () => {
+    const { request } = fakeRequest([gbkBody()])
+    await expect(readJsonBody(request, { objectOnly: true })).resolves.toBeNull()
+    await expect(readJsonBody(request, { maxBytes: 1024 })).resolves.toBeNull()
+  })
+
+  it('throws CharsetError under throwOnCharset: true so a route can surface the code', async () => {
+    const { request, destroyCalls } = fakeRequest([gbkBody()])
+    const error = await readJsonBody(request, { throwOnCharset: true }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(CharsetError)
+    expect((error as CharsetError).code).toBe(CHARSET_ERROR_CODE)
+    expect(destroyCalls()).toBe(0)
+  })
+
+  it('still parses a valid UTF-8 Chinese body under throwOnCharset: true', async () => {
+    const { request } = fakeRequest([bytes('{"a":"继续"}')])
+    await expect(readJsonBody(request, { throwOnCharset: true })).resolves.toEqual({ a: '继续' })
+  })
+
+  it('keeps yielding null for malformed/empty/oversized bodies under throwOnCharset: true', async () => {
+    const malformed = fakeRequest([bytes('{not json')])
+    await expect(readJsonBody(malformed.request, { throwOnCharset: true })).resolves.toBeNull()
+    const empty = fakeRequest([Buffer.alloc(0)])
+    await expect(readJsonBody(empty.request, { throwOnCharset: true })).resolves.toBeNull()
+    const over = fakeRequest([bytes('x'.repeat(8))])
+    await expect(readJsonBody(over.request, { maxBytes: 4, throwOnCharset: true })).resolves.toBeNull()
+  })
+
   it('writes400 with the code and guidance for a charset failure', () => {
     const { response, status, body } = fakeResponse()
     writeBodyReadError(response, new CharsetError())
@@ -235,5 +263,12 @@ describe('charset guard', () => {
     writeBodyReadError(response, new Error('body too large'))
     expect(status()).toBe(400)
     expect(JSON.parse(body())).toEqual({ ok: false, error: 'body must be valid JSON' })
+  })
+
+  it('passes caller headers through (a family can keep its cache-control)', () => {
+    const { response, status, headers } = fakeResponse()
+    writeBodyReadError(response, new CharsetError(), { 'cache-control': 'no-store' })
+    expect(status()).toBe(400)
+    expect(headers()['cache-control']).toBe('no-store')
   })
 })

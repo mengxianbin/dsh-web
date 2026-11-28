@@ -14,7 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { GITHUB_SETUP_API_PREFIX } from '../core/setup.ts'
 import { isLoopbackRequest } from '../loopback.ts'
-import { asJsonObject, readJsonBody, writeJson } from './http.ts'
+import { asJsonObject, readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import { GitHubSetupError, type GitHubSetup } from './setup.ts'
 
 /** Body cap of the credential route: one token, with room to spare. */
@@ -46,7 +46,16 @@ export function makeGitHubSetupRoutes(setup: GitHubSetup): WebRoute[] {
       path: GITHUB_SETUP_API_PREFIX + '/test',
       handler: (req, res) => route(req, res, async () => {
         if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method not allowed' })
-        const body = asJsonObject(await readJsonBody(req, { maxBytes: CREDENTIAL_BODY_MAX_BYTES })) ?? {}
+        let rawTest: unknown
+        try {
+          rawTest = await readJsonBody(req, { maxBytes: CREDENTIAL_BODY_MAX_BYTES, throwOnCharset: true })
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID before route()'s 500
+          // mapping (charset-code-surface-1128)
+          writeBodyReadError(res, error, { 'cache-control': 'no-store' })
+          return
+        }
+        const body = asJsonObject(rawTest) ?? {}
         const owner = typeof body.owner === 'string' ? body.owner : undefined
         const repository = typeof body.repository === 'string' ? body.repository : undefined
         const report = await setup.test(owner === undefined || repository === undefined ? {} : { owner, repository })
@@ -62,7 +71,14 @@ export function makeGitHubSetupRoutes(setup: GitHubSetup): WebRoute[] {
           return
         }
         if (req.method !== 'POST') return writeJson(res, 405, { ok: false, error: 'method not allowed' })
-        const body = asJsonObject(await readJsonBody(req, { maxBytes: CREDENTIAL_BODY_MAX_BYTES }))
+        let rawCredential: unknown
+        try {
+          rawCredential = await readJsonBody(req, { maxBytes: CREDENTIAL_BODY_MAX_BYTES, throwOnCharset: true })
+        } catch (error) {
+          writeBodyReadError(res, error, { 'cache-control': 'no-store' })
+          return
+        }
+        const body = asJsonObject(rawCredential)
         const token = typeof body?.token === 'string' ? body.token : undefined
         if (token === undefined) return writeJson(res, 400, { ok: false, error: 'a token is required' })
         writeJson(res, 200, { ok: true, ...(await setup.setCredential(token)) }, { 'cache-control': 'no-store' })
@@ -77,7 +93,14 @@ export function makeGitHubSetupRoutes(setup: GitHubSetup): WebRoute[] {
           return
         }
         if (req.method !== 'PUT') return writeJson(res, 405, { ok: false, error: 'method not allowed' })
-        const body = asJsonObject(await readJsonBody(req, { maxBytes: REPOSITORY_BODY_MAX_BYTES }))
+        let rawRepositories: unknown
+        try {
+          rawRepositories = await readJsonBody(req, { maxBytes: REPOSITORY_BODY_MAX_BYTES, throwOnCharset: true })
+        } catch (error) {
+          writeBodyReadError(res, error, { 'cache-control': 'no-store' })
+          return
+        }
+        const body = asJsonObject(rawRepositories)
         const list = body?.repositories
         if (!Array.isArray(list)) {
           return writeJson(res, 400, { ok: false, error: 'a repositories array is required' })
@@ -95,7 +118,14 @@ export function makeGitHubSetupRoutes(setup: GitHubSetup): WebRoute[] {
           return
         }
         if (req.method !== 'PUT') return writeJson(res, 405, { ok: false, error: 'method not allowed' })
-        const body = asJsonObject(await readJsonBody(req, { maxBytes: PROXY_BODY_MAX_BYTES }))
+        let rawProxy: unknown
+        try {
+          rawProxy = await readJsonBody(req, { maxBytes: PROXY_BODY_MAX_BYTES, throwOnCharset: true })
+        } catch (error) {
+          writeBodyReadError(res, error, { 'cache-control': 'no-store' })
+          return
+        }
+        const body = asJsonObject(rawProxy)
         if (body === undefined) return writeJson(res, 400, { ok: false, error: 'a proxy configuration is required' })
         writeJson(res, 200, { ok: true, ...(await setup.setProxy({ mode: body.mode, url: body.url })) }, { 'cache-control': 'no-store' })
       }),

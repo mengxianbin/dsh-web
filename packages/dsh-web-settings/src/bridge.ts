@@ -20,7 +20,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { composeAllowlist, extractWebSettingsNamespaces, resolveNamespaceEntries, resolveNamespaceEntry } from './allowlist.ts'
 import { WEB_UI_SETTINGS_BRIDGE_PREFIX } from './protocol.ts'
 import type { BridgeDescribeResult, BridgeMutateRequest, BridgeMutateResult, BridgeNamespaceView } from './protocol.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 
 /** Header an authenticated same-host reverse proxy replaces before forwarding. */
 export const WEB_UI_SETTINGS_PROXY_TOKEN_HEADER = 'x-dsh-web-ui-settings-proxy-token'
@@ -413,7 +413,15 @@ export function makeBridgeRoutes(deps: BridgeDeps, access?: BridgeAccess): WebRo
       path: WEB_UI_SETTINGS_BRIDGE_PREFIX + '/mutate',
       handler: async (req, res) => {
         if (!guard(req, res)) return
-        const body = await readJsonBody(req)
+        let body: unknown
+        try {
+          body = await readJsonBody(req, { throwOnCharset: true })
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128);
+          // other unreadable bodies keep the legacy settings-rejected envelope below.
+          writeBodyReadError(res, error)
+          return
+        }
         if (body === null) {
           writeJson(res, 400, { ok: false, code: 'settings-rejected', message: 'unreadable JSON body' })
           return

@@ -17,7 +17,7 @@ import { WebSocket, WebSocketServer } from 'ws'
 import type { WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { SshEngine } from './engine.ts'
 import { TerminalSessionRegistry } from './engine/terminal-sessions.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { SSH_API, type HostPayload, type TerminalServerFrame } from './protocol.ts'
 import type { HostStore } from './store.ts'
@@ -97,7 +97,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
           return
         }
         if (method === 'POST') {
-          const body = (await readJsonBody(req)) as Record<string, unknown> | null
+          let body: Record<string, unknown> | null
+          try {
+            body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+          } catch (error) {
+            // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -120,7 +127,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
           return
         }
         if (method === 'PATCH') {
-          const body = (await readJsonBody(req)) as Record<string, unknown> | null
+          let body: Record<string, unknown> | null
+          try {
+            body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+          } catch (error) {
+            // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -174,7 +188,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
       path: SSH_API.test,
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
-        const body = (await readJsonBody(req)) as Record<string, unknown> | null
+        let body: Record<string, unknown> | null
+        try {
+          body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+          writeBodyReadError(res, error)
+          return
+        }
         const alias = typeof body?.alias === 'string' ? body.alias : ''
         if (alias === '') {
           writeJson(res, 400, { error: 'alias is required' })
@@ -192,7 +213,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
       path: SSH_API.exec,
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
-        const body = (await readJsonBody(req)) as Record<string, unknown> | null
+        let body: Record<string, unknown> | null
+        try {
+          body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+          writeBodyReadError(res, error)
+          return
+        }
         const alias = typeof body?.alias === 'string' ? body.alias : ''
         const command = typeof body?.command === 'string' ? body.command : ''
         if (alias === '' || command === '') {
@@ -212,7 +240,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
       path: SSH_API.cluster,
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
-        const body = (await readJsonBody(req)) as Record<string, unknown> | null
+        let body: Record<string, unknown> | null
+        try {
+          body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+          writeBodyReadError(res, error)
+          return
+        }
         const command = typeof body?.command === 'string' ? body.command : ''
         if (command === '') {
           writeJson(res, 400, { error: 'command is required' })
@@ -263,7 +298,14 @@ const maxUploadBytes = deps.maxUploadBytes ?? MAX_UPLOAD_BYTES
       path: SSH_API.tunnel,
       handler: async (req, res) => {
         if (!guard(req, res, 'POST')) return
-        const body = (await readJsonBody(req)) as Record<string, unknown> | null
+        let body: Record<string, unknown> | null
+        try {
+          body = (await readJsonBody(req, { throwOnCharset: true })) as Record<string, unknown> | null
+        } catch (error) {
+          // Charset bad sample → 400 + E_CHARSET_INVALID (charset-code-surface-1128)
+          writeBodyReadError(res, error)
+          return
+        }
         const action = typeof body?.action === 'string' ? body.action : ''
         if (action === 'list') {
           writeJson(res, 200, { tunnels: engine.listTunnels() })

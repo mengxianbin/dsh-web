@@ -102,6 +102,30 @@ describe('gateway body failure contract', () => {
     expect(status()).toBe(200)
   })
 
+  // charset-code-surface-1128: a non-UTF-8 body carries its own code instead
+  // of collapsing into the generic validation 400.
+  const gbkPayload = () => Buffer.concat([Buffer.from('{"spec":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+  for (const [path] of cases) {
+    it(`answers a non-UTF-8 body on ${path} with 400 and E_CHARSET_INVALID`, async () => {
+      const { request, destroyCalls } = fakeRequest([gbkPayload()])
+      const { res, body, status } = captureResponse()
+      await route(path)(request, res)
+      expect(status()).toBe(400)
+      const parsed = JSON.parse(body()) as { ok: boolean; code?: string; error?: string }
+      expect(parsed.ok).toBe(false)
+      expect(parsed.code).toBe('E_CHARSET_INVALID')
+      expect(parsed.error).toContain('E_CHARSET_INVALID')
+      expect(destroyCalls()).toBe(0)
+    })
+  }
+
+  it('keeps a valid UTF-8 Chinese body on the install route (success path untouched)', async () => {
+    const { request } = fakeRequest([Buffer.from('{"spec":"dsh-pet","note":"中文备注"}', 'utf8')])
+    const { res, status } = captureResponse()
+    await route('/api/plugin-manager/install')(request, res)
+    expect(status()).toBe(200)
+  })
+
   it('writes a JSON loopback rejection envelope with family headers', async () => {
     const { request } = fakeRequest()
     Object.assign(request, { socket: { remoteAddress: '10.0.0.5' } })
