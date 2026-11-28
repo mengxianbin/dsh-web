@@ -28,7 +28,7 @@ import { EVENTS, type EventId } from '../core/table.ts'
 import { FsmStore } from './store.ts'
 import { ArchiveLeg } from './archive-leg.ts'
 import { makeHostDeps, type TransitionEvidence } from './sources.ts'
-import { readBoundedJson, writeJson } from './http.ts'
+import { CharsetError, readBoundedJson, writeBodyReadError, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 
 export const TASK_FSM_API_PREFIX = '/api/task-fsm'
@@ -297,7 +297,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
       if (body === undefined || taskRef === '' || sessionId === '') {
@@ -388,7 +390,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const key = typeof body?.key === 'string' ? body.key : ''
       const prio = body?.prio === 'red' || body?.prio === 'yellow' ? body.prio : undefined
       if (body === undefined || key === '' || prio === undefined) {
@@ -421,7 +425,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const worktreePlan = typeof body?.worktreePlan === 'string' ? body.worktreePlan : ''
       if (body === undefined || taskRef === '' || worktreePlan === '') {
@@ -463,7 +469,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const event = isEventId(body?.event) ? body.event : undefined
       if (body === undefined || taskRef === '' || event === undefined) {
@@ -539,7 +547,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const trigger = body?.trigger
       if (body === undefined || taskRef === '' || (trigger !== 'prereq-terminal' && trigger !== 'quota-free')) {
@@ -587,7 +597,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       if (body === undefined || taskRef === '') { writeJson(res, 400, { ok: false, error: 'body needs { taskRef }' }); return }
       const origin = typeof req.headers.host === 'string' && req.headers.host !== ''
@@ -645,7 +657,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const fromTaskRef = typeof body?.fromTaskRef === 'string' ? body.fromTaskRef : ''
       const toTaskRef = typeof body?.toTaskRef === 'string' ? body.toTaskRef : ''
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : ''
@@ -740,7 +754,9 @@ export function makeTaskFsmRoutes(services: FsmRouteServices): WebRoute[] {
       if (!fenced(req, res)) return
       if (req.method !== 'POST') { writeJson(res, 405, { ok: false, error: 'method not allowed: use POST' }); return }
       let body: Record<string, unknown> | undefined
-      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch { /* fallthrough */ }
+      try { body = isObject(await readBoundedJson(req, BODY_MAX_BYTES)) } catch (error) {
+        if (error instanceof CharsetError) { writeBodyReadError(res, error); return }
+      }
       const taskRef = typeof body?.taskRef === 'string' ? body.taskRef : ''
       const parentRef = typeof body?.parent === 'string' ? body.parent : ''
       if (body === undefined || taskRef === '' || parentRef === '') {

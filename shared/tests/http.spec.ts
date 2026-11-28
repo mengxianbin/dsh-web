@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { asJsonObject, readBoundedJson, readJsonBody, withIdentityEncoding, writeJson } from '../host/http.ts'
+import {
+  asJsonObject,
+  CHARSET_ERROR_CODE,
+  CharsetError,
+  readBoundedJson,
+  readJsonBody,
+  withIdentityEncoding,
+  writeBodyReadError,
+  writeJson,
+} from '../host/http.ts'
 
 /**
  * Async-readable IncomingMessage stand-in built from byte chunks; counts
@@ -176,5 +185,55 @@ describe('withIdentityEncoding', () => {
     expect(headers.get('accept-encoding')).toBe('identity')
     expect(init.method).toBe('POST')
     expect(init.signal).toBe(controller.signal)
+  })
+})
+
+/**
+ * A JSON body whose value carries GBK bytes ("中文"): `Buffer.toString("utf8")`
+ * would substitute U+FFFD per invalid byte and let JSON.parse succeed, which is
+ * the silent transcode this guard exists to stop.
+ */
+function gbkBody(): Buffer {
+  return Buffer.concat([bytes('{"a":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), bytes('"}')])
+}
+
+describe('charset guard', () => {
+  it('rejects a non-UTF-8 body with E_CHARSET_INVALID instead of transcoding', async () => {
+    const { request } = fakeRequest([gbkBody()])
+    const error = await readBoundedJson(request, 1024).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(CharsetError)
+    expect((error as CharsetError).code).toBe(CHARSET_ERROR_CODE)
+    expect((error as Error).message).toContain(CHARSET_ERROR_CODE)
+    expect((error as Error).message).toContain('UTF-8')
+    expect((error as Error).message).toContain('Fix the sender')
+  })
+
+  it('keeps parsing a valid UTF-8 Chinese body', async () => {
+    const { request } = fakeRequest([bytes('{"a":"继续"}')])
+    await expect(readBoundedJson(request, 1024)).resolves.toEqual({ a: '继续' })
+  })
+
+  it('reports a non-UTF-8 body as null in the lenient reader without destroying', async () => {
+    const { request, destroyCalls } = fakeRequest([gbkBody()])
+    await expect(readJsonBody(request)).resolves.toBeNull()
+    expect(destroyCalls()).toBe(0)
+  })
+
+  it('writes400 with the code and guidance for a charset failure', () => {
+    const { response, status, body } = fakeResponse()
+    writeBodyReadError(response, new CharsetError())
+    expect(status()).toBe(400)
+    const parsed = JSON.parse(body()) as { ok: boolean; code?: string; error?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.code).toBe(CHARSET_ERROR_CODE)
+    expect(parsed.error).toContain(CHARSET_ERROR_CODE)
+    expect(parsed.error).toContain('Fix the sender')
+  })
+
+  it('keeps the generic message for every other body-read failure', () => {
+    const { response, status, body } = fakeResponse()
+    writeBodyReadError(response, new Error('body too large'))
+    expect(status()).toBe(400)
+    expect(JSON.parse(body())).toEqual({ ok: false, error: 'body must be valid JSON' })
   })
 })

@@ -16,7 +16,7 @@ import {
   recordBriefOf,
   type DispatchFsmSeam,
 } from './fsm-seam.ts'
-import { readBoundedJson, writeJson } from './http.ts'
+import { readBoundedJson, writeBodyReadError, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 
 export const DISPATCH_API_PREFIX = '/api/session-dispatch'
@@ -300,8 +300,8 @@ export function makeDispatchRoute(services: DispatchServices): WebRoute {
       let body: unknown
       try {
         body = await readBoundedJson(req, BODY_MAX_BYTES)
-      } catch {
-        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+      } catch (error) {
+        writeBodyReadError(res, error)
         return
       }
       const parsed = parseDispatchBody(body)
@@ -752,8 +752,8 @@ export function makeSessionSendRoute(services: SessionSendServices, options: Ses
       let body: unknown
       try {
         body = await readBoundedJson(req, BODY_MAX_BYTES)
-      } catch {
-        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+      } catch (error) {
+        writeBodyReadError(res, error)
         return
       }
       const parsed = parseSessionSendBody(body)
@@ -847,8 +847,8 @@ export function makeSessionStopRoute(services: SessionStopServices): WebRoute {
       let body: unknown
       try {
         body = await readBoundedJson(req, BODY_MAX_BYTES)
-      } catch {
-        writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
+      } catch (error) {
+        writeBodyReadError(res, error)
         return
       }
       const parsed = parseSessionStopBody(body)

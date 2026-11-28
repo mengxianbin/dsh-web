@@ -577,6 +577,16 @@ function sendReq(body: unknown, opts: { loopback?: boolean; url?: string } = {})
   return fakeReq('POST', body, { url: SESSION_SEND_API_PREFIX, ...opts })
 }
 
+/** Raw-bytes variant: bypasses JSON.stringify so a legacy-coded body travels verbatim. */
+function rawSendReq(payload: Buffer): IncomingMessage {
+  const stream = Readable.from([payload]) as IncomingMessage
+  stream.method = 'POST'
+  stream.url = SESSION_SEND_API_PREFIX
+  stream.headers = { host: '127.0.0.1:3080' }
+  stream.socket = { remoteAddress: '127.0.0.1' } as IncomingMessage['socket']
+  return stream
+}
+
 describe('parseSessionSendBody', () => {
   it('accepts a minimal request, trims sessionId, and defaults mode to queue', () => {
     expect(parseSessionSendBody({ sessionId: ' session-1 ', prompt: 'hello' }))
@@ -629,6 +639,37 @@ describe('session-send route', () => {
     expect(request.sessionId).toBe('session-1')
     expect(request.mode).toBe('queue')
     expect(request.content).toEqual([{ type: 'text', text: 'look at this' }])
+  })
+
+  it('rejects a non-UTF-8 body with E_CHARSET_INVALID plus guidance, without prompting (bad sample)', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    // GBK bytes for "中文" inside an otherwise well-formed session-send body:
+    // the old toString("utf8") path parsed this and queued a mojibake prompt.
+    const gbk = Buffer.concat([
+      Buffer.from('{"sessionId":"session-1","prompt":"'),
+      Buffer.from([0xd6, 0xd0, 0xce, 0xc4]),
+      Buffer.from('"}'),
+    ])
+    const captured = await run(handler, rawSendReq(gbk))
+    expect(captured.status).toBe(400)
+    expect(captured.body).toMatchObject({
+      ok: false,
+      code: 'E_CHARSET_INVALID',
+      error: expect.stringContaining('E_CHARSET_INVALID'),
+    })
+    expect((captured.body as { error: string }).error).toContain('Fix the sender')
+    // Nothing is stored and nothing is transcoded: the prompt call never runs.
+    expect(captures.requests).toHaveLength(0)
+  })
+
+  it('queues a valid UTF-8 Chinese prompt with 200 (good sample)', async () => {
+    const captures = fakeSendServices()
+    const handler = makeSessionSendRoute(captures).handler!
+    const captured = await run(handler, sendReq({ sessionId: 'session-1', prompt: '继续' }))
+    expect(captured.status).toBe(200)
+    expect(captured.body).toEqual({ ok: true, sessionId: 'session-1' })
+    expect(captures.requests[0]!.content).toEqual([{ type: 'text', text: '继续' }])
   })
 
   it('defaults to queue when the wire carries no mode field (pre-mode callers unchanged)', async () => {

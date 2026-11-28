@@ -1,6 +1,7 @@
 /**
  * Shared JSON body/response helpers for the host route families: one strict
- * bounded body reader, one lenient bounded body reader, one JSON object
+ * bounded body reader, one lenient bounded body reader, one UTF-8 charset
+ * guard both readers share (CharsetError / E_CHARSET_INVALID), one JSON object
  * narrow, one JSON writer, and the outbound request-init helper that keeps a
  * host fetch body decodable (withIdentityEncoding). Previously the readers
  * were copy-pasted across the
@@ -26,11 +27,52 @@ const JSON_HEADERS = {
   'referrer-policy': 'no-referrer',
 } satisfies OutgoingHttpHeaders
 
+/** Error code for a request body that is not valid UTF-8. */
+export const CHARSET_ERROR_CODE = 'E_CHARSET_INVALID'
+
+/**
+ * Guidance returned alongside {@link CHARSET_ERROR_CODE}: which hop refused and
+ * what the sender must change. This host decodes request bytes as UTF-8 only and
+ * never transcodes, so a legacy code page (GBK, CP1252, ...) must be fixed on the
+ * sending side; the receiving hop is where the bad bytes are first noticed.
+ */
+export const CHARSET_GUIDANCE = `${CHARSET_ERROR_CODE}: request body is not valid UTF-8 (expected UTF-8, RFC 8259). This host never transcodes; the bad bytes were noticed at the receiving hop. Fix the sender: encode the JSON body as UTF-8 (Buffer.from(JSON.stringify(v), "utf8")) and send charset=utf-8.`
+
+/**
+ * Thrown by the body readers when the raw request bytes are not valid UTF-8.
+ * Never silently substituted: `Buffer.toString("utf8")` would replace every
+ * invalid byte with U+FFFD and let the mojibake parse as JSON.
+ */
+export class CharsetError extends Error {
+  readonly code = CHARSET_ERROR_CODE
+  constructor(message: string = CHARSET_GUIDANCE) {
+    super(message)
+    this.name = 'CharsetError'
+  }
+}
+
+/** Strict UTF-8 decoder reused across requests (stateless without stream:true). */
+const UTF8_BODY_DECODER = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+/**
+ * Decode one request body as strict UTF-8, failing loudly on legacy bytes.
+ * @param bytes - the raw request body.
+ * @returns the decoded text.
+ * @throws {@link CharsetError} when the bytes are not valid UTF-8.
+ */
+function decodeUtf8Body(bytes: Buffer): string {
+  try {
+    return UTF8_BODY_DECODER.decode(bytes)
+  } catch {
+    throw new CharsetError()
+  }
+}
+
 /**
  * Strict bounded body reader: parse a request body of at most maxBytes as
  * JSON.
- * @throws 'body too large' past the cap, or the JSON.parse error for an
- *   invalid or empty payload.
+ * @throws 'body too large' past the cap, the JSON.parse error for an invalid
+ *   or empty payload, or {@link CharsetError} for a non-UTF-8 body.
  */
 export async function readBoundedJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = []
@@ -41,7 +83,7 @@ export async function readBoundedJson(req: IncomingMessage, maxBytes: number): P
     if (size > maxBytes) throw new Error('body too large')
     chunks.push(buffer)
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  return JSON.parse(decodeUtf8Body(Buffer.concat(chunks)))
 }
 
 /**
@@ -50,7 +92,9 @@ export async function readBoundedJson(req: IncomingMessage, maxBytes: number): P
  * Overflow destroys the request instead of draining the remainder (no drain
  * call, matching the current repo-wide behavior); callers must not keep
  * reading the request afterwards. With objectOnly, non-JSON-object payloads
- * also yield null.
+ * also yield null, and so does a body that is not valid UTF-8 — the charset
+ * guard rejects instead of transcoding, matching how this reader already
+ * reports malformed JSON.
  */
 export async function readJsonBody(
   req: IncomingMessage,
@@ -68,7 +112,12 @@ export async function readJsonBody(
     }
     chunks.push(buffer)
   }
-  const text = Buffer.concat(chunks).toString('utf8')
+  let text: string
+  try {
+    text = decodeUtf8Body(Buffer.concat(chunks))
+  } catch {
+    return null
+  }
   if (text === '') return null
   try {
     const parsed: unknown = JSON.parse(text)
@@ -123,4 +172,19 @@ export function writeJson(
   const payload = JSON.stringify(body)
   res.writeHead(status, { ...JSON_HEADERS, ...headers })
   res.end(payload)
+}
+
+/**
+ * Write the 400 a route owes after a body read failed: the charset failure
+ * carries its error code and guidance, every other read failure keeps the
+ * generic message it had before the guard existed.
+ * @param res - the response to write.
+ * @param error - the error thrown by a body reader.
+ */
+export function writeBodyReadError(res: ServerResponse, error: unknown): void {
+  if (error instanceof CharsetError) {
+    writeJson(res, 400, { ok: false, code: error.code, error: error.message })
+    return
+  }
+  writeJson(res, 400, { ok: false, error: 'body must be valid JSON' })
 }

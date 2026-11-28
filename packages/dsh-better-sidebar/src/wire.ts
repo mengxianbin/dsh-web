@@ -50,6 +50,17 @@ export class SidebarError extends Error {
 /** Body size bound of one JSON request (defense against unbounded reads). */
 const MAX_BODY_BYTES = 1 << 20
 
+/**
+ * Charset guidance for the JSON body reader: which hop refused and what the
+ * sender must change. Wording matches the shared `E_CHARSET_INVALID` text in
+ * shared/host/http.ts (this package carries no generated http.ts copy); the
+ * raw-text reader below already refuses invalid UTF-8 on its own.
+ */
+const CHARSET_GUIDANCE =
+  'E_CHARSET_INVALID: request body is not valid UTF-8 (expected UTF-8, RFC 8259). ' +
+  'This host never transcodes; the bad bytes were noticed at the receiving hop. ' +
+  'Fix the sender: encode the JSON body as UTF-8 (Buffer.from(JSON.stringify(v), "utf8")) and send charset=utf-8.'
+
 /** Success envelope of one API method. */
 export interface SidebarOk<T> { ok: true; value: T }
 
@@ -70,7 +81,14 @@ export async function readJsonBody(req: SidebarHttpRequest): Promise<unknown> {
     }
     chunks.push(buffer)
   }
-  const text = Buffer.concat(chunks).toString('utf8')
+  let text: string
+  try {
+    // `fatal` so legacy-coded bytes fail loudly instead of silently becoming
+    // U+FFFD and parsing as a well-formed body (same guard as readTextBody).
+    text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
+  } catch {
+    throw new SidebarError('bad-request', CHARSET_GUIDANCE)
+  }
   if (text.trim() === '') return {}
   try {
     return JSON.parse(text) as unknown

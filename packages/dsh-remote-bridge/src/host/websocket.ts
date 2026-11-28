@@ -15,6 +15,7 @@ import type { BridgeTransport, ConnectionAuth } from '../core/connection.ts'
 import { MAX_FRAME_BYTES, outboundPayloadOf } from '../core/envelope.ts'
 import type { BridgeHub } from '../core/hub.ts'
 import {
+  CLOSE_INVALID_UTF8,
   CLOSE_PROTOCOL_ERROR,
   CLOSE_TOO_LARGE,
   CLOSE_UNSUPPORTED_DATA,
@@ -325,7 +326,16 @@ export class WebSocketCarrier implements BridgeTransport {
       this.close(CLOSE_UNSUPPORTED_DATA, 'this endpoint carries text frames only')
       return false
     }
-    const text = payload.toString('utf8')
+    let text: string
+    try {
+      // RFC 6455 defines a text message as UTF-8, so `fatal` refuses a
+      // legacy-coded payload instead of silently substituting U+FFFD into the
+      // connection's messages (1007 = invalid UTF-8 data in a text message).
+      text = new TextDecoder('utf-8', { fatal: true }).decode(payload)
+    } catch {
+      this.close(CLOSE_INVALID_UTF8, 'E_CHARSET_INVALID: text frame is not valid UTF-8')
+      return false
+    }
     if (this.#onMessage === undefined) {
       // The mounted wiring order (handshake → attach → onMessage → feed(head)) is
       // synchronous, so this queue is never needed for it: `data` can only fire on

@@ -28,6 +28,12 @@ export const CLOSE_UNSUPPORTED_DATA = 1003
 /** Close code for a message past the size this bridge will carry. */
 export const CLOSE_TOO_LARGE = 1009
 /**
+ * Close code for a text frame whose bytes are not valid UTF-8 (RFC 6455 7.4.1):
+ * a text message is defined as UTF-8, so a legacy-coded payload is refused here
+ * rather than silently becoming replacement characters in the connection.
+ */
+export const CLOSE_INVALID_UTF8 = 1007
+/**
  * Close code for a peer that stopped answering: a liveness ping went out and no
  * frame at all came back before its deadline.
  *

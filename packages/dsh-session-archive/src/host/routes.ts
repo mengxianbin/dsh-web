@@ -10,7 +10,7 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { BatchRequestBody } from '../core/types.ts'
 import { BusyError, PlanMismatchError, type ArchiveService } from './janitor.ts'
-import { readBoundedJson, writeJson } from './http.ts'
+import { CharsetError, readBoundedJson, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { canonicalSessionId } from './session-files.ts'
 
@@ -30,7 +30,10 @@ function fenced(req: IncomingMessage, res: ServerResponse): boolean {
 async function readBody(req: IncomingMessage): Promise<unknown> {
   try {
     return await readBoundedJson(req, BODY_MAX_BYTES)
-  } catch {
+  } catch (error) {
+    // A non-UTF-8 body must surface with its error code and guidance rather
+    // than read as `{}`; every other failure keeps reading as an empty body.
+    if (error instanceof CharsetError) throw error
     // Empty or invalid bodies read as an empty object; id validation rejects.
     return {}
   }
@@ -220,7 +223,13 @@ export function makeSealCheckRoute(service: ArchiveService): WebRoute {
       let ids: string[]
       let recheck = false
       if (req.method === 'POST') {
-        const body = bodyRecord(await readBody(req))
+        let body: Record<string, unknown>
+        try {
+          body = bodyRecord(await readBody(req))
+        } catch (error) {
+          writeJson(res, 400, { ok: false, error: errorDetail(error) })
+          return
+        }
         ids = idList(body.ids)
         recheck = body.recheck === true
       } else if (req.method === 'GET') {
@@ -263,7 +272,13 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
         writeJson(res, 405, { ok: false, error: 'method not allowed' })
         return
       }
-      const raw = await readBody(req)
+      let raw: unknown
+      try {
+        raw = await readBody(req)
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: errorDetail(error) })
+        return
+      }
       const record = bodyRecord(raw)
       const body = batchBody(raw)
       if (body.ids.length === 0) {
@@ -324,7 +339,13 @@ export function makeArchiveOverrideRoute(service: ArchiveService): WebRoute {
         writeJson(res, 405, { ok: false, error: 'method not allowed' })
         return
       }
-      const record = bodyRecord(await readBody(req))
+      let record: Record<string, unknown>
+      try {
+        record = bodyRecord(await readBody(req))
+      } catch (error) {
+        writeJson(res, 400, { ok: false, error: errorDetail(error) })
+        return
+      }
       const ids = idList(record.ids)
       if (ids.length === 0) {
         writeJson(res, 400, { ok: false, error: 'no session ids' })

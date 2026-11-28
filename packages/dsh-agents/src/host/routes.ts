@@ -92,6 +92,16 @@ export function isTrustedAgentsRequest(req: IncomingMessage): boolean {
   return isLoopbackAddress(req.socket.remoteAddress)
 }
 
+/**
+ * Charset guidance for this package's body readers: which hop refused and what
+ * the sender must change. Wording matches the shared `E_CHARSET_INVALID` text in
+ * shared/host/http.ts (this package carries no generated http.ts copy).
+ */
+const CHARSET_GUIDANCE =
+  'E_CHARSET_INVALID: request body is not valid UTF-8 (expected UTF-8, RFC 8259). ' +
+  'This host never transcodes; the bad bytes were noticed at the receiving hop. ' +
+  'Fix the sender: encode the JSON body as UTF-8 (Buffer.from(JSON.stringify(v), "utf8")) and send charset=utf-8.'
+
 async function readJson(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
@@ -101,8 +111,16 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
     if (size > AGENTS_BODY_LIMIT) throw new AgentsError('body-too-large', 'the request body exceeds ' + AGENTS_BODY_LIMIT + ' bytes')
     chunks.push(buffer)
   }
+  let text: string
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    // `fatal` so legacy-coded bytes fail loudly instead of silently becoming
+    // U+FFFD and parsing as a well-formed request.
+    text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks))
+  } catch {
+    throw new AgentsError('invalid-request', CHARSET_GUIDANCE)
+  }
+  try {
+    return JSON.parse(text)
   } catch {
     throw new AgentsError('invalid-request', 'the request body is not valid JSON')
   }
