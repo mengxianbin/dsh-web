@@ -32,7 +32,7 @@ export interface LedgerEntry {
   /** Epoch ms of the archive action (manual, automatic) or of the observation. */
   archivedAt: number
   source: LedgerSource
-  /** Forced-archive reason (`source: "override"`); never written empty — see {@link normalizeOverrideReason}. */
+  /** Forced-archive reason (`source: "override"`); never written empty — a blank reason is rejected up front, see {@link normalizeOverrideReason}. */
   reason?: string
   /**
    * Seal marker recorded with the archive: `"stale"` for the degraded
@@ -68,18 +68,24 @@ export function createLedgerDocument(): LedgerDocument {
   return { version: 1, entries: {} }
 }
 
-/** Default marker for a forced archive without a stated reason (裁定②). */
+/**
+ * Historical marker for a forced archive without a stated reason (裁定②).
+ * Kept verbatim as the value already persisted in the pre-existing ledger
+ * entries; no write path produces it any more (force-reason-required-1128).
+ */
 export const OVERRIDE_NO_REASON = 'override:no-reason'
 
 /**
- * Normalize a forced-archive reason at the write layer (contract C4): any
- * missing/blank reason becomes {@link OVERRIDE_NO_REASON}, so "forced but
- * never said why" stays recognizable and countable in the ledger instead of
- * colliding with entries that carry real words.
+ * Validate and trim a forced-archive reason at the write layer (contract C4):
+ * a non-empty string returns its trimmed form; missing/blank/non-string input
+ * is rejected up front with the same wording as `POST /archive` instead of
+ * normalizing to {@link OVERRIDE_NO_REASON} — force must state why, so a blank
+ * reason fails closed here for direct service callers. The route answers 400
+ * before the write layer is reached (force-reason-required-1128).
  */
 export function normalizeOverrideReason(reason: unknown): string {
   if (typeof reason === 'string' && reason.trim() !== '') return reason.trim()
-  return OVERRIDE_NO_REASON
+  throw new Error('force requires a non-empty reason')
 }
 
 /** Tolerant deserialize: corrupt or foreign documents start fresh. */
