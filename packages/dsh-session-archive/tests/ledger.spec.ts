@@ -137,12 +137,15 @@ describe('ledger override schema (contract C3)', () => {
     expect(deserializeLedger(raw).entries).toEqual({ 'session-x': { archivedAt: 1, source: 'override' } })
   })
 
-  it('every forced reason is normalized at the write layer', () => {
-    expect(normalizeOverrideReason(undefined)).toBe(OVERRIDE_NO_REASON)
-    expect(normalizeOverrideReason('')).toBe(OVERRIDE_NO_REASON)
-    expect(normalizeOverrideReason('   ')).toBe(OVERRIDE_NO_REASON)
-    expect(normalizeOverrideReason(42)).toBe(OVERRIDE_NO_REASON)
+  it('rejects a blank forced reason up front instead of normalizing it (force-reason-required-1128)', () => {
+    expect(() => normalizeOverrideReason(undefined)).toThrow('force requires a non-empty reason')
+    expect(() => normalizeOverrideReason('')).toThrow('force requires a non-empty reason')
+    expect(() => normalizeOverrideReason('   ')).toThrow('force requires a non-empty reason')
+    expect(() => normalizeOverrideReason(42)).toThrow('force requires a non-empty reason')
     expect(normalizeOverrideReason('  真实理由  ')).toBe('真实理由')
+    // The historical marker stays verbatim: entries written before
+    // force-reason-required-1128 already hold this value.
+    expect(OVERRIDE_NO_REASON).toBe('override:no-reason')
   })
 })
 describe('capEntries', () => {

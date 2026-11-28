@@ -235,8 +235,9 @@ export interface ArchiveGateBody extends BatchRequestBody {
 /**
  * Request body for `POST /archive-override` — the native-channel ledger
  * write-back (contract C4). `mode: "force"` records the forced archive with
- * its reason (empty normalizes to `override:no-reason`); `mode: "note"`
- * records the stale pass-through seal.
+ * a non-empty reason (blank/missing is refused with 400, the same judgement
+ * and wording as `POST /archive`); `mode: "note"` records the stale
+ * pass-through seal.
  */
 export interface ArchiveOverrideBody {
   readonly ids: readonly string[]

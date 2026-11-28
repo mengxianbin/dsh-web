@@ -324,8 +324,9 @@ export function makeArchiveRoute(service: ArchiveService): WebRoute {
 
 /**
  * `POST /archive-override` (contract C4): the native dialog's ledger
- * write-back after a confirmed forced archive (`mode: "force"`, reason
- * normalizes to `override:no-reason` when blank) or a stale pass-through
+ * write-back after a confirmed forced archive (`mode: "force"`, which must
+ * state a non-empty reason — blank/missing is refused with 400, the same
+ * judgement and wording as `POST /archive`) or a stale pass-through
  * (`mode: "note"`, pins `seal: "stale"`). It only writes the ledger — it
  * never archives anything, so it cannot bypass the gate.
  */
@@ -357,6 +358,14 @@ export function makeArchiveOverrideRoute(service: ArchiveService): WebRoute {
       }
       if (record.mode !== 'force' && record.mode !== 'note') {
         writeJson(res, 400, { ok: false, error: 'mode must be force or note' })
+        return
+      }
+      // force must state why: the same judgement and wording as POST /archive
+      // (force-reason-required-1128) — the native channel's blank ->
+      // override:no-reason normalization is retired, so a blank reason fails
+      // closed here instead of reaching the write layer.
+      if (record.mode === 'force' && (typeof record.reason !== 'string' || record.reason.trim() === '')) {
+        writeJson(res, 400, { ok: false, error: 'force requires a non-empty reason' })
         return
       }
       try {
