@@ -13,11 +13,20 @@
  *
  * Usage:
  *   node scripts/sync-shared.mjs             # rewrite every consumer copy
- *   node scripts/sync-shared.mjs --check     # fail when any copy drifts
+ *   node scripts/sync-shared.mjs --check     # fail when any copy drifts or any
+ *                                            # orphan header shows up
+ *
+ * --check validates two things: every manifest target matches its source, and
+ * no file outside the manifest carries the generated header. The second check
+ * exists because a copy the manifest never names drifts in silence: that is
+ * exactly how packages/dsh-task-fsm/src/host/http.ts went stale until
+ * session-charset-guard-1127's typecheck exploded in an unrelated package.
+ * SYNC_SHARED_ROOT points both checks at a fixture tree; the tests use it to
+ * exercise the exit code hermetically.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { mkdir, open, readdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
@@ -128,6 +137,9 @@ const MANIFEST = [
       'packages/dsh-auto-route/src/dsh-home.ts',
       'packages/dsh-session-revive/src/dsh-home.ts',
       'packages/dsh-remote-bridge/src/host/dsh-home.ts',
+      // task-fsm's copy was never listed, so nothing ever fanned out to it
+      // (orphan found by the sync-shared-orphan-probe-1128 sweep).
+      'packages/dsh-task-fsm/src/dsh-home.ts',
     ],
   },
   {
@@ -164,6 +176,9 @@ const MANIFEST = [
       'packages/dsh-sysmon/src/mount-once.ts',
       'packages/dsh-auto-route/src/mount-once.ts',
       'packages/dsh-session-revive/src/mount-once.ts',
+      // Never listed until the sync-shared-orphan-probe-1128 sweep: task-fsm's
+      // generated copy sat outside the fan-out.
+      'packages/dsh-task-fsm/src/mount-once.ts',
       'packages/dsh-mimo-relogin/src/mount-once.ts',
       'packages/dsh-update/src/mount-once.ts',
     ],
@@ -204,14 +219,49 @@ const MANIFEST = [
   {
     file: 'pair-access.ts',
     source: 'shared/host/pair-access.ts',
-    targets: ['packages/dsh-git-graph/src/host/pair-access.ts', 'packages/dsh-pet/src/pair-access.ts', 'packages/dsh-skill-explorer/src/pair-access.ts', 'packages/dsh-sysmon/src/host/pair-access.ts'],
-    targets: ['packages/dsh-git-graph/src/host/pair-access.ts', 'packages/dsh-skill-explorer/src/pair-access.ts', 'packages/dsh-usage/src/host/pair-access.ts'],
+    // One targets list: this entry once carried two `targets:` keys and an
+    // object literal keeps only the later one, so the dsh-sysmon copy named on
+    // the first line was never fanned out (orphan, sync-shared-orphan-probe-1128).
+    // The dsh-pet row from that first line is dropped: pet ships as a satellite
+    // and packages/dsh-pet does not exist in this repo.
+    targets: [
+      'packages/dsh-git-graph/src/host/pair-access.ts',
+      'packages/dsh-skill-explorer/src/pair-access.ts',
+      'packages/dsh-sysmon/src/host/pair-access.ts',
+      'packages/dsh-usage/src/host/pair-access.ts',
+    ],
   },
   {
     file: 'loopback.ts',
     source: 'shared/host/loopback.ts',
-    targets: ['packages/dsh-ssh/src/loopback.ts', 'packages/dsh-git-graph/src/host/loopback.ts', 'packages/dsh-remote-web-ui/src/loopback.ts', 'packages/dsh-task-board/src/loopback.ts', 'packages/dsh-skill-explorer/src/loopback.ts', 'packages/dsh-pet/src/loopback.ts', 'packages/dsh-plugin-manager/src/host/loopback.ts', 'packages/dsh-tool-describe-image/src/loopback.ts', 'packages/dsh-doctor/src/host/loopback.ts', 'packages/dsh-market/src/loopback.ts', 'packages/dsh-usage/src/host/loopback.ts', 'packages/dsh-session-archive/src/host/loopback.ts', 'packages/dsh-session-dispatch/src/host/loopback.ts', 'packages/dsh-auto-route/src/host/loopback.ts', 'packages/dsh-session-revive/src/host/loopback.ts', 'packages/dsh-mimo-relogin/src/host/loopback.ts', 'packages/dsh-sysmon/src/host/loopback.ts'],
-    targets: ['packages/dsh-ssh/src/loopback.ts', 'packages/dsh-git-graph/src/host/loopback.ts', 'packages/dsh-remote-web-ui/src/loopback.ts', 'packages/dsh-task-board/src/loopback.ts', 'packages/dsh-task-board-github/src/loopback.ts', 'packages/dsh-skill-explorer/src/loopback.ts', 'packages/dsh-plugin-manager/src/host/loopback.ts', 'packages/dsh-market/src/loopback.ts', 'packages/dsh-usage/src/host/loopback.ts', 'packages/dsh-session-archive/src/host/loopback.ts', 'packages/dsh-update/src/loopback.ts', 'packages/dsh-browser-view/src/host/loopback.ts'],
+    // One targets list: two `targets:` keys once sat here, the object literal
+    // kept only the later one, and every copy named only on the first line
+    // (dsh-session-dispatch, dsh-auto-route, dsh-session-revive, dsh-mimo-relogin,
+    // dsh-sysmon) was an orphan nobody fanned out (sync-shared-orphan-probe-1128).
+    // The dsh-pet / dsh-tool-describe-image / dsh-doctor rows from that first
+    // line are dropped: those packages are absent here (pet ships as a satellite).
+    targets: [
+      'packages/dsh-ssh/src/loopback.ts',
+      'packages/dsh-git-graph/src/host/loopback.ts',
+      'packages/dsh-remote-web-ui/src/loopback.ts',
+      'packages/dsh-task-board/src/loopback.ts',
+      'packages/dsh-task-board-github/src/loopback.ts',
+      'packages/dsh-skill-explorer/src/loopback.ts',
+      'packages/dsh-plugin-manager/src/host/loopback.ts',
+      'packages/dsh-market/src/loopback.ts',
+      'packages/dsh-usage/src/host/loopback.ts',
+      'packages/dsh-session-archive/src/host/loopback.ts',
+      'packages/dsh-session-dispatch/src/host/loopback.ts',
+      'packages/dsh-auto-route/src/host/loopback.ts',
+      'packages/dsh-session-revive/src/host/loopback.ts',
+      'packages/dsh-mimo-relogin/src/host/loopback.ts',
+      'packages/dsh-sysmon/src/host/loopback.ts',
+      // task-fsm's copy was never listed on either line (same gap as its
+      // dsh-home.ts / mount-once.ts rows above).
+      'packages/dsh-task-fsm/src/host/loopback.ts',
+      'packages/dsh-update/src/loopback.ts',
+      'packages/dsh-browser-view/src/host/loopback.ts',
+    ],
   },
   {
     file: 'http.ts',
@@ -368,10 +418,84 @@ export async function checkSync(root = REPO_ROOT) {
   return drift
 }
 
+/** Directory names that never hold a fan-out copy, skipped by the orphan walk. */
+const ORPHAN_SKIP_DIRS = new Set(['.git', 'node_modules', '.wt', '.tmp', 'coverage', 'dist', 'lib', 'satellites', '.market-inputs'])
+
+/** The line a rendered copy always starts with (see headerFor); CSS uses the block form. */
+const GENERATED_HEADER = /^(?:\/\/|\/\*) Generated by scripts\/sync-shared\.mjs\b/
+
+/**
+ * Files under `dir` outside every skipped directory. Only the listing is
+ * serial; the header reads below run in batches.
+ */
+async function walkFiles(dir, out = []) {
+  const entries = await readdir(dir, { withFileTypes: true })
+  entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (ORPHAN_SKIP_DIRS.has(entry.name)) continue
+      await walkFiles(join(dir, entry.name), out)
+    } else if (entry.isFile()) {
+      out.push(join(dir, entry.name))
+    }
+  }
+  return out
+}
+
+/**
+ * A file's first line, from its first 512 bytes. The first line is the whole
+ * definition of "carries the generated header": renderCopy prepends it and
+ * stripHeader expects it there, so a header anywhere deeper is not a copy.
+ */
+async function firstLine(file) {
+  const handle = await open(file, 'r')
+  try {
+    const buffer = Buffer.alloc(512)
+    const { bytesRead } = await handle.read(buffer, 0, 512, 0)
+    return buffer.toString('utf8', 0, bytesRead).split('\n', 1)[0]
+  } finally {
+    await handle.close()
+  }
+}
+
+/**
+ * Orphan generated copies: files that carry the generated header while no
+ * manifest entry fans out to them. checkSync only ever looked at manifest
+ * targets, so an unlisted copy drifted in silence (the shape reported by
+ * session-charset-guard-1127). Manifest sources are exempt: they are the
+ * origins, and shared/client/settings/settings-entry-form.ts carries a
+ * self-referential header of its own.
+ * Returns [{ file, line }] with repo-relative forward-slash paths, sorted;
+ * line is 1 because the header sits on line 1 by construction.
+ */
+export async function checkOrphans(root = REPO_ROOT) {
+  const normalizedRoot = resolve(root)
+  const targets = new Set(copyEntries(normalizedRoot).map(entry => relative(normalizedRoot, entry.target).split('\\').join('/')))
+  const sources = new Set(MANIFEST.map(entry => entry.source))
+  const files = await walkFiles(normalizedRoot)
+  const orphans = []
+  // 64-wide batches: serialized Windows opens over the whole tree cost ~10s,
+  // which is too slow for a gate people are meant to run.
+  for (let i = 0; i < files.length; i += 64) {
+    const batch = files.slice(i, i + 64)
+    const firstLines = await Promise.all(batch.map(firstLine))
+    for (let f = 0; f < batch.length; f++) {
+      if (!GENERATED_HEADER.test(firstLines[f])) continue
+      const rel = relative(normalizedRoot, batch[f]).split('\\').join('/')
+      if (targets.has(rel) || sources.has(rel)) continue
+      orphans.push({ file: rel, line: 1 })
+    }
+  }
+  return orphans
+}
+
 async function main() {
   const mode = process.argv[2]
   if (mode === '--check') {
-    const drift = await checkSync()
+    // SYNC_SHARED_ROOT redirects both checks at a fixture tree (hermetic probe
+    // tests); unset, everything below runs against this repository as before.
+    const root = process.env.SYNC_SHARED_ROOT !== undefined ? resolve(process.env.SYNC_SHARED_ROOT) : REPO_ROOT
+    const drift = await checkSync(root)
     if (drift.length > 0) {
       for (const entry of drift) {
         console.error(`[sync-shared] drift: ${entry.target} (${entry.reason})`)
@@ -379,7 +503,16 @@ async function main() {
       console.error(`[sync-shared] ${drift.length} consumer copy(ies) out of sync; run "node scripts/sync-shared.mjs"`)
       process.exit(1)
     }
+    const orphans = await checkOrphans(root)
+    if (orphans.length > 0) {
+      for (const entry of orphans) {
+        console.error(`[sync-shared] orphan: ${entry.file}:${entry.line} carries the generated header but no manifest entry fans out to it`)
+      }
+      console.error(`[sync-shared] ${orphans.length} orphan generated copy(ies); add them to the MANIFEST and run "node scripts/sync-shared.mjs"`)
+      process.exit(1)
+    }
     console.log('[sync-shared] all consumer copies in sync')
+    console.log('[sync-shared] no orphan generated copies')
     return
   }
   if (mode !== undefined) {
