@@ -33,12 +33,15 @@ interface RequestOptions {
   host?: string
   cookie?: string
   body?: string
+  /** Raw bytes for charset tests (a non-UTF-8 body cannot be a string). */
+  rawBody?: Buffer
   on?: (event: string, handler: () => void) => void
 }
 
 /** One fake IncomingMessage: loopback socket + Host by default. */
 function fakeRequest(url: string, options: RequestOptions = {}): Record<string, unknown> {
   const body = options.body
+  const rawBody = options.rawBody
   const req: Record<string, unknown> = {
     method: options.method ?? 'POST',
     url,
@@ -50,7 +53,11 @@ function fakeRequest(url: string, options: RequestOptions = {}): Record<string, 
     socket: { remoteAddress: options.remoteAddress ?? '127.0.0.1' },
     on: options.on ?? vi.fn(),
   }
-  if (body !== undefined) {
+  if (rawBody !== undefined) {
+    req[Symbol.asyncIterator] = async function* iterate() {
+      yield rawBody
+    }
+  } else if (body !== undefined) {
     req[Symbol.asyncIterator] = async function* iterate() {
       yield Buffer.from(body)
     }
@@ -629,6 +636,39 @@ describe('json body failure contract', () => {
     // Then: the same envelope answers and the connection stays up
     expect(response.status).toBe(200)
     expect(JSON.parse(response.body)).toEqual({ ok: false, error: { code: 'internal', message: 'malformed request' } })
+    expect(destroy).not.toHaveBeenCalled()
+  })
+
+  it('user posting a non-UTF-8 body gets 400 and E_CHARSET_INVALID (charset-code-surface-1128)', async () => {
+    // Given: a /git status request whose bytes are GBK, not UTF-8
+    const destroy = vi.fn()
+    const gbk = Buffer.concat([Buffer.from('{"path":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+    const request = { ...fakeRequest('/git/status', { rawBody: gbk }), destroy }
+
+    // When: the route handler reads the body
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the charset envelope answers with its own code, not the generic envelope
+    expect(response.status).toBe(400)
+    const parsed = JSON.parse(response.body) as { ok: boolean; code?: string; error?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.code).toBe('E_CHARSET_INVALID')
+    expect(parsed.error).toContain('E_CHARSET_INVALID')
+    expect(destroy).not.toHaveBeenCalled()
+  })
+
+  it('user posting a UTF-8 Chinese body keeps the existing success path', async () => {
+    // Given: a /git status request with valid UTF-8 Chinese content
+    const destroy = vi.fn()
+    const request = { ...fakeRequest('/git/status', { body: '{"path":"中文目录"}' }), destroy }
+
+    // When: the route handler reads the body
+    const response = fakeResponse()
+    await prefixHandler().handler(request, response.res)
+
+    // Then: the reader accepts it and the route answers with its own verdict
+    expect(response.body).not.toContain('E_CHARSET_INVALID')
     expect(destroy).not.toHaveBeenCalled()
   })
 

@@ -89,6 +89,34 @@ describe('market install body contract', () => {
     expect(await res.json()).toEqual({ ok: false, error: 'invalid-id' })
   })
 
+  // charset-code-surface-1128: non-UTF-8 bytes carry their own code instead
+  // of collapsing into the generic invalid-id 400.
+  it('answers a non-UTF-8 body with 400 and E_CHARSET_INVALID', async () => {
+    const bad = Buffer.concat([Buffer.from('{"id":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+    const res = await fetch(url('/api/market/install-skin'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: bad,
+    })
+    expect(res.status).toBe(400)
+    const parsed = await res.json() as { ok: boolean; code?: string; error?: string }
+    expect(parsed.ok).toBe(false)
+    expect(parsed.code).toBe('E_CHARSET_INVALID')
+    expect(parsed.error).toContain('E_CHARSET_INVALID')
+  })
+
+  it('keeps a UTF-8 Chinese body on the success path (no charset envelope)', async () => {
+    const res = await fetch(url('/api/market/install-skin'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 'whale-song', note: '中文备注' }),
+    })
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    expect(text).toContain('"ok":true')
+    expect(text).not.toContain('E_CHARSET_INVALID')
+  })
+
   it('keeps the empty-body {} pipeline on the id validator', async () => {
     const res = await fetch(url('/api/market/install-skin'), { method: 'POST' })
     expect(res.status).toBe(400)

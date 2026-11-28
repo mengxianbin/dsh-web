@@ -28,11 +28,13 @@ interface FakeReqOptions {
   host?: string
   method?: string
   body?: unknown
+  /** Raw bytes for charset tests (a non-UTF-8 body cannot be a string). */
+  rawBody?: Buffer
 }
 
 function fakeReq(options: FakeReqOptions = {}): IncomingMessage {
-  const text = options.body === undefined ? '' : JSON.stringify(options.body)
-  const stream = Readable.from([Buffer.from(text)]) as unknown as IncomingMessage
+  const bytes = options.rawBody ?? Buffer.from(options.body === undefined ? '' : JSON.stringify(options.body))
+  const stream = Readable.from([bytes]) as unknown as IncomingMessage
   stream.socket = { remoteAddress: options.remote ?? '127.0.0.1' } as never
   stream.headers = { host: options.host ?? '127.0.0.1:3080', 'content-type': 'application/json' }
   stream.method = options.method ?? 'POST'
@@ -389,6 +391,36 @@ describe('mimo-relogin routes', () => {
     expect(res.status).toBe(200)
     expect(store.get(ACCOUNT_REF)).toBe(STORED_ACCOUNT)
   }, 20_000)
+
+  // charset-code-surface-1128: a non-UTF-8 body carries its own code on both
+  // body-reading routes instead of collapsing into the generic validation 400.
+  it('answers a non-UTF-8 body with 400 and E_CHARSET_INVALID on watch and paste', async () => {
+    const { seam } = fakeCredentials()
+    const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, { fetchImpl: renewFetch(), alive: async () => false })
+    const gbk = Buffer.concat([Buffer.from('{"slot":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+    for (const path of ['/api/mimo-relogin/watch', '/api/mimo-relogin/paste']) {
+      const res = fakeRes()
+      await routeOf(routes, path).handler(fakeReq({ rawBody: gbk }), res.res)
+      expect(res.status, path).toBe(400)
+      const parsed = JSON.parse(res.body ?? '{}') as { ok: boolean; code?: string; error?: string }
+      expect(parsed.ok, path).toBe(false)
+      expect(parsed.code, path).toBe('E_CHARSET_INVALID')
+      expect(parsed.error, path).toContain('E_CHARSET_INVALID')
+    }
+  })
+
+  it('keeps a valid UTF-8 Chinese body on the paste path (no charset envelope)', async () => {
+    const { seam, store } = fakeCredentials()
+    const routes = makeReloginRoutes(ctxWith(seam), OPTIONS, { fetchImpl: renewFetch(), alive: async () => false })
+    const res = fakeRes()
+    await routeOf(routes, '/api/mimo-relogin/paste').handler(
+      fakeReq({ body: { slot: 'account', cookie: '中文Cookie=值' } }),
+      res.res,
+    )
+    expect(res.status).toBe(200)
+    expect(res.body ?? '').not.toContain('E_CHARSET_INVALID')
+    expect(store.get(ACCOUNT_REF)).toBe('中文Cookie=值')
+  })
 
   it('open reports the window mode from the opener seam', async () => {
     const { seam } = fakeCredentials()

@@ -18,7 +18,7 @@ import {
 } from '../core/types.ts'
 import { PollGuard } from './poll-guard.ts'
 import { isGitAllowed } from './access.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import type { GitService } from './git-service.ts'
 import { worktreesHome } from './worktree-home.ts'
 
@@ -215,7 +215,15 @@ export function registerGitRoutes(ctx: Context, service: GitService, config: () 
       return
     }
     const pathname = new URL(req.url ?? '/', 'http://x').pathname
-    const payload = await readJsonBody(req, { maxBytes: 1024 * 1024 })
+    let payload: unknown | null
+    try {
+      payload = await readJsonBody(req, { maxBytes: 1024 * 1024, throwOnCharset: true })
+    } catch (error) {
+      // Charset failures answer with E_CHARSET_INVALID instead of the
+      // envelope's generic BAD_REQUEST (charset-code-surface-1128).
+      writeBodyReadError(res, error)
+      return
+    }
     // The feature config is pathless: the browser reads it before any
     // workspace resolution (the auto-isolation wrapper consults it on every
     // New Session action, so a settings toggle applies without a reload).

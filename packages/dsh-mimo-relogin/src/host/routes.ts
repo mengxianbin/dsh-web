@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { CredentialRef } from '@deepseek-ai/dsh-credentials'
 import { isLoopbackRequest } from './loopback.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import { cdpAlive, readJars, type BrowserJars } from './cdp.ts'
 import { performRenew, ACCOUNT_REF, PLATFORM_REF, credentialsOf, type CredentialsSeam } from './renew-core.ts'
 import { ensurePlatformWindow, type OpenOutcome } from './chrome.ts'
@@ -265,7 +265,13 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
         writeJson(res, 503, { ok: false, error: 'credentials service unavailable' })
         return
       }
-      const body = await readJsonBody(req, { objectOnly: true }) as { timeoutMs?: unknown } | null
+      let body: { timeoutMs?: unknown } | null
+      try {
+        body = await readJsonBody(req, { objectOnly: true, throwOnCharset: true }) as { timeoutMs?: unknown } | null
+      } catch (error) {
+        writeBodyReadError(res, error)
+        return
+      }
       const requested = typeof body?.timeoutMs === 'number' ? body.timeoutMs : WATCH_DEFAULT_TIMEOUT_MS
       const budgetMs = Math.min(WATCH_MAX_TIMEOUT_MS, Math.max(WATCH_MIN_TIMEOUT_MS, requested))
       if (watching) {
@@ -363,7 +369,13 @@ export function makeReloginRoutes(ctx: Context, options: ReloginOptions, deps: R
         writeJson(res, 503, { ok: false, error: 'credentials service unavailable' })
         return
       }
-      const body = await readJsonBody(req, { objectOnly: true }) as { slot?: unknown, cookie?: unknown } | null
+      let body: { slot?: unknown, cookie?: unknown } | null
+      try {
+        body = await readJsonBody(req, { objectOnly: true, throwOnCharset: true }) as { slot?: unknown, cookie?: unknown } | null
+      } catch (error) {
+        writeBodyReadError(res, error)
+        return
+      }
       if (body === null || (body.slot !== 'platform' && body.slot !== 'account') || typeof body.cookie !== 'string'
         || body.cookie.length === 0 || body.cookie.length > PASTE_MAX_CHARS || /[\r\n]/.test(body.cookie)) {
         writeJson(res, 400, { ok: false, error: '请求无效：需要 slot=platform|account 与单行非空 Cookie（≤16KB）' })

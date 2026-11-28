@@ -22,7 +22,7 @@ import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { isSkillExplorerAllowed } from './access.ts'
 import { buildPayload, collectSkills, findProjectRoot, isSkillName, overwriteSkillFile, projectSkillRoot, trashSkillFile, userSkillRoot, writeSkillFile, type CollectOptions, type SkillEntry } from './collect.ts'
 import { parseFrontmatter, setFrontmatterField, stripFrontmatter } from './frontmatter.ts'
-import { readJsonBody, writeJson } from './http.ts'
+import { readJsonBody, writeBodyReadError, writeJson } from './http.ts'
 import { IMPORT_LIMITS, ImportRequestError, importSkills, type ImportSource } from './import.ts'
 import { providerSkillIdentity, readProviderToggles, setProviderSkillEnabled, type ProviderSkillIdentity } from './provider-toggles.ts'
 
@@ -293,7 +293,16 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+            // (charset-code-surface-1128); caught here so the handler's outer
+            // catch does not promote it to 500.
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -328,7 +337,13 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 8 * 1024, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: 8 * 1024, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -376,7 +391,16 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+            // (charset-code-surface-1128); caught here so the handler's outer
+            // catch does not promote it to 500.
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -428,7 +452,13 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: IMPORT_BODY_MAX_BYTES, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: IMPORT_BODY_MAX_BYTES, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: `invalid JSON body (or larger than ${IMPORT_BODY_MAX_BYTES} bytes)` })
             return
@@ -476,7 +506,16 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+            // (charset-code-surface-1128); caught here so the handler's outer
+            // catch does not promote it to 500.
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return
@@ -524,7 +563,16 @@ export function makeRoutes(ctx: Context, deps: SkillRoutesDeps): WebRoute[] {
       handler: async (req: IncomingMessage, res: ServerResponse) => {
         if (!guard(req, res, 'POST')) return
         try {
-          const body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true })
+          let body: unknown
+          try {
+            body = await readJsonBody(req, { maxBytes: 128 * 1024, objectOnly: true, throwOnCharset: true })
+          } catch (error) {
+            // Charset bad sample → shared envelope 400 + E_CHARSET_INVALID
+            // (charset-code-surface-1128); caught here so the handler's outer
+            // catch does not promote it to 500.
+            writeBodyReadError(res, error)
+            return
+          }
           if (body === null) {
             writeJson(res, 400, { error: 'invalid JSON body' })
             return

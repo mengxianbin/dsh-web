@@ -1204,13 +1204,13 @@ describe('/api/pair body failure contract (shared readJsonBody)', () => {
   async function rawPost(
     port: number,
     path: string,
-    payload: string | undefined,
+    payload: string | Buffer | undefined,
   ): Promise<{ status: number | null; body: string; error: string | null }> {
     return await new Promise((resolve) => {
       const headers: Record<string, string> = { host: '127.0.0.1:' + String(port), connection: 'close' }
       if (payload !== undefined) {
         headers['content-type'] = 'application/json'
-        headers['content-length'] = String(Buffer.byteLength(payload))
+        headers['content-length'] = String(Buffer.isBuffer(payload) ? payload.length : Buffer.byteLength(payload))
       }
       const req = httpRequest({ host: '127.0.0.1', port, path, method: 'POST', headers }, (response) => {
         const chunks: Buffer[] = []
@@ -1257,6 +1257,49 @@ describe('/api/pair body failure contract (shared readJsonBody)', () => {
       const outcome = await rawPost(port, '/api/pair/issue', JSON.stringify({ address: 'x'.repeat(5000) }))
       expect(outcome.status).toBeNull()
       expect(outcome.error).toMatch(/socket hang up|ECONNRESET/)
+    } finally {
+      await close()
+    }
+  })
+
+  // charset-code-surface-1128: a non-UTF-8 body carries its own code on every
+  // pair route instead of collapsing into bad-payload / the lenient null path.
+  it('answers a non-UTF-8 body with 400 and E_CHARSET_INVALID on each pair route', async () => {
+    const service = makeService()
+    const { port, close } = await serve(makeRoutes({ service }))
+    try {
+      const gbk = Buffer.concat([Buffer.from('{"address":"'), Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), Buffer.from('"}')])
+      for (const path of [
+        '/api/pair/issue',
+        '/api/pair/accept',
+        '/api/pair/stop',
+        '/api/pair/revoke',
+        '/api/pair/rename',
+        '/api/pair/merge',
+        '/api/pair/heartbeat',
+      ]) {
+        const outcome = await rawPost(port, path, gbk)
+        expect(outcome.status, path).toBe(400)
+        const parsed = JSON.parse(outcome.body) as { ok: boolean; code?: string; error?: string }
+        expect(parsed.ok, path).toBe(false)
+        expect(parsed.code, path).toBe('E_CHARSET_INVALID')
+        expect(parsed.error, path).toContain('E_CHARSET_INVALID')
+      }
+    } finally {
+      await close()
+    }
+  })
+
+  it('keeps a UTF-8 Chinese body on the existing lenient path (no charset envelope)', async () => {
+    const service = makeService()
+    const { port, close } = await serve(makeRoutes({ service }))
+    try {
+      // A Chinese key the schema strips: the body must parse as UTF-8 and
+      // reach the route's own path, never the charset envelope.
+      const issue = await rawPost(port, '/api/pair/issue', JSON.stringify({ note: '中文地址' }))
+      expect(issue.status).toBe(200)
+      expect(issue.body).toContain('"token":"tok-1"')
+      expect(issue.body).not.toContain('E_CHARSET_INVALID')
     } finally {
       await close()
     }

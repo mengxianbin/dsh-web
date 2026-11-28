@@ -10,7 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
-import { readJsonBody, withIdentityEncoding, writeJson } from './http.ts'
+import { readJsonBody, withIdentityEncoding, writeBodyReadError, writeJson } from './http.ts'
 import { isLoopbackRequest } from './loopback.ts'
 import { detectOfficialChannels, findDshBinary, spawnDsh, unsafeSpecReason, type CliGateway } from './gateway.ts'
 import { dshRequirementOf, parseDshVersion } from '../core/version.ts'
@@ -289,7 +289,14 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   }
 
   const installHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = (await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true }) ?? {}) as Record<string, unknown>
+    let rawBody: unknown | null
+    try {
+      rawBody = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      writeBodyReadError(res, error)
+      return
+    }
+    const body = (rawBody ?? {}) as Record<string, unknown>
     const spec = body['spec']
     if (typeof spec !== 'string' || spec.trim() === '') {
       writeJson(res, 400, { error: 'plugin-manager: install needs a spec' })
@@ -329,7 +336,14 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   }
 
   const updateHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = (await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true }) ?? {}) as Record<string, unknown>
+    let rawBody: unknown | null
+    try {
+      rawBody = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      writeBodyReadError(res, error)
+      return
+    }
+    const body = (rawBody ?? {}) as Record<string, unknown>
     const id = body['id']
     if (typeof id !== 'string' || id.trim() === '') {
       writeJson(res, 400, { error: 'plugin-manager: update needs an id' })
@@ -407,7 +421,14 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   }
 
   const removeHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = (await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true }) ?? {}) as Record<string, unknown>
+    let rawBody: unknown | null
+    try {
+      rawBody = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      writeBodyReadError(res, error)
+      return
+    }
+    const body = (rawBody ?? {}) as Record<string, unknown>
     const id = body['id']
     if (typeof id !== 'string' || id.trim() === '') {
       writeJson(res, 400, { error: 'plugin-manager: remove needs an id' })
@@ -441,7 +462,14 @@ export function makeGatewayRoutes(deps: GatewayRouteDeps): WebRoute[] {
   }
 
   const setEnabledHandler = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    const body = (await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true }) ?? {}) as Record<string, unknown>
+    let rawBody: unknown | null
+    try {
+      rawBody = await readJsonBody(req, { maxBytes: 64 * 1024, objectOnly: true, throwOnCharset: true })
+    } catch (error) {
+      writeBodyReadError(res, error)
+      return
+    }
+    const body = (rawBody ?? {}) as Record<string, unknown>
     const id = body['id']
     const enabled = body['enabled']
     if (typeof id !== 'string' || id.trim() === '' || typeof enabled !== 'boolean') {
