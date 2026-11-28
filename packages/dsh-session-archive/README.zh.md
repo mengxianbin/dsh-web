@@ -67,7 +67,7 @@ dsh plugin --profile web add link:/path/to/dsh-web/packages/dsh-session-archive
 
 ## 归档收口闸（seal gate）
 
-`POST /api/dsh-session-archive/archive` 归档前逐 id 跑收口判定：解码转录（zstd 多帧）读最后一条 save 哨兵，得六值分组——`DONE` / `N_A` / `NEUTRAL` / `LEGACY` 照常归档；`sentinel-stale`（此前 save 已完成、其后续聊过）降级放行并记 `seal: "stale"`；真红 `UNSEALED` 与 `UNKNOWN` 逐 id 拒绝，返回 `reason: "seal-required"` 与该 id 的 `{verdict, detail}` 分组详情，批内不连坐。强制归档必须同一请求携带 `force: true` **与非空** `reason`（缺失即整请求 400）；强制放行的条目以 `source: "override"` 记入原因与收口判定。分组实现全插件仅此一份，同时以 `POST /api/dsh-session-archive/seal-check {ids}` 供原生归档弹窗读取；`POST /api/dsh-session-archive/archive-override {ids, mode: "force" | "note", reason?, seal?}` 为原生通道台账回写（force 原因空值归一 `override:no-reason`，note 固定 `seal: "stale"`），两种回写都不会重置已有的 `archivedAt`，保留期倒计时不会被回写刷新。
+`POST /api/dsh-session-archive/archive` 归档前逐 id 跑收口判定：解码转录（zstd 多帧）读最后一条 save 哨兵，得六值分组——`DONE` / `N_A` / `NEUTRAL` / `LEGACY` 照常归档；`sentinel-stale`（此前 save 已完成、其后续聊过）降级放行并记 `seal: "stale"`；真红 `UNSEALED` 与 `UNKNOWN` 逐 id 拒绝，返回 `reason: "seal-required"` 与该 id 的 `{verdict, detail}` 分组详情，批内不连坐。强制归档必须同一请求携带 `force: true` **与非空** `reason`（缺失即整请求 400）；强制放行的条目以 `source: "override"` 记入原因与收口判定。分组实现全插件仅此一份，同时以 `POST /api/dsh-session-archive/seal-check {ids}` 供原生归档弹窗读取；`POST /api/dsh-session-archive/archive-override {ids, mode: "force" | "note", reason?, seal?}` 为原生通道台账回写（force 原因空值/缺失即 400，与 `POST /archive` 同判据同文案；note 固定 `seal: "stale"`），两种回写都不会重置已有的 `archivedAt`，保留期倒计时不会被回写刷新。
 
 - **降级注记**：不认识 `override` 源的旧版插件读取（并随后改写）新台账时会丢弃 `override` 条目——该会话归档时间变回"未知"、不启动保留期倒计时。方向安全：降级至多丢账，绝不会提前安排物理删除。
 

@@ -1,7 +1,8 @@
 // @vitest-environment node
 /**
  * `POST /archive-override` (contract C4) — the native channel's ledger
- * write-back: force ends in `source: "override"` with a normalized reason and
+ * write-back: force ends in `source: "override"` with the stated reason (a
+ * blank/missing reason is refused with 400, force-reason-required-1128) and
  * a seal judgement, note pins `seal: "stale"`, neither resets an existing
  * `archivedAt` (C3 idempotency), and either order of backfill and write-back
  * leaves exactly one entry (C5). Inventory rows surface reason/seal (C3).
@@ -96,17 +97,30 @@ describe('POST /archive-override — mode force (contract C4)', () => {
       { id: 'session-red', status: 'ok', archivedAt: expect.any(Number), source: 'override', reason: '真红弹窗确认：板行[x] 收口证据', seal: 'UNSEALED:sentinel-pending' },
     ])
     expect(response.body.results[0].archivedAt).toBeGreaterThan(0)
+    // The ledger itself holds the trimmed original words (判据 2).
+    expect(service.ledgerSnapshot().entries['session-red']?.reason).toBe('真红弹窗确认：板行[x] 收口证据')
   })
 
-  it('normalizes a blank or missing reason to override:no-reason at the write layer', async () => {
+  it('refuses a blank or missing reason on force with 400 (force-reason-required-1128)', async () => {
     const host = overrideHost()
     const service = await settledService(host)
     const { server, url } = await startServer(makeArchiveRoutes(service))
     servers.push(server)
-    await post(url, '/api/dsh-session-archive/archive-override', { ids: ['session-native'], mode: 'force', reason: '   ' })
-    expect(service.ledgerSnapshot().entries['session-native']?.reason).toBe('override:no-reason')
-    await post(url, '/api/dsh-session-archive/archive-override', { ids: ['session-red'], mode: 'force' })
-    expect(service.ledgerSnapshot().entries['session-red']?.reason).toBe('override:no-reason')
+    const path = '/api/dsh-session-archive/archive-override'
+    const variants: unknown[] = [
+      { ids: ['session-native'], mode: 'force', reason: '' },
+      { ids: ['session-native'], mode: 'force', reason: '   ' },
+      { ids: ['session-native'], mode: 'force' },
+    ]
+    for (const body of variants) {
+      const response = await post(url, path, body)
+      expect(response.status).toBe(400)
+      expect(response.body.ok).toBe(false)
+      expect(response.body.error).toBe('force requires a non-empty reason')
+    }
+    // Fail-closed: none of the three variants wrote a ledger entry.
+    expect(service.ledgerSnapshot().entries['session-native']).toBeUndefined()
+    expect(service.ledgerSnapshot().entries['session-red']).toBeUndefined()
   })
 
   it('computes the seal judgement itself when the caller passes no seal (stale stays "stale")', async () => {

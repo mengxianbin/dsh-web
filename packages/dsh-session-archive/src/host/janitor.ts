@@ -1097,8 +1097,9 @@ export class ArchiveService {
 
   /**
    * Native-channel ledger write-back (contract C4). `mode: "force"` ends the
-   * entry in `source: "override"` with its reason (blank/missing normalizes to
-   * `override:no-reason` at the write layer) and the seal judgement; `mode:
+   * entry in `source: "override"` with its reason (blank/missing is rejected
+   * up front with the same wording as `POST /archive` — force must state why,
+   * force-reason-required-1128) and the seal judgement; `mode:
    * "note"` adds the pinned `seal: "stale"` marker of the stale pass-through
    * tier without touching an existing entry's source. Both modes are idempotent
    * write-ups: an existing `archivedAt` is never reset (a write-back must not
@@ -1125,6 +1126,11 @@ export class ArchiveService {
     options: { reason?: string; seal?: string } = {},
   ): Promise<{ results: readonly ArchiveOverrideRow[] }> {
     const now = Date.now()
+    // Front-loaded rejection (force-reason-required-1128): a force write-back
+    // must state why. The route answers 400 before this method is reached;
+    // here the guard fails closed for direct service callers, before any entry
+    // is mutated, instead of normalizing blank into `override:no-reason`.
+    const forcedReason = mode === 'force' ? normalizeOverrideReason(options.reason) : undefined
     const providedSeal = typeof options.seal === 'string' && options.seal.trim() !== '' ? options.seal.trim() : undefined
     // Only a seal-less force needs transcript dirs at all; nothing else in
     // this method reads the sessions tree.
@@ -1140,7 +1146,7 @@ export class ArchiveService {
         next = {
           archivedAt: existing?.archivedAt ?? now,
           source: 'override',
-          reason: normalizeOverrideReason(options.reason),
+          reason: forcedReason,
           seal: providedSeal ?? sealMarker(analyzeSeal(id, dirs?.get(id), { recheck: true })),
         }
       } else {
